@@ -1,0 +1,56 @@
+{
+  "_comment": [
+    "IAM trust policy for role: teamweave-github-actions-sam-deployer",
+    "Account: 239571291755",
+    "",
+    "This policy allows GitHub Actions jobs running from the rajatarun/DeviceWeave",
+    "repository to assume this role using OIDC — no long-lived access keys required.",
+    "",
+    "Prerequisites:",
+    "  The GitHub OIDC provider must exist in this AWS account:",
+    "    Provider URL : https://token.actions.githubusercontent.com",
+    "    Audience     : sts.amazonaws.com",
+    "",
+    "  Create it once per account (idempotent if it already exists):",
+    "    aws iam create-open-id-connect-provider \\",
+    "      --url https://token.actions.githubusercontent.com \\",
+    "      --client-id-list sts.amazonaws.com \\",
+    "      --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1",
+    "",
+    "Condition notes:",
+    "  token.actions.githubusercontent.com:aud",
+    "    Must equal 'sts.amazonaws.com'. This is the audience the configure-aws-credentials",
+    "    action requests; AWS STS will reject tokens with any other audience.",
+    "",
+    "  token.actions.githubusercontent.com:sub",
+    "    Format: repo:<owner>/<repo>:<qualifier>",
+    "    Using StringLike with a wildcard allows all branches, tags, and",
+    "    workflow_dispatch events from this repository.",
+    "    To restrict to main branch only, replace with:",
+    "      'repo:rajatarun/DeviceWeave:ref:refs/heads/main'",
+    "",
+    "Apply this policy:",
+    "  aws iam update-assume-role-policy \\",
+    "    --role-name teamweave-github-actions-sam-deployer \\",
+    "    --policy-document file://docs/oidc-trust-policy.json"
+  ],
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GitHubOIDCRoleAssumption",
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::239571291755:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:rajatarun/DeviceWeave:*"
+        }
+      }
+    }
+  ]
+}

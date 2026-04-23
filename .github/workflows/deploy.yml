@@ -1,0 +1,132 @@
+name: DeviceWeave — SAM Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Deployment stage"
+        required: true
+        default: prod
+        type: choice
+        options:
+          - prod
+          - staging
+          - dev
+
+# Prevent concurrent deploys to the same stage.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build & Deploy via AWS SAM
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # ----------------------------------------------------------------
+    # OIDC permissions — id-token:write lets the runner request a JWT
+    # from GitHub's OIDC provider, which AWS STS exchanges for temporary
+    # credentials via AssumeRoleWithWebIdentity.
+    # contents:read is required by actions/checkout.
+    # No other permissions are granted; the principle of least privilege
+    # is enforced at the IAM role level (see docs/oidc-trust-policy.json).
+    # ----------------------------------------------------------------
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      # Default stage for push-triggered runs; overridden by workflow_dispatch input.
+      STAGE: ${{ github.event.inputs.stage || 'prod' }}
+      STACK_NAME: deviceweave-${{ github.event.inputs.stage || 'prod' }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ASSUME_ROLE_ARN: arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer
+
+    steps:
+      # ----------------------------------------------------------------
+      # 1. Checkout
+      # ----------------------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # 2. Python — must match Lambda runtime declared in template.yaml
+      # ----------------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ----------------------------------------------------------------
+      # 3. Install AWS SAM CLI explicitly (do NOT assume pre-installed)
+      # ----------------------------------------------------------------
+      - name: Install AWS SAM CLI
+        run: |
+          pip install --upgrade pip
+          pip install aws-sam-cli==1.121.0
+
+      # Verify SAM is usable before spending AWS credits.
+      - name: Verify SAM CLI version
+        run: sam --version
+
+      # ----------------------------------------------------------------
+      # 4. Assume IAM role via GitHub OIDC (no long-lived keys required)
+      #
+      #    The action requests a GitHub-signed OIDC JWT, then calls
+      #    sts:AssumeRoleWithWebIdentity to exchange it for temporary
+      #    credentials scoped to ASSUME_ROLE_ARN.
+      #
+      #    The IAM role trust policy must allow this GitHub repo as a
+      #    federated principal — see docs/oidc-trust-policy.json.
+      # ----------------------------------------------------------------
+      - name: Assume deployer role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ASSUME_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-DeviceWeave-${{ github.run_id }}
+
+      # ----------------------------------------------------------------
+      # 5. Validate the SAM template before building
+      # ----------------------------------------------------------------
+      - name: Validate SAM template
+        run: sam validate --region "$AWS_REGION"
+
+      # ----------------------------------------------------------------
+      # 6. Build Lambda package (resolves requirements.txt, creates .aws-sam/)
+      # ----------------------------------------------------------------
+      - name: SAM build
+        run: |
+          sam build \
+            --use-container \
+            --parallel
+
+      # ----------------------------------------------------------------
+      # 7. sam deploy --resolve-s3 creates/reuses a managed artifact bucket.
+      # ----------------------------------------------------------------
+      - name: SAM deploy
+        run: |
+          sam deploy \
+            --stack-name "$STACK_NAME" \
+            --capabilities CAPABILITY_IAM \
+            --region "$AWS_REGION" \
+            --resolve-s3 \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+                StageName="$STAGE"
+
+      # ----------------------------------------------------------------
+      # 8. Print stack outputs for easy post-deploy verification
+      # ----------------------------------------------------------------
+      - name: Print stack outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs" \
+            --output table

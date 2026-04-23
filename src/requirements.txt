@@ -1,0 +1,3 @@
+# Runtime dependencies for DeviceWeave Lambda
+# python-kasa communicates with TP-Link Kasa devices over LAN only.
+python-kasa==0.7.7

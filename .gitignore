@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+*.egg-info/
+
+# SAM build artifacts
+.aws-sam/
+
+# Local env
+.env
+.env.*

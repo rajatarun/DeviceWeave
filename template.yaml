@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: DeviceWeave IoT Pay-Per-Request Execution System
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+        LEARNING_TABLE_NAME: !Ref LearningTable
+        LEARNING_CONFIDENCE_THRESHOLD: "0.85"
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - staging
+      - dev
+
+Resources:
+  # -------------------------------------------------------------------
+  # HTTP API (API Gateway v2)
+  # -------------------------------------------------------------------
+  DeviceWeaveApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+      CorsConfiguration:
+        AllowMethods:
+          - POST
+          - GET
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+        AllowOrigins:
+          - '*'
+
+  # -------------------------------------------------------------------
+  # Lambda Function
+  # -------------------------------------------------------------------
+  DeviceWeaveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "deviceweave-handler-${StageName}"
+      CodeUri: src/
+      Handler: app.handler
+      Description: >
+        DeviceWeave execution engine — intent parsing, scene resolution,
+        semantic device matching, Kasa execution, phrase learning.
+      Policies:
+        - CloudWatchLogsFullAccess
+        # SAM policy template: grants PutItem, GetItem, DeleteItem,
+        # Query, Scan, UpdateItem, BatchWriteItem on the learning table.
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LearningTable
+      Events:
+        # --- Command execution (single device or scene) ---
+        ExecuteCommand:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /execute
+            Method: POST
+        # --- Manual phrase learning ---
+        LearnPhrase:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /learn
+            Method: POST
+        # --- Read-only introspection endpoints ---
+        HealthCheck:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /health
+            Method: GET
+        ListDevices:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /devices
+            Method: GET
+        ListScenes:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /scenes
+            Method: GET
+
+  # -------------------------------------------------------------------
+  # CloudWatch Log Group (explicit — avoids orphaned groups on deletion)
+  # -------------------------------------------------------------------
+  DeviceWeaveFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/deviceweave-handler-${StageName}"
+      RetentionInDays: 14
+
+  # -------------------------------------------------------------------
+  # DynamoDB — Phrase Learning Store
+  #
+  # Schema:
+  #   PK: device_id  (String) — catalog device id, e.g. "office_light"
+  #   SK: phrase     (String) — normalised user command or manual phrase
+  #
+  # Attributes stored per item:
+  #   source              : "learned" | "manual"
+  #   confidence          : Decimal (stored as String to avoid type issues)
+  #   created_at          : ISO 8601 String
+  #   use_count           : Number
+  # -------------------------------------------------------------------
+  LearningTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-phrases-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: device_id
+          AttributeType: S
+        - AttributeName: phrase
+          AttributeType: S
+      KeySchema:
+        - AttributeName: device_id
+          KeyType: HASH
+        - AttributeName: phrase
+          KeyType: RANGE
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for the DeviceWeave API
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+    Export:
+      Name: !Sub "DeviceWeaveApiBaseUrl-${StageName}"
+
+  ExecuteEndpoint:
+    Description: POST /execute — submit a natural language device or scene command
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/execute"
+
+  LearnEndpoint:
+    Description: POST /learn — add a phrase binding to a device
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/learn"
+
+  DevicesEndpoint:
+    Description: GET /devices — list registered devices and capabilities
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/devices"
+
+  ScenesEndpoint:
+    Description: GET /scenes — list registered scenes
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/scenes"
+
+  LearningTableName:
+    Description: DynamoDB phrase learning table
+    Value: !Ref LearningTable
+    Export:
+      Name: !Sub "DeviceWeaveLearningTable-${StageName}"
+
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt DeviceWeaveFunction.Arn
+    Export:
+      Name: !Sub "DeviceWeaveFunctionArn-${StageName}"
