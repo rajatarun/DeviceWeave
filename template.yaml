@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: DeviceWeave IoT Pay-Per-Request Execution System
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - staging
+      - dev
+
+Resources:
+  # -------------------------------------------------------------------
+  # HTTP API (API Gateway v2)
+  # -------------------------------------------------------------------
+  DeviceWeaveApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+      CorsConfiguration:
+        AllowMethods:
+          - POST
+          - GET
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+        AllowOrigins:
+          - '*'
+
+  # -------------------------------------------------------------------
+  # Lambda Function
+  # -------------------------------------------------------------------
+  DeviceWeaveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "deviceweave-handler-${StageName}"
+      CodeUri: src/
+      Handler: app.handler
+      Description: DeviceWeave IoT command executor — intent parse, device resolve, Kasa control
+      Policies:
+        - CloudWatchLogsFullAccess
+      Events:
+        ExecuteCommand:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /execute
+            Method: POST
+        HealthCheck:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /health
+            Method: GET
+
+  # -------------------------------------------------------------------
+  # CloudWatch Log Group (explicit — avoids orphaned groups)
+  # -------------------------------------------------------------------
+  DeviceWeaveFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/deviceweave-handler-${StageName}"
+      RetentionInDays: 14
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for the DeviceWeave API
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+    Export:
+      Name: !Sub "DeviceWeaveApiBaseUrl-${StageName}"
+
+  ExecuteEndpoint:
+    Description: POST endpoint to execute device commands
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/execute"
+
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt DeviceWeaveFunction.Arn
+    Export:
+      Name: !Sub "DeviceWeaveFunctionArn-${StageName}"
+
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref DeviceWeaveFunction
