@@ -140,3 +140,40 @@ The deployment pipeline uses `sam deploy --resolve-s3`, which causes SAM to crea
 ## 17. IP addresses hardcoded in DEVICE_CATALOG
 
 Kasa device IPs are stored directly in `src/device_resolver.py`. The alternatives — environment variables, DynamoDB, SSM Parameter Store — all add complexity and latency without meaningful benefit at this scale. DHCP reservation should be used at the router level to keep device IPs stable. A future version could read IPs from SSM at cold-start if dynamic assignment becomes a requirement.
+
+---
+
+## 18. GitHub OIDC role assumption over long-lived access keys
+
+**Chosen**: `aws-actions/configure-aws-credentials` with `role-to-assume` + `permissions: id-token: write`
+**Rejected**: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` stored as GitHub Secrets
+
+Long-lived IAM access keys are a persistent credential that can be exfiltrated from GitHub Secrets, rotated inconsistently, or left active after an engineer leaves the team. OIDC eliminates the stored secret entirely: GitHub's OIDC provider issues a signed JWT scoped to the specific repository and workflow run; AWS STS exchanges it for temporary credentials (valid ≤ 1 hour) via `sts:AssumeRoleWithWebIdentity`. The credentials are never stored anywhere and expire automatically.
+
+**How the token exchange works:**
+
+```
+GitHub runner                GitHub OIDC           AWS STS
+     │                       Provider                 │
+     │──── request JWT ──────────►│                   │
+     │◄─── signed JWT ────────────│                   │
+     │                            │                   │
+     │──── AssumeRoleWithWebIdentity(JWT) ───────────►│
+     │◄─── temporary credentials (≤1h) ───────────────│
+```
+
+**Trust policy constraints:**
+
+The IAM role trust policy restricts assumption to tokens where:
+- `aud` = `sts.amazonaws.com` — the audience the `configure-aws-credentials` action always sets; rejects tokens from any other AWS action or third-party tool.
+- `sub` matches `repo:rajatarun/DeviceWeave:*` — tokens from other repositories cannot assume this role even if they reach the same AWS account.
+
+The `StringLike` wildcard on `sub` allows all branches and `workflow_dispatch` events. Restricting to `ref:refs/heads/main` would block the `workflow_dispatch` stage selector and manual re-deployments from feature branches — not appropriate for a staging/dev workflow.
+
+**`role-session-name` set to `GitHubActions-DeviceWeave-<run_id>`**
+
+This tags every `AssumeRoleWithWebIdentity` call with a unique, traceable identifier in CloudTrail, making it straightforward to correlate a specific deployment to the AWS API calls it made.
+
+**One GitHub Secret retained**: `AWS_REGION`. This is not sensitive but is kept as a Secret (rather than a hardcoded value or repository variable) to allow per-environment overrides without modifying the workflow file. If the account always deploys to one region this could be promoted to a repository variable.
+
+**IAM role ARN is hardcoded in the workflow env block**, not a secret. The role ARN contains the account ID (`239571291755`) which is not secret — it is visible in any CloudFormation stack output or AWS Console URL. Hardcoding it makes the trust relationship explicit and auditable directly in the workflow file.

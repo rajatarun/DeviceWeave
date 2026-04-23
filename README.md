@@ -180,15 +180,67 @@ DeviceWeave/
 - Python 3.11
 - Devices on the same LAN as the Lambda execution environment (or routed via VPC/VPN)
 
-### Required GitHub Secrets
+### AWS OIDC setup (one-time, per account)
+
+The CI/CD pipeline assumes an IAM role via GitHub OIDC — no long-lived access keys are stored in GitHub Secrets.
+
+**Step 1 — Create the GitHub OIDC provider in your AWS account** (skip if it already exists):
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+```
+
+**Step 2 — Apply the trust policy to the deployer role:**
+
+```bash
+aws iam update-assume-role-policy \
+  --role-name teamweave-github-actions-sam-deployer \
+  --policy-document file://docs/oidc-trust-policy.json
+```
+
+The trust policy is at `docs/oidc-trust-policy.json`. It grants `sts:AssumeRoleWithWebIdentity` to the GitHub OIDC provider, restricted to the `rajatarun/DeviceWeave` repository via the `sub` claim.
+
+**Step 3 — Attach the required permissions policy to the role:**
+
+The role `arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer` needs:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lambda:*",
+        "cloudformation:*",
+        "apigateway:*",
+        "logs:*",
+        "dynamodb:*",
+        "s3:*",
+        "iam:PassRole",
+        "iam:CreateRole",
+        "iam:AttachRolePolicy",
+        "iam:GetRole",
+        "iam:DeleteRole",
+        "iam:DetachRolePolicy",
+        "iam:TagRole"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+### Required GitHub Secret
 
 | Secret | Value |
 |--------|-------|
-| `AWS_ACCESS_KEY_ID` | IAM access key |
-| `AWS_SECRET_ACCESS_KEY` | IAM secret key |
 | `AWS_REGION` | e.g. `us-east-1` |
 
-The IAM principal needs: `lambda:*`, `cloudformation:*`, `apigateway:*`, `logs:*`, `dynamodb:*`, `s3:*`, `iam:PassRole`.
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are **not used** — credentials come from the OIDC role assumption.
 
 ### Manual deploy
 
