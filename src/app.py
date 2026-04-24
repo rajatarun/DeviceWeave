@@ -35,6 +35,7 @@ from device_resolver import (
 )
 from llm_resolver import llm_resolve
 from execution_planner import (
+    ExecutionStep,
     StepResult,
     execute_steps,
     plan_device_execution,
@@ -208,6 +209,40 @@ def _handle_scene(
     })
 
 
+def _execute_llm_devices(
+    steps: List[ExecutionStep],
+    original_command: str,
+    confidence: float,
+    reasoning: str,
+    cosine_score: float,
+) -> Dict[str, Any]:
+    """Execute multiple devices returned by the LLM resolver concurrently."""
+    try:
+        results: List[StepResult] = asyncio.run(execute_steps(steps))
+    except Exception as exc:
+        logger.exception("LLM multi-device execution error")
+        return _error(502, f"Device execution error: {exc}")
+
+    successes = [r for r in results if r.success]
+    failures = [r for r in results if not r.success]
+
+    for result in successes:
+        if is_configured() and confidence >= LEARNING_THRESHOLD:
+            save_learned_phrase(result.device_id, original_command, confidence)
+        graph_engine.record_event(result.device_id, result.action, original_command)
+
+    return _ok({
+        "type": "multi_device",
+        "resolution_tier": "llm",
+        "confidence": confidence,
+        "reasoning": reasoning,
+        "scores": {"cosine": cosine_score, "final": confidence},
+        "results": [_step_result_dict(r) for r in results],
+        "succeeded": len(successes),
+        "failed": len(failures),
+    })
+
+
 def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
     try:
         intent: Intent = parse_intent(normalized_command)
@@ -257,24 +292,47 @@ def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
     llm_result = llm_resolve(normalized_command, intent.action, _get_active_catalog())
 
     if llm_result and llm_result.get("confidence", 0) >= CONFIDENCE_THRESHOLD:
-        catalog = _get_active_catalog()
-        llm_device = next(
-            (d for d in catalog if d["id"] == llm_result.get("device_id")), None
-        )
-        if llm_device:
-            llm_action = llm_result["action"]
-            llm_conf = llm_result["confidence"]
-            _, _, llm_b_score = decision_engine.compute_score(
-                llm_conf, llm_device, llm_action, ctx
-            )
-            return _execute_device(
-                llm_device, llm_action,
-                llm_result.get("params") or {},
-                normalized_command, llm_conf,
-                tier="llm",
-                reasoning=llm_result.get("reasoning", ""),
-                cosine_score=cosine_score,
-                behavior_score=llm_b_score,
+        catalog_index = {d["id"]: d for d in _get_active_catalog()}
+        llm_conf = llm_result["confidence"]
+
+        steps: List[ExecutionStep] = []
+        for spec in llm_result.get("devices", []):
+            dev = catalog_index.get(spec.get("device_id"))
+            if dev is None:
+                continue
+            action = spec.get("action", "")
+            if action not in dev.get("capabilities", []):
+                logger.warning(
+                    "LLM suggested action %r not in capabilities for %s — skipping",
+                    action, dev["id"],
+                )
+                continue
+            steps.append(ExecutionStep(
+                device=dev,
+                action=action,
+                params=spec.get("params") or {},
+            ))
+
+        if steps:
+            # Single device — use the existing response format
+            if len(steps) == 1:
+                step = steps[0]
+                _, _, llm_b_score = decision_engine.compute_score(
+                    llm_conf, step.device, step.action, ctx
+                )
+                return _execute_device(
+                    step.device, step.action, step.params,
+                    normalized_command, llm_conf,
+                    tier="llm",
+                    reasoning=llm_result.get("reasoning", ""),
+                    cosine_score=cosine_score,
+                    behavior_score=llm_b_score,
+                )
+            # Multiple devices — execute concurrently like a scene
+            return _execute_llm_devices(
+                steps, normalized_command, llm_conf,
+                llm_result.get("reasoning", ""),
+                cosine_score,
             )
 
     # ------------------------------------------------------------------
