@@ -49,7 +49,7 @@ for _noisy in ("botocore", "boto3", "urllib3", "s3transfer"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-CONFIDENCE_THRESHOLD = 0.70
+CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.4"))
 
 
 # ---------------------------------------------------------------------------

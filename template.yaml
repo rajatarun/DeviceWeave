@@ -12,6 +12,7 @@ Globals:
         LOG_LEVEL: INFO
         LEARNING_TABLE_NAME: !Ref LearningTable
         LEARNING_CONFIDENCE_THRESHOLD: "0.85"
+        CONFIDENCE_THRESHOLD: "0.4"
         DEVICE_REGISTRY_TABLE: !Ref DeviceRegistryTable
 
 Parameters:
@@ -57,6 +58,8 @@ Resources:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
             TableName: !Ref LearningTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DeviceRegistryTable
       Events:
         ExecuteCommand:
           Type: HttpApi
