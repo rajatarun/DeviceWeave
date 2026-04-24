@@ -15,13 +15,16 @@ Cost profile: ~100–200 tokens per call at Haiku 4.5 rates (~$0.0002/call).
 
 import json
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import weather_client
 
 logger = logging.getLogger(__name__)
 
 _MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+_CENTRAL_TZ = ZoneInfo("America/Chicago")
 
 _SYSTEM_PROMPT = """\
 You are a home automation assistant. Given a user's natural-language command, \
@@ -42,6 +45,8 @@ Rules:
 should be activated together (e.g. hot+humid → fan + AC; movie night → \
 lights dim + TV on).  Only include devices where the action is genuinely \
 warranted — do not pad the list.
+- Treat "dark hours" as local evening/night based on the supplied Central Time \
+timestamp rather than UTC.
 - If you cannot determine with reasonable confidence, return confidence 0 \
 and an empty devices list.
 
@@ -83,10 +88,15 @@ def llm_resolve(
     )
 
     hint_line = f"\nRule-based parser action hint: {action_hint}" if action_hint else ""
+    central_now = datetime.now(_CENTRAL_TZ)
+    central_time_line = (
+        f"\nCurrent local time (America/Chicago): "
+        f"{central_now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+    )
     weather_line = f"\n{weather_client.summary_line()}"
 
     user_msg = (
-        f'User command: "{query}"{hint_line}{weather_line}\n\n'
+        f'User command: "{query}"{hint_line}{central_time_line}{weather_line}\n\n'
         f"Available devices:\n{device_lines}\n\n"
         f"Return the JSON object."
     )
