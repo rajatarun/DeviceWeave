@@ -199,12 +199,13 @@ class DeviceRegistry:
             return set()
         try:
             import boto3
-            from boto3.dynamodb.conditions import Attr, Key
+            from boto3.dynamodb.conditions import Key
 
             resp = _table().query(
                 IndexName="provider-status-index",
-                KeyConditionExpression=Key("provider").eq(provider),
-                FilterExpression=Attr("status").eq("active"),
+                KeyConditionExpression=(
+                    Key("provider").eq(provider) & Key("status").eq("active")
+                ),
                 ProjectionExpression="device_id",
             )
             return {item["device_id"] for item in resp.get("Items", [])}
