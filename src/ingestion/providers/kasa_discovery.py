@@ -1,22 +1,16 @@
 """
-Kasa discovery provider — enumerates TP-Link Kasa devices via LAN broadcast.
+Kasa discovery provider — cloud-based device enumeration.
 
-Uses python-kasa's Discover.discover() which sends a UDP broadcast and
-collects responses.  Each responding device is probed with update() to
-fetch full capabilities and metadata.
+Uses the Kasa cloud REST API (wap.tplinkcloud.com) to list every device
+registered to the account.  Works from Lambda without LAN access — all
+traffic goes through Kasa's cloud over HTTPS.
 
-Network requirement: the Lambda (or host running this code) must be on the
-same LAN segment as the Kasa devices, or routable to their subnet.
-For AWS deployments this means placing the Lambda inside a VPC whose
-subnets have L2 adjacency to the IoT VLAN, or running on a local host.
+Credentials are loaded from Secrets Manager:
+    {"email": "user@example.com", "password": "secret"}
 
-Discovery is performed concurrently across all responding devices using
-asyncio.gather so total latency ≈ max(individual probe latencies).
-Devices that fail to respond to update() are logged and excluded from the
-result — they do not abort the overall scan.
+aiohttp is available as a transitive dependency of python-kasa.
 """
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -24,51 +18,38 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from kasa import Credentials, Discover, SmartBulb, SmartPlug
-
 from ingestion.providers.base import AbstractDiscoveryProvider
 
 logger = logging.getLogger(__name__)
 
-# UDP broadcast timeout in seconds.  5 s is sufficient for a quiet LAN;
-# raise to 10 if devices are consistently missed on first attempt.
-_DISCOVERY_TIMEOUT = 5
-
 _KASA_SECRET_ARN: str = os.environ.get("KASA_SECRET_ARN", "")
+_KASA_CLOUD_URL = "https://wap.tplinkcloud.com"
+_APP_TYPE = "Kasa_Android"
+_TERMINAL_UUID = "00000000-0000-0000-0000-000000000000"
 
-# Module-level cache — populated once per warm Lambda container.
-_credentials_cache: Optional[Credentials] = None
+# Model prefix → SmartBulb (everything else → SmartPlug)
+_BULB_MODEL_PREFIXES = ("LB", "KL", "KE", "MR", "KB")
+
+_cred_cache: Optional[Dict[str, str]] = None
 
 
-def _get_credentials() -> Optional[Credentials]:
-    """
-    Fetch Kasa credentials from Secrets Manager on first call; return cached
-    value on subsequent calls within the same Lambda container.
-
-    Expected secret value (JSON):
-        {"email": "user@example.com", "password": "secret"}
-
-    Returns None if KASA_SECRET_ARN is not set (local / unauthenticated use).
-    """
-    global _credentials_cache
-    if _credentials_cache is not None:
-        return _credentials_cache
+def _get_credentials() -> Optional[Dict[str, str]]:
+    """Return {"email": ..., "password": ...} from Secrets Manager, cached per container."""
+    global _cred_cache
+    if _cred_cache is not None:
+        return _cred_cache
     if not _KASA_SECRET_ARN:
+        logger.warning("KASA_SECRET_ARN not set — cannot authenticate with Kasa cloud.")
         return None
-
     import boto3
-    client = boto3.client("secretsmanager")
     try:
-        resp = client.get_secret_value(SecretId=_KASA_SECRET_ARN)
+        resp = boto3.client("secretsmanager").get_secret_value(SecretId=_KASA_SECRET_ARN)
         secret = json.loads(resp["SecretString"])
-        _credentials_cache = Credentials(
-            username=secret["email"],
-            password=secret["password"],
-        )
-        logger.info("Kasa credentials loaded from Secrets Manager.")
-        return _credentials_cache
+        _cred_cache = {"email": secret["email"], "password": secret["password"]}
+        logger.info("Kasa credentials loaded from Secrets Manager (user=%s).", secret["email"])
+        return _cred_cache
     except Exception as exc:
-        logger.error("Failed to load Kasa credentials from Secrets Manager: %s", exc)
+        logger.error("Failed to load Kasa credentials from Secrets Manager: %s", exc, exc_info=True)
         return None
 
 
@@ -79,192 +60,153 @@ class KasaDiscovery(AbstractDiscoveryProvider):
         return "kasa"
 
     async def discover_all(self) -> List[Any]:
-        """
-        Broadcast on the local network and return a DeviceRecord for every
-        responsive Kasa device.
+        from ingestion.device_registry import DeviceRecord
 
-        Returns an empty list (not an exception) if no devices respond or
-        if the network is unreachable.
-        """
-        from ingestion.device_registry import DeviceRecord  # local to avoid circular
+        creds = _get_credentials()
+        if not creds:
+            logger.error("No Kasa credentials available — aborting discovery.")
+            return []
 
-        credentials = _get_credentials()
-        logger.info(
-            "Starting Kasa discovery — timeout=%ds credentials=%s",
-            _DISCOVERY_TIMEOUT,
-            "loaded" if credentials else "none (unauthenticated)",
-        )
+        import aiohttp
 
+        logger.info("Authenticating with Kasa cloud (%s)…", _KASA_CLOUD_URL)
         try:
-            raw: Dict[str, Any] = await Discover.discover(
-                credentials=credentials,
-                timeout=_DISCOVERY_TIMEOUT,
-            )
+            async with aiohttp.ClientSession() as session:
+                token = await _cloud_login(session, creds["email"], creds["password"])
+                logger.info("Login successful. Fetching device list…")
+                raw_devices = await _cloud_get_devices(session, token)
         except Exception as exc:
-            logger.error("Kasa broadcast discovery failed: %s", exc, exc_info=True)
+            logger.error("Kasa cloud API error: %s", exc, exc_info=True)
             return []
 
         logger.info(
-            "Kasa broadcast complete — %d device(s) responded: %s",
-            len(raw),
-            list(raw.keys()) if raw else "[]",
+            "Kasa cloud returned %d device(s): %s",
+            len(raw_devices),
+            [d.get("alias") for d in raw_devices],
         )
-
-        if not raw:
-            logger.warning(
-                "No Kasa devices responded. Possible causes: Lambda not on the same "
-                "LAN/VPC subnet as devices, UDP broadcast blocked by a firewall or "
-                "security group, or all devices are offline."
-            )
-            return []
-
-        tasks = [self._probe(ip, device) for ip, device in raw.items()]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         records: List[DeviceRecord] = []
-        for result in results:
-            if isinstance(result, DeviceRecord):
-                records.append(result)
-            elif isinstance(result, Exception):
-                logger.warning("Probe raised unexpected exception: %s", result, exc_info=result)
+        for device in raw_devices:
+            try:
+                record = self._to_record(device)
+                records.append(record)
+                logger.info(
+                    "Device registered — alias=%r model=%r mac=%r type=%s status=%s",
+                    record.name, record.model, record.mac,
+                    record.device_type, record.status,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to convert cloud device %r: %s",
+                    device.get("alias"), exc, exc_info=True,
+                )
 
-        logger.info(
-            "Kasa discovery complete — responded=%d probed_ok=%d failed=%d",
-            len(raw),
-            len(records),
-            len(raw) - len(records),
-        )
+        logger.info("Discovery complete — %d valid record(s).", len(records))
         return records
 
-    async def _probe(self, ip: str, device: Any) -> Any:
-        """
-        Call update() on a single device and convert to a DeviceRecord.
-
-        Returns the DeviceRecord on success, logs a warning and returns
-        None on failure (caller filters None from the results list).
-        """
+    def _to_record(self, device: Dict[str, Any]) -> Any:
         from ingestion.device_registry import DeviceRecord
 
-        logger.debug("Probing device at %s (type=%s)…", ip, type(device).__name__)
-        try:
-            await device.update()
-        except Exception as exc:
-            logger.warning(
-                "update() failed for device at %s: %s", ip, exc, exc_info=True
-            )
-            return None
-
-        logger.info(
-            "Probed %s — alias=%r model=%r mac=%r is_on=%s device_id=%r",
-            ip,
-            getattr(device, "alias", None),
-            getattr(device, "model", None),
-            getattr(device, "mac", None),
-            getattr(device, "is_on", None),
-            getattr(device, "device_id", None),
-        )
-
-        try:
-            return self._to_record(ip, device)
-        except Exception as exc:
-            logger.warning(
-                "Failed to build DeviceRecord for %s: %s", ip, exc, exc_info=True
-            )
-            return None
-
-    # ------------------------------------------------------------------
-    # Conversion helpers
-    # ------------------------------------------------------------------
-
-    def _to_record(self, ip: str, device: Any) -> Any:
-        from ingestion.device_registry import DeviceRecord
-
-        device_id = self._device_id(device, ip)
-        mac = getattr(device, "mac", "") or ""
-        name = getattr(device, "alias", "") or ip
-        model = getattr(device, "model", "unknown") or "unknown"
-        device_type = self._device_type(device)
-        capabilities = self._capabilities(device)
+        alias = device.get("alias") or device.get("deviceId", "unknown")
+        mac = (device.get("deviceMac") or "").replace("-", ":").upper()
+        model = device.get("deviceModel") or "unknown"
+        device_id = device.get("deviceId") or mac or alias
+        device_type = _device_type(device)
+        status = "active" if device.get("status") == 1 else "offline"
         now = datetime.now(timezone.utc).isoformat()
-
-        fingerprint = _fingerprint(ip=ip, name=name, device_type=device_type,
-                                   model=model, mac=mac)
-
-        provider_meta: Dict[str, Any] = {
-            "raw_alias": name,
-            "is_on": device.is_on,
-        }
-        if isinstance(device, SmartBulb):
-            provider_meta["brightness"] = getattr(device, "brightness", None)
-            provider_meta["is_color"] = getattr(device, "is_color", False)
-            provider_meta["is_dimmable"] = getattr(device, "is_dimmable", False)
-            provider_meta["is_variable_color_temp"] = getattr(
-                device, "is_variable_color_temp", False
-            )
 
         return DeviceRecord(
             device_id=device_id,
             provider=self.name,
-            name=name,
-            ip=ip,
+            name=alias,
+            ip="",  # cloud-managed — no local IP available
             mac=mac,
             device_type=device_type,
             model=model,
-            capabilities=capabilities,
-            fingerprint=fingerprint,
-            status="active",
+            capabilities=_capabilities(device_type),
+            fingerprint=_fingerprint(
+                device_id=device_id, name=alias,
+                device_type=device_type, model=model, mac=mac,
+            ),
+            status=status,
             last_seen=now,
             last_synced=now,
-            sync_mode="",          # set by pipeline before writing
-            provider_meta=provider_meta,
+            sync_mode="",  # set by pipeline before writing
+            provider_meta={
+                "app_server_url": device.get("appServerUrl", ""),
+                "device_type_raw": device.get("deviceType", ""),
+                "hw_ver": device.get("deviceHwVer", ""),
+                "fw_ver": device.get("fwVer", ""),
+            },
         )
 
-    @staticmethod
-    def _device_id(device: Any, fallback_ip: str) -> str:
-        """
-        Prefer device.device_id (hardware-stable MAC-derived ID).
-        Fall back to MAC, then IP if neither is available.
-        """
-        did = getattr(device, "device_id", None)
-        if did:
-            return str(did)
-        mac = getattr(device, "mac", None)
-        if mac:
-            return mac.replace(":", "").upper()
-        return fallback_ip.replace(".", "_")
 
-    @staticmethod
-    def _device_type(device: Any) -> str:
-        if isinstance(device, SmartBulb):
-            return "SmartBulb"
-        # SmartStrip is a subclass of SmartPlug in some versions; check SmartPlug last.
-        return "SmartPlug"
+# ---------------------------------------------------------------------------
+# Cloud API
+# ---------------------------------------------------------------------------
 
-    @staticmethod
-    def _capabilities(device: Any) -> List[str]:
-        caps = ["turn_on", "turn_off", "toggle", "get_status"]
-        if isinstance(device, SmartBulb):
-            if getattr(device, "is_dimmable", False):
-                caps.append("set_brightness")
-            if getattr(device, "is_color", False):
-                caps.append("set_color")
-            if getattr(device, "is_variable_color_temp", False):
-                caps.append("set_color_temp")
-        if getattr(device, "has_emeter", False):
-            caps.append("get_energy_usage")
-        return caps
+async def _cloud_request(
+    session: Any,
+    method: str,
+    params: Dict[str, Any],
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
+    url = f"{_KASA_CLOUD_URL}?token={token}" if token else _KASA_CLOUD_URL
+    async with session.post(url, json={"method": method, "params": params}) as resp:
+        resp.raise_for_status()
+        data = await resp.json(content_type=None)
+    error_code = data.get("error_code", 0)
+    if error_code != 0:
+        raise RuntimeError(f"Kasa cloud error {error_code}: {data.get('msg', data)}")
+    return data.get("result", {})
 
 
-def _fingerprint(*, ip: str, name: str, device_type: str, model: str, mac: str) -> str:
-    """
-    Stable 16-character hex fingerprint of a device's identity fields.
+async def _cloud_login(session: Any, username: str, password: str) -> str:
+    result = await _cloud_request(session, "login", {
+        "appType": _APP_TYPE,
+        "cloudPassword": password,
+        "cloudUserName": username,
+        "terminalUUID": _TERMINAL_UUID,
+    })
+    token = result.get("token")
+    if not token:
+        raise RuntimeError(f"Login returned no token: {result}")
+    logger.debug("Cloud token acquired (prefix=%s…).", token[:8])
+    return token
 
-    Changing any identity field causes a new fingerprint, triggering a
-    DynamoDB write in delta mode.  Runtime state (is_on, brightness) is
-    excluded — those are not identity fields.
-    """
+
+async def _cloud_get_devices(session: Any, token: str) -> List[Dict[str, Any]]:
+    result = await _cloud_request(session, "getDeviceList", {}, token=token)
+    devices = result.get("deviceList", [])
+    logger.debug("Raw cloud device list: %s", json.dumps(devices, default=str))
+    return devices
+
+
+# ---------------------------------------------------------------------------
+# Device helpers
+# ---------------------------------------------------------------------------
+
+def _device_type(device: Dict[str, Any]) -> str:
+    model = (device.get("deviceModel") or "").upper()
+    if any(model.startswith(p) for p in _BULB_MODEL_PREFIXES):
+        return "SmartBulb"
+    type_str = (device.get("deviceType") or "").upper()
+    if "BULB" in type_str or "LIGHT" in type_str:
+        return "SmartBulb"
+    return "SmartPlug"
+
+
+def _capabilities(device_type: str) -> List[str]:
+    caps = ["turn_on", "turn_off", "toggle", "get_status"]
+    if device_type == "SmartBulb":
+        caps += ["set_brightness", "set_color", "set_color_temp"]
+    return caps
+
+
+def _fingerprint(*, device_id: str, name: str, device_type: str, model: str, mac: str) -> str:
     payload = json.dumps(
-        {"ip": ip, "name": name, "device_type": device_type, "model": model, "mac": mac},
+        {"device_id": device_id, "name": name, "device_type": device_type,
+         "model": model, "mac": mac},
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
