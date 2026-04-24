@@ -37,6 +37,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Type
 
 from ingestion.device_registry import DeviceRecord, DeviceRegistry
+from ingestion.phrase_generator import enrich_device
 from ingestion.providers.base import AbstractDiscoveryProvider
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ class IngestionResult:
     offline: int          # full-mode only; always 0 in delta
     errors: int           # devices that raised during probe
     duration_ms: float
+    phrases_generated: int = 0  # new phrases written to learning table
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -164,9 +166,14 @@ class IngestionPipeline:
         discovered_ids = {r.device_id for r in records}
 
         upserted = 0
+        phrases_generated = 0
         for record in records:
             if self.registry.upsert_device(record):
                 upserted += 1
+                phrases_generated += enrich_device(
+                    record.device_id, record.name,
+                    record.device_type, record.capabilities,
+                )
 
         # Devices in the registry but not discovered this run → offline.
         offline = 0
@@ -183,6 +190,7 @@ class IngestionPipeline:
             offline=offline,
             errors=0,       # filled by caller
             duration_ms=0,  # filled by caller
+            phrases_generated=phrases_generated,
         )
 
     # ------------------------------------------------------------------
@@ -195,7 +203,7 @@ class IngestionPipeline:
         Unchanged records get a last_seen update only.
         Delta never marks devices offline — use full sync for that.
         """
-        upserted = unchanged = 0
+        upserted = unchanged = phrases_generated = 0
 
         for record in records:
             stored_fp = self.registry.get_fingerprint(record.device_id, record.provider)
@@ -204,6 +212,10 @@ class IngestionPipeline:
                 # New device or changed identity (IP moved, alias renamed, etc.)
                 if self.registry.upsert_device(record):
                     upserted += 1
+                    phrases_generated += enrich_device(
+                        record.device_id, record.name,
+                        record.device_type, record.capabilities,
+                    )
             else:
                 # Unchanged — only bump last_seen to record network visibility.
                 self.registry.touch_last_seen(
@@ -220,4 +232,5 @@ class IngestionPipeline:
             offline=0,
             errors=0,
             duration_ms=0,
+            phrases_generated=phrases_generated,
         )
