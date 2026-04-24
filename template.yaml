@@ -95,7 +95,7 @@ Resources:
   LambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub "DeviceWeave Lambda SG — ${StageName}"
+      GroupDescription: !Sub "DeviceWeave Lambda SG ${StageName}"
       VpcId: !Ref VpcId
       SecurityGroupEgress:
         - IpProtocol: tcp
