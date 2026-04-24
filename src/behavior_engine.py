@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import graph_engine
+import weather_client
 
 logger = logging.getLogger(__name__)
 
@@ -32,29 +33,35 @@ logger = logging.getLogger(__name__)
 # The two always sum to 1.0.
 
 DEVICE_MODELS: Dict[str, Dict[str, float]] = {
+    # time_weight + frequency_weight + weather_weight = 1.0
     "light": {
-        "time_weight": 0.6,       # lights follow strong circadian patterns
-        "frequency_weight": 0.4,
-        "hour_window": 3,         # ±3 h tolerance (morning / evening ramp)
+        "time_weight": 0.5,       # circadian pattern — strong signal
+        "frequency_weight": 0.3,
+        "weather_weight": 0.2,    # overcast sky → lights needed
+        "hour_window": 3,
     },
     "fan": {
-        "time_weight": 0.3,       # fans are driven more by temperature/usage
-        "frequency_weight": 0.7,
+        "time_weight": 0.2,       # fans respond to temperature, not clock
+        "frequency_weight": 0.4,
+        "weather_weight": 0.4,    # hot / humid → fan more likely
         "hour_window": 2,
     },
     "ac": {
-        "time_weight": 0.2,
-        "frequency_weight": 0.8,
+        "time_weight": 0.1,
+        "frequency_weight": 0.4,
+        "weather_weight": 0.5,    # AC is almost purely temperature-driven
         "hour_window": 2,
     },
     "switch": {
         "time_weight": 0.5,
-        "frequency_weight": 0.5,
+        "frequency_weight": 0.4,
+        "weather_weight": 0.1,
         "hour_window": 3,
     },
     "default": {
-        "time_weight": 0.5,
-        "frequency_weight": 0.5,
+        "time_weight": 0.45,
+        "frequency_weight": 0.4,
+        "weather_weight": 0.15,
         "hour_window": 2,
     },
 }
@@ -122,13 +129,81 @@ def infer_device_class(device: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def current_context() -> Dict[str, Any]:
-    """Return the current temporal context for scoring."""
+    """
+    Return the current context for scoring — temporal + weather.
+
+    Weather is fetched from Open-Meteo once per calendar day and cached.
+    The dict is safe to pass to behavior scoring and LLM prompts.
+    """
     now = datetime.now(timezone.utc)
-    return {
+    ctx: Dict[str, Any] = {
         "hour": now.hour,
-        "day_of_week": now.weekday(),  # 0=Mon … 6=Sun
+        "day_of_week": now.weekday(),   # 0=Mon … 6=Sun
         "is_weekend": now.weekday() >= 5,
     }
+    ctx.update(weather_client.get_weather())   # adds temp, humidity, cloud, flags
+    return ctx
+
+
+# ---------------------------------------------------------------------------
+# Weather scoring
+# ---------------------------------------------------------------------------
+
+def _weather_score(device_class: str, context: Dict[str, Any]) -> float:
+    """
+    Return a weather-based score in [0, 1] for this device class.
+
+    0.5 = neutral (no weather data or irrelevant conditions)
+    > 0.5 = weather conditions match expected usage of this device
+    < 0.5 = conditions suggest this device is unlikely to be needed
+
+    Rules (device physics):
+        fan / ac  — hot or humid → high score; cold → low score
+        light     — overcast or night hours → high score; bright midday → lower
+        switch    — weather barely matters; slight boost if any extreme
+    """
+    if not context:
+        return 0.5
+
+    is_hot = context.get("is_hot", False)
+    is_cold = context.get("is_cold", False)
+    is_humid = context.get("is_humid", False)
+    is_overcast = context.get("is_overcast", False)
+    hour = context.get("hour", 12)
+    temp = context.get("temperature_c")
+
+    if device_class in ("fan", "ac"):
+        if is_hot and is_humid:
+            return 0.92
+        if is_hot:
+            return 0.82
+        if is_humid:
+            return 0.72
+        if is_cold:
+            return 0.25   # unlikely to run fan/AC when cold
+        if temp is not None and temp > 22:
+            return 0.60   # warm but not hot — mild boost
+        return 0.5
+
+    if device_class == "light":
+        is_dark_hours = hour < 7 or hour >= 18
+        if is_overcast and is_dark_hours:
+            return 0.90
+        if is_overcast:
+            return 0.72
+        if is_dark_hours:
+            return 0.78
+        # Bright sunny midday — lights less likely needed
+        if not is_overcast and 10 <= hour <= 16:
+            return 0.35
+        return 0.5
+
+    if device_class == "switch":
+        if is_hot or is_cold or is_overcast:
+            return 0.55   # slight bump during extreme conditions
+        return 0.5
+
+    return 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -143,12 +218,13 @@ def score(
     """
     Compute a behavior score in [0, 1] for (device, action) at the given context.
 
-    Returns 0.5 (neutral) when:
-    - Memgraph is unavailable
-    - No events have been recorded for this device yet
+    Three signals are combined via per-device-class weights:
+        time      — hour-of-day pattern from Memgraph history
+        frequency — raw action frequency from Memgraph history
+        weather   — current conditions from Open-Meteo (day-cached)
 
-    Above 0.5 means the context matches observed patterns.
-    Below 0.5 means this is unusual for this device at this time.
+    Returns 0.5 (neutral) when Memgraph has no history yet.
+    Weather is always included; it provides signal even before history exists.
     """
     if context is None:
         context = current_context()
@@ -165,32 +241,40 @@ def score(
         hour_window=hour_window,
     )
 
+    w_time = profile["time_weight"]
+    w_freq = profile["frequency_weight"]
+    w_wthr = profile["weather_weight"]
+
     total = history["total"]
+    w_score = _weather_score(device_class, context)
+
     if total == 0:
-        return _NEUTRAL_SCORE
+        # No history yet — weather is the only signal; blend with neutral
+        combined = w_wthr * w_score + (1.0 - w_wthr) * _NEUTRAL_SCORE
+        logger.debug(
+            "behavior_score device=%s action=%s — no history, weather=%.3f → %.3f",
+            device["id"], action, w_score, combined,
+        )
+        return round(combined, 4)
 
     matching = history["matching"]
 
-    # Frequency signal: how often has this action happened for this device?
-    # Normalize against total events; saturates toward 1.0 with more data.
     frequency_ratio = matching / total
     frequency_score = min(0.95, 0.5 + frequency_ratio * 0.5)
 
-    # Time signal: penalise if current hour never matches this action.
-    # If ALL events for this device in the window have this action, time_score→1.0
-    # If no events in the window at all, time_score→0.4 (mild penalty).
     time_score = 0.4 if matching == 0 else min(0.9, 0.5 + (matching / max(1, total)) * 0.8)
 
     combined = (
-        profile["time_weight"] * time_score
-        + profile["frequency_weight"] * frequency_score
+        w_time * time_score
+        + w_freq * frequency_score
+        + w_wthr * w_score
     )
 
     logger.debug(
         "behavior_score device=%s action=%s hour=%d matching=%d total=%d "
-        "class=%s → time=%.3f freq=%.3f combined=%.3f",
+        "class=%s → time=%.3f freq=%.3f weather=%.3f combined=%.3f",
         device["id"], action, hour, matching, total,
-        device_class, time_score, frequency_score, combined,
+        device_class, time_score, frequency_score, w_score, combined,
     )
 
     return round(combined, 4)

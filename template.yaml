@@ -24,6 +24,8 @@ Globals:
         MEMGRAPH_HOST: !Ref MemgraphHost
         MEMGRAPH_PORT: !Ref MemgraphPort
         MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
+        WEATHER_LAT: !Ref WeatherLat
+        WEATHER_LON: !Ref WeatherLon
 
 Parameters:
   StageName:
@@ -71,6 +73,19 @@ Parameters:
       Secrets Manager ARN for Memgraph credentials {"username","password"}.
       From contextweave-rag-prod stack output MemgraphSecretArn.
     Default: ""
+
+  # -----------------------------------------------------------------------
+  # Weather — Open-Meteo (free, no API key).  Set to your deployment location.
+  # -----------------------------------------------------------------------
+  WeatherLat:
+    Type: String
+    Default: "37.7749"
+    Description: Latitude for Open-Meteo weather lookups (default San Francisco).
+
+  WeatherLon:
+    Type: String
+    Default: "-122.4194"
+    Description: Longitude for Open-Meteo weather lookups (default San Francisco).
 
 Resources:
   # -------------------------------------------------------------------
