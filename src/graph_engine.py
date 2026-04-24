@@ -23,6 +23,7 @@ Schema (Cypher, created on first use):
     (:Device)-[:HAD_EVENT]->(:BehaviorEvent {action, hour, day_of_week, command, ts})
 """
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -40,6 +41,14 @@ _driver = None
 _cred_cache: Optional[Dict[str, str]] = None
 _resolved_host: Optional[str] = None  # None = not yet resolved; "" = not found
 _host_lock = threading.Lock()
+
+# Module-level executor: persists across Lambda warm-container reuses.
+# Lambda freezes (not kills) the process after each invocation, so work
+# submitted here can complete before the next request unfreezes the container.
+# max_workers=1 keeps Bolt writes sequential on a single-node Memgraph.
+_graph_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="graph-write"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -171,18 +180,14 @@ def _create_index_if_missing(session, statement: str) -> None:
 
 def record_event(device_id: str, action: str, command: str) -> None:
     """
-    Fire-and-forget: schedule a behavior event write without blocking the caller.
+    Fire-and-forget: submit a behavior event write to the module-level executor
+    and return immediately so the Lambda response is never delayed by Memgraph.
 
-    Runs in a daemon thread so the Lambda response is returned as soon as the
-    confidence threshold is cleared, regardless of Memgraph write latency.
-    Best-effort — silently skipped when Memgraph is unavailable.
+    The executor persists across Lambda warm-container reuses: work submitted
+    here can finish during the frozen container window before the next request
+    arrives.  Best-effort — silently skipped when Memgraph is unavailable.
     """
-    threading.Thread(
-        target=_write_event,
-        args=(device_id, action, command),
-        daemon=True,
-        name="graph-record",
-    ).start()
+    _graph_executor.submit(_write_event, device_id, action, command)
 
 
 def _write_event(device_id: str, action: str, command: str) -> None:
