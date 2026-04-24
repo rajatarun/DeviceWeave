@@ -48,16 +48,12 @@ and an empty devices list.
 Return ONLY a raw JSON object — no markdown, no explanation:
 {
   "devices": [
-    {
-      "device_id": "<exact id from list>",
-      "device_name": "<device name>",
-      "action": "<capability>",
-      "params": {}
-    }
+    {"device_id": "<exact id from list>", "action": "<capability>", "params": {}}
   ],
   "confidence": <0.0-1.0>,
   "reasoning": "<one sentence>"
-}"""
+}
+Omit params entirely when empty — do not write "params": {}."""
 
 
 def llm_resolve(
@@ -95,11 +91,15 @@ def llm_resolve(
         f"Return the JSON object."
     )
 
+    # Budget: ~20 tokens per device in the worst case (all devices returned) +
+    # ~100 fixed overhead for confidence/reasoning/JSON structure.
+    max_tokens = max(256, len(devices) * 20 + 100)
+
     import boto3
     client = boto3.client("bedrock-runtime", region_name="us-east-1")
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 512,
+        "max_tokens": max_tokens,
         "system": _SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_msg}],
     })
@@ -144,7 +144,6 @@ def _normalise(raw: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "devices": [{
             "device_id": raw.get("device_id"),
-            "device_name": raw.get("device_name", ""),
             "action": raw.get("action", ""),
             "params": raw.get("params") or {},
         }],
