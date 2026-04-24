@@ -124,21 +124,33 @@ jobs:
           echo "Resolved VpcId=$VPC_ID from subnets=$SUBNET_IDS"
 
       # ----------------------------------------------------------------
-      # 6. Resolve Memgraph parameters from contextweave-rag-prod stack
+      # 6. Resolve Memgraph parameters
       #
-      #    Stack: contextweave-rag-prod  (or MEMGRAPH_STACK_NAME secret)
-      #    Outputs consumed:
-      #      MemgraphPrivateIP   — bolt host for neo4j driver
-      #      MemgraphSecretArn   — credentials in Secrets Manager
+      #    Memgraph host is discovered directly from EC2 by tag:
+      #      tag:memgraph=true (running instance)
+      #
+      #    Secret ARN is still sourced from the contextweave stack:
+      #      MemgraphSecretArn
       # ----------------------------------------------------------------
-      - name: Resolve Memgraph parameters from contextweave stack
+      - name: Resolve Memgraph host (EC2 tag) and secret
         id: memgraph
         run: |
-          MEMGRAPH_HOST=$(aws cloudformation describe-stacks \
-            --stack-name "$MEMGRAPH_STACK_NAME" \
+          MEMGRAPH_INSTANCE_ID=$(aws ec2 describe-instances \
             --region "$AWS_REGION" \
-            --query "Stacks[0].Outputs[?OutputKey=='MemgraphPrivateIP'].OutputValue" \
+            --filters \
+              "Name=tag:memgraph,Values=true" \
+              "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].InstanceId | [0]" \
             --output text)
+
+          MEMGRAPH_HOST=""
+          if [ -n "$MEMGRAPH_INSTANCE_ID" ] && [ "$MEMGRAPH_INSTANCE_ID" != "None" ]; then
+            MEMGRAPH_HOST=$(aws ec2 describe-instances \
+              --region "$AWS_REGION" \
+              --instance-ids "$MEMGRAPH_INSTANCE_ID" \
+              --query "Reservations[0].Instances[0].PrivateIpAddress" \
+              --output text)
+          fi
 
           MEMGRAPH_SECRET_ARN=$(aws cloudformation describe-stacks \
             --stack-name "$MEMGRAPH_STACK_NAME" \
@@ -147,8 +159,12 @@ jobs:
             --output text)
 
           # Non-fatal: DeviceWeave runs without Memgraph (behavior scores disabled)
-          if [ -z "$MEMGRAPH_HOST" ] || [ "$MEMGRAPH_HOST" = "None" ]; then
-            echo "WARNING: MemgraphPrivateIP not found in $MEMGRAPH_STACK_NAME — behavior engine will be disabled"
+          if [ -z "$MEMGRAPH_INSTANCE_ID" ] || [ "$MEMGRAPH_INSTANCE_ID" = "None" ]; then
+            echo "WARNING: No running EC2 instance found with tag memgraph=true — behavior engine will be disabled"
+            MEMGRAPH_INSTANCE_ID=""
+            MEMGRAPH_HOST=""
+          elif [ -z "$MEMGRAPH_HOST" ] || [ "$MEMGRAPH_HOST" = "None" ]; then
+            echo "WARNING: Could not resolve private IP for instance $MEMGRAPH_INSTANCE_ID — behavior engine will be disabled"
             MEMGRAPH_HOST=""
           fi
 
@@ -156,10 +172,11 @@ jobs:
             MEMGRAPH_SECRET_ARN=""
           fi
 
+          echo "memgraph_instance_id=$MEMGRAPH_INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "memgraph_host=$MEMGRAPH_HOST"             >> "$GITHUB_OUTPUT"
           echo "memgraph_secret_arn=$MEMGRAPH_SECRET_ARN" >> "$GITHUB_OUTPUT"
 
-          echo "Resolved MemgraphHost=$MEMGRAPH_HOST"
+          echo "Resolved MemgraphInstanceId=$MEMGRAPH_INSTANCE_ID MemgraphHost=$MEMGRAPH_HOST"
 
       # ----------------------------------------------------------------
       # 7. Validate SAM template
@@ -203,7 +220,7 @@ jobs:
       #     This step is idempotent — it is a no-op if the rule already exists.
       # ----------------------------------------------------------------
       - name: Allow Lambda SG ingress on Memgraph port 7687
-        if: ${{ steps.memgraph.outputs.memgraph_host != '' }}
+        if: ${{ steps.memgraph.outputs.memgraph_instance_id != '' }}
         run: |
           # Get the Lambda SG just created by the deploy
           LAMBDA_SG=$(aws cloudformation describe-stacks \
@@ -214,9 +231,10 @@ jobs:
 
           # Find the Memgraph instance's primary security group
           MEMGRAPH_HOST="${{ steps.memgraph.outputs.memgraph_host }}"
+          MEMGRAPH_INSTANCE_ID="${{ steps.memgraph.outputs.memgraph_instance_id }}"
           MEMGRAPH_SG=$(aws ec2 describe-instances \
             --region "$AWS_REGION" \
-            --filters "Name=private-ip-address,Values=$MEMGRAPH_HOST" \
+            --instance-ids "$MEMGRAPH_INSTANCE_ID" \
             --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" \
             --output text)
 
