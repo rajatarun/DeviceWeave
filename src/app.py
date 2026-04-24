@@ -11,9 +11,10 @@ Routes
 
 POST /execute dispatch order
 -----------------------------
-  1. Try scene resolution  → if confidence ≥ 0.70, execute scene.
-  2. Parse device intent   → resolve device → safety checks → execute.
-  3. After any successful execution: auto-learn phrase if conf ≥ 0.85.
+  1. Scene resolution  — nearest-neighbour cosine, conf ≥ threshold.
+  2. Tier 1 device     — TF cosine + learned phrases, conf ≥ threshold.
+  3. Tier 2 device     — Claude Haiku 4.5 via Bedrock (contextual inference).
+  4. Auto-learn        — successful resolutions written to learning table.
 """
 
 import asyncio
@@ -23,11 +24,12 @@ import os
 from typing import Any, Dict, List, Optional
 
 from device_resolver import (
-    DEVICE_CATALOG,
+    _get_active_catalog,
     device_public_view,
     invalidate_learned_phrases_cache,
     resolve_device,
 )
+from llm_resolver import llm_resolve
 from execution_planner import (
     StepResult,
     execute_steps,
@@ -87,18 +89,20 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _route_health() -> Dict[str, Any]:
+    catalog = _get_active_catalog()
     return _ok({
         "status": "healthy",
-        "devices": len(DEVICE_CATALOG),
+        "devices": len(catalog),
         "scenes": len(SCENE_CATALOG),
         "learning_enabled": is_configured(),
     })
 
 
 def _route_devices() -> Dict[str, Any]:
+    catalog = _get_active_catalog()
     return _ok({
-        "devices": [device_public_view(d) for d in DEVICE_CATALOG],
-        "count": len(DEVICE_CATALOG),
+        "devices": [device_public_view(d) for d in catalog],
+        "count": len(catalog),
     })
 
 
@@ -123,7 +127,7 @@ def _route_learn(event: Dict[str, Any]) -> Dict[str, Any]:
         return _error(400, "Missing 'phrase' field.")
 
     # Validate device_id against catalog
-    known_ids = {d["id"] for d in DEVICE_CATALOG}
+    known_ids = {d["id"] for d in _get_active_catalog()}
     if device_id not in known_ids:
         return _error(
             422,
@@ -215,50 +219,85 @@ def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
     except ValueError as exc:
         return _error(400, str(exc))
 
-    logger.info(
-        "Intent: action=%s query=%s params=%s",
-        intent.action, intent.device_query, intent.params,
-    )
+    logger.info("Intent: action=%s query=%r params=%s", intent.action, intent.device_query, intent.params)
 
-    # --- Device resolution ---
+    # ------------------------------------------------------------------
+    # Tier 1 — TF cosine resolver
+    # ------------------------------------------------------------------
     device, confidence = resolve_device(intent.device_query)
 
     if device is None:
         return _error(503, "Device catalog is empty.")
 
-    logger.info("Device: id=%s conf=%.4f", device["id"], confidence)
+    logger.info("Tier 1: device=%s conf=%.4f", device["id"], confidence)
 
-    if confidence < CONFIDENCE_THRESHOLD:
-        return _error(
-            422,
-            f"No device matched with sufficient confidence "
-            f"(best={confidence:.4f}, threshold={CONFIDENCE_THRESHOLD}). "
-            f"Closest: '{device['name']}'.",
-            extra={
-                "best_match_id": device["id"],
-                "confidence": confidence,
-                "threshold": CONFIDENCE_THRESHOLD,
-                "hint": "Use POST /learn to add new phrases for a device.",
-            },
+    if confidence >= CONFIDENCE_THRESHOLD:
+        return _execute_device(
+            device, intent.action, intent.params,
+            normalized_command, confidence, tier="cosine",
         )
 
+    # ------------------------------------------------------------------
+    # Tier 2 — LLM contextual inference (Haiku 4.5 via Bedrock)
+    # ------------------------------------------------------------------
+    logger.info("Tier 1 miss (%.4f < %.2f) — invoking LLM resolver.", confidence, CONFIDENCE_THRESHOLD)
+
+    llm_result = llm_resolve(normalized_command, intent.action, _get_active_catalog())
+
+    if llm_result and llm_result.get("confidence", 0) >= CONFIDENCE_THRESHOLD:
+        catalog = _get_active_catalog()
+        llm_device = next((d for d in catalog if d["id"] == llm_result.get("device_id")), None)
+        if llm_device:
+            return _execute_device(
+                llm_device,
+                llm_result["action"],
+                llm_result.get("params") or {},
+                normalized_command,
+                llm_result["confidence"],
+                tier="llm",
+                reasoning=llm_result.get("reasoning", ""),
+            )
+
+    # ------------------------------------------------------------------
+    # Both tiers failed
+    # ------------------------------------------------------------------
+    return _error(
+        422,
+        f"Could not resolve command with sufficient confidence "
+        f"(cosine={confidence:.4f}, threshold={CONFIDENCE_THRESHOLD}). "
+        f"Closest cosine match: '{device['name']}'.",
+        extra={
+            "best_match_id": device["id"],
+            "cosine_confidence": confidence,
+            "threshold": CONFIDENCE_THRESHOLD,
+            "hint": "Use POST /learn to add new phrases for a device.",
+        },
+    )
+
+
+def _execute_device(
+    device: Dict[str, Any],
+    action: str,
+    params: Dict[str, Any],
+    original_command: str,
+    confidence: float,
+    tier: str,
+    reasoning: str = "",
+) -> Dict[str, Any]:
     # --- Capability check ---
-    if intent.action not in device["capabilities"]:
+    if action not in device["capabilities"]:
         return _error(
             422,
-            f"'{device['name']}' does not support '{intent.action}'.",
+            f"'{device['name']}' does not support '{action}'.",
             extra={"supported": device["capabilities"]},
         )
 
     # --- Parameter check ---
-    if intent.action == "set_brightness" and "brightness" not in intent.params:
-        return _error(
-            400,
-            "set_brightness requires a brightness value, e.g. 'set brightness to 75%'.",
-        )
+    if action == "set_brightness" and "brightness" not in params:
+        return _error(400, "set_brightness requires a brightness value, e.g. 'set brightness to 75%'.")
 
     # --- Execute ---
-    steps = plan_device_execution(device, intent.action, intent.params)
+    steps = plan_device_execution(device, action, params)
     try:
         results: List[StepResult] = asyncio.run(execute_steps(steps))
     except Exception as exc:
@@ -269,18 +308,27 @@ def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
     if not result.success:
         return _error(502, result.error, extra={"device_id": device["id"]})
 
+    logger.info("Executed via %s tier — %s/%s → %s", tier, device["id"], action, result.result)
+
     # --- Auto-learn ---
     if is_configured() and confidence >= LEARNING_THRESHOLD:
-        save_learned_phrase(device["id"], intent.device_query, confidence)
+        phrase = original_command if tier == "llm" else original_command
+        save_learned_phrase(device["id"], phrase, confidence)
+        if tier == "llm":
+            invalidate_learned_phrases_cache()
 
-    return _ok({
+    response = {
         "type": "device",
         "device_id": device["id"],
         "device_name": device["name"],
-        "action": intent.action,
+        "action": action,
         "confidence": confidence,
+        "resolution_tier": tier,
         "result": result.result,
-    })
+    }
+    if reasoning:
+        response["reasoning"] = reasoning
+    return _ok(response)
 
 
 # ---------------------------------------------------------------------------
