@@ -102,9 +102,35 @@ def save_generated_phrases(device_id: str, phrases: List[str]) -> int:
 
 
 def enrich_device(device_id: str, name: str, device_type: str, capabilities: List[str]) -> int:
-    """Generate and persist sample phrases for one device. Returns count of new phrases saved."""
+    """Generate and persist sample phrases for one device. Returns count of new phrases saved.
+
+    Skips the Bedrock call entirely if the device already has any phrases in the
+    learning table — handles re-ingestion of already-discovered devices without
+    wasting model calls.
+    """
+    if _has_phrases(device_id):
+        logger.debug("Device %s already has phrases — skipping generation.", device_id)
+        return 0
     logger.info("Generating phrases for %s (%s)…", device_id, name)
     phrases = generate_phrases(name, device_type, capabilities)
     if phrases:
         logger.info("Claude generated %d phrases for %s: %s", len(phrases), name, phrases)
     return save_generated_phrases(device_id, phrases)
+
+
+def _has_phrases(device_id: str) -> bool:
+    """Return True if the learning table already has at least one phrase for this device."""
+    if not _LEARNING_TABLE:
+        return False
+    import boto3
+    from boto3.dynamodb.conditions import Key
+    try:
+        resp = boto3.resource("dynamodb").Table(_LEARNING_TABLE).query(
+            KeyConditionExpression=Key("device_id").eq(device_id),
+            Limit=1,
+            ProjectionExpression="phrase",
+        )
+        return bool(resp.get("Items"))
+    except Exception as exc:
+        logger.warning("_has_phrases check failed for %s: %s — will generate", device_id, exc)
+        return False
