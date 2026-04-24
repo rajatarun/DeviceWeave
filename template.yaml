@@ -123,7 +123,7 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref DeviceRegistryTable
         - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
       Events:
         # On-demand trigger via HTTP — returns 202 with result JSON
         TriggerIngest:
