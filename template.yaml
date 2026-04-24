@@ -7,6 +7,10 @@ Globals:
     Runtime: python3.11
     Timeout: 30
     MemorySize: 256
+    VpcConfig:
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+      SubnetIds: !Ref LambdaSubnetIds
     Environment:
       Variables:
         LOG_LEVEL: INFO
@@ -17,6 +21,9 @@ Globals:
         KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
         SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
         GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
+        MEMGRAPH_HOST: !Ref MemgraphHost
+        MEMGRAPH_PORT: !Ref MemgraphPort
+        MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
 
 Parameters:
   StageName:
@@ -27,7 +34,74 @@ Parameters:
       - staging
       - dev
 
+  # -----------------------------------------------------------------------
+  # VPC — resolved from the shared infrastructure stack by GitHub Actions
+  # -----------------------------------------------------------------------
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: >
+      VPC ID containing the Lambda subnets and Memgraph instance.
+      Derived from the shared infrastructure stack (tarun-teamweave-shared).
+
+  LambdaSubnetIds:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated private subnet IDs for Lambda VPC placement.
+      From shared stack output LambdaSubnetIds
+      (e.g. subnet-01714c0c1b4590e4e,subnet-0a3a13a3a3b5105cd).
+
+  # -----------------------------------------------------------------------
+  # Memgraph — resolved from the contextweave-rag-prod stack by GitHub Actions
+  # -----------------------------------------------------------------------
+  MemgraphHost:
+    Type: String
+    Description: >
+      Private IP of the Memgraph EC2 instance.
+      From contextweave-rag-prod stack output MemgraphPrivateIP.
+    Default: ""
+
+  MemgraphPort:
+    Type: Number
+    Description: Memgraph Bolt port (default 7687).
+    Default: 7687
+
+  MemgraphSecretArn:
+    Type: String
+    Description: >
+      Secrets Manager ARN for Memgraph credentials {"username","password"}.
+      From contextweave-rag-prod stack output MemgraphSecretArn.
+    Default: ""
+
 Resources:
+  # -------------------------------------------------------------------
+  # Lambda Security Group
+  # Egress: Bolt (7687) to Memgraph + HTTPS (443) to cloud APIs / AWS
+  # -------------------------------------------------------------------
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "DeviceWeave Lambda SG — ${StageName}"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 7687
+          ToPort: 7687
+          CidrIp: 0.0.0.0/0
+          Description: Memgraph Bolt (outbound to private subnet)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to cloud APIs and AWS services
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: "::/0"
+          Description: HTTPS IPv6 egress
+      Tags:
+        - Key: Name
+          Value: !Sub "deviceweave-lambda-sg-${StageName}"
+
   # -------------------------------------------------------------------
   # HTTP API (API Gateway v2)
   # -------------------------------------------------------------------
@@ -46,7 +120,7 @@ Resources:
           - '*'
 
   # -------------------------------------------------------------------
-  # Execution Lambda — intent, scene, device resolution, Kasa execution
+  # Execution Lambda
   # -------------------------------------------------------------------
   DeviceWeaveFunction:
     Type: AWS::Serverless::Function
@@ -56,7 +130,7 @@ Resources:
       Handler: app.handler
       Description: >
         DeviceWeave execution engine — intent parsing, scene resolution,
-        semantic device matching, Kasa execution, phrase learning.
+        semantic device matching, behavior scoring, provider execution.
       Policies:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
@@ -69,12 +143,24 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials-*"
+        - !If
+          - HasMemgraphSecret
+          - AWSSecretsManagerGetSecretValuePolicy:
+              SecretArn: !Ref MemgraphSecretArn
+          - !Ref AWS::NoValue
         - Statement:
             - Effect: Allow
               Action: bedrock:InvokeModel
               Resource:
                 - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ec2:CreateNetworkInterface
+                - ec2:DescribeNetworkInterfaces
+                - ec2:DeleteNetworkInterface
+              Resource: "*"
       Events:
         ExecuteCommand:
           Type: HttpApi
@@ -114,12 +200,7 @@ Resources:
       RetentionInDays: 14
 
   # -------------------------------------------------------------------
-  # Ingestion Lambda — device discovery and registry sync
-  #
-  # Network requirement: this function must run in a VPC subnet that has
-  # L2 or routable access to the IoT device LAN so that UDP broadcast
-  # discovery can reach the Kasa devices.  For local / dev use, invoke
-  # the function directly from a host on the same LAN segment.
+  # Ingestion Lambda
   # -------------------------------------------------------------------
   DeviceWeaveIngestionFunction:
     Type: AWS::Serverless::Function
@@ -127,17 +208,18 @@ Resources:
       FunctionName: !Sub "deviceweave-ingestion-${StageName}"
       CodeUri: src/
       Handler: ingestion_handler.handler
-      # Discovery (UDP broadcast + per-device update()) takes 5–30 s.
-      # 120 s provides headroom for ~100-device fleets.
       Timeout: 120
       Description: >
-        DeviceWeave ingestion engine — Kasa network discovery, full and delta
-        sync to DynamoDB device registry, scheduled and on-demand execution.
+        DeviceWeave ingestion engine — cloud provider discovery (Kasa, SwitchBot,
+        Govee), registry sync, phrase generation, behavior graph seeding.
       Environment:
         Variables:
           KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
           SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
           GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
+          MEMGRAPH_HOST: !Ref MemgraphHost
+          MEMGRAPH_PORT: !Ref MemgraphPort
+          MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
       Policies:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
@@ -150,21 +232,31 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials-*"
+        - !If
+          - HasMemgraphSecret
+          - AWSSecretsManagerGetSecretValuePolicy:
+              SecretArn: !Ref MemgraphSecretArn
+          - !Ref AWS::NoValue
         - Statement:
             - Effect: Allow
               Action: bedrock:InvokeModel
               Resource:
                 - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ec2:CreateNetworkInterface
+                - ec2:DescribeNetworkInterfaces
+                - ec2:DeleteNetworkInterface
+              Resource: "*"
       Events:
-        # On-demand trigger via HTTP — returns 202 with result JSON
         TriggerIngest:
           Type: HttpApi
           Properties:
             ApiId: !Ref DeviceWeaveApi
             Path: /ingest
             Method: POST
-        # Full sync once per day — upserts all, marks missing as offline
         ScheduledFullSync:
           Type: Schedule
           Properties:
@@ -173,7 +265,6 @@ Resources:
             Description: Daily full device discovery and registry reconciliation
             Input: '{"provider": "kasa", "mode": "full"}'
             Enabled: true
-        # Delta sync every 6 hours — fingerprint-gated writes; no offline marking
         ScheduledDeltaSync:
           Type: Schedule
           Properties:
@@ -191,16 +282,6 @@ Resources:
 
   # -------------------------------------------------------------------
   # DynamoDB — Phrase Learning Store
-  #
-  # Schema:
-  #   PK: device_id  (String) — catalog device id, e.g. "office_light"
-  #   SK: phrase     (String) — normalised user command or manual phrase
-  #
-  # Attributes:
-  #   source         "learned" | "manual"
-  #   confidence     String (stored as String to avoid Decimal type issues)
-  #   created_at     ISO 8601
-  #   use_count      Number
   # -------------------------------------------------------------------
   LearningTable:
     Type: AWS::DynamoDB::Table
@@ -223,26 +304,6 @@ Resources:
 
   # -------------------------------------------------------------------
   # DynamoDB — Device Registry
-  #
-  # Populated by the ingestion pipeline.  One item per discovered device.
-  #
-  # Schema:
-  #   PK: device_id  (String) — hardware-stable ID (device.device_id or MAC)
-  #   SK: provider   (String) — "kasa" | "matter" | …
-  #
-  # Attributes:
-  #   name, ip, mac, device_type, model
-  #   capabilities   List<String> — supported action strings
-  #   fingerprint    String — SHA-256[:16] of identity fields; drives delta writes
-  #   status         "active" | "offline"
-  #   last_seen      ISO 8601 — updated every sync (even delta unchanged)
-  #   last_synced    ISO 8601 — updated only on full upsert
-  #   sync_mode      "full" | "delta" — which pass wrote this item
-  #   provider_meta  Map — provider-specific raw metadata
-  #
-  # GSI (provider-status-index):
-  #   PK: provider — query all devices for a given provider
-  #   SK: status   — filter active vs offline efficiently
   # -------------------------------------------------------------------
   DeviceRegistryTable:
     Type: AWS::DynamoDB::Table
@@ -274,6 +335,9 @@ Resources:
           Projection:
             ProjectionType: ALL
 
+Conditions:
+  HasMemgraphSecret: !Not [!Equals [!Ref MemgraphSecretArn, ""]]
+
 Outputs:
   ApiBaseUrl:
     Description: Base URL for the DeviceWeave API
@@ -301,6 +365,12 @@ Outputs:
     Description: GET /scenes — list registered scenes
     Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/scenes"
 
+  LambdaSecurityGroupId:
+    Description: Lambda SG ID — add as ingress rule on Memgraph's security group (port 7687)
+    Value: !Ref LambdaSecurityGroup
+    Export:
+      Name: !Sub "DeviceWeaveLambdaSG-${StageName}"
+
   LearningTableName:
     Description: DynamoDB phrase learning table
     Value: !Ref LearningTable
@@ -308,7 +378,7 @@ Outputs:
       Name: !Sub "DeviceWeaveLearningTable-${StageName}"
 
   DeviceRegistryTableName:
-    Description: DynamoDB device registry table (ingestion output)
+    Description: DynamoDB device registry table
     Value: !Ref DeviceRegistryTable
     Export:
       Name: !Sub "DeviceWeaveRegistryTable-${StageName}"

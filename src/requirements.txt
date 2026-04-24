@@ -1,3 +1,9 @@
-# Runtime dependencies for DeviceWeave Lambda
-# python-kasa communicates with TP-Link Kasa devices over LAN only.
-python-kasa==0.7.7
+# Runtime dependencies for DeviceWeave Lambda functions.
+#
+# aiohttp   — async HTTP client used by all three provider adapters
+#             (Kasa cloud REST, SwitchBot v1.1, Govee developer API)
+# neo4j     — Bolt protocol driver for Memgraph graph database
+#             (behavior engine, scene graph storage)
+
+aiohttp>=3.9
+neo4j>=5.0

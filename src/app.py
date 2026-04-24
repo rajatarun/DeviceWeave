@@ -12,9 +12,10 @@ Routes
 POST /execute dispatch order
 -----------------------------
   1. Scene resolution  — nearest-neighbour cosine, conf ≥ threshold.
-  2. Tier 1 device     — TF cosine + learned phrases, conf ≥ threshold.
-  3. Tier 2 device     — Claude Haiku 4.5 via Bedrock (contextual inference).
+  2. Tier 1 device     — TF cosine + learned phrases, scored via decision engine.
+  3. Tier 2 device     — Claude Haiku 4.5 via Bedrock (contextual / behavioral).
   4. Auto-learn        — successful resolutions written to learning table.
+  5. Behavior record   — every successful execution recorded in Memgraph.
 """
 
 import asyncio
@@ -23,6 +24,9 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+import behavior_engine
+import decision_engine
+import graph_engine
 from device_resolver import (
     _get_active_catalog,
     device_public_view,
@@ -46,8 +50,8 @@ from learning_store import (
 from scene_catalog import SCENE_CATALOG, resolve_scene, scene_public_view
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
-logging.getLogger().setLevel(LOG_LEVEL)  # basicConfig is a no-op in Lambda
-for _noisy in ("botocore", "boto3", "urllib3", "s3transfer"):
+logging.getLogger().setLevel(LOG_LEVEL)
+for _noisy in ("botocore", "boto3", "urllib3", "s3transfer", "neo4j"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
@@ -59,7 +63,6 @@ CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.4"))
 # ---------------------------------------------------------------------------
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """AWS Lambda handler — dispatches to route handlers."""
     ctx = event.get("requestContext", {}).get("http", {})
     method: str = ctx.get("method", "POST").upper()
     path: str = ctx.get("path", "/execute")
@@ -68,16 +71,12 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     if method == "GET" and path.endswith("/health"):
         return _route_health()
-
     if method == "GET" and path.endswith("/devices"):
         return _route_devices()
-
     if method == "GET" and path.endswith("/scenes"):
         return _route_scenes()
-
     if method == "POST" and path.endswith("/learn"):
         return _route_learn(event)
-
     if method == "POST" and path.endswith("/execute"):
         return _route_execute(event)
 
@@ -95,6 +94,7 @@ def _route_health() -> Dict[str, Any]:
         "devices": len(catalog),
         "scenes": len(SCENE_CATALOG),
         "learning_enabled": is_configured(),
+        "graph_enabled": graph_engine.is_available(),
     })
 
 
@@ -126,7 +126,6 @@ def _route_learn(event: Dict[str, Any]) -> Dict[str, Any]:
     if not phrase:
         return _error(400, "Missing 'phrase' field.")
 
-    # Validate device_id against catalog
     known_ids = {d["id"] for d in _get_active_catalog()}
     if device_id not in known_ids:
         return _error(
@@ -162,15 +161,14 @@ def _route_execute(event: Dict[str, Any]) -> Dict[str, Any]:
     normalized = command.lower()
 
     # ------------------------------------------------------------------
-    # 1. Try scene resolution first
+    # 1. Scene resolution
     # ------------------------------------------------------------------
     scene, scene_conf = resolve_scene(normalized)
-
     if scene is not None and scene_conf >= CONFIDENCE_THRESHOLD:
         return _handle_scene(scene, scene_conf, normalized)
 
     # ------------------------------------------------------------------
-    # 2. Fall back to single-device resolution
+    # 2. Single-device resolution
     # ------------------------------------------------------------------
     return _handle_device_command(normalized)
 
@@ -191,15 +189,13 @@ def _handle_scene(
         return _error(422, f"Scene '{scene['id']}' produced no executable steps.")
 
     results: List[StepResult] = asyncio.run(execute_steps(steps))
-
     successes = [r for r in results if r.success]
     failures = [r for r in results if not r.success]
 
-    # Auto-learn: scene commands are high-signal; always above learning threshold
-    # as scene resolution already requires 0.70+ cosine similarity.
-    if is_configured() and confidence >= LEARNING_THRESHOLD:
-        for result in successes:
+    for result in successes:
+        if is_configured() and confidence >= LEARNING_THRESHOLD:
             save_learned_phrase(result.device_id, original_command, confidence)
+        graph_engine.record_event(result.device_id, result.action, original_command)
 
     return _ok({
         "type": "scene",
@@ -213,49 +209,72 @@ def _handle_scene(
 
 
 def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
-    # --- Intent parsing ---
     try:
         intent: Intent = parse_intent(normalized_command)
     except ValueError as exc:
         return _error(400, str(exc))
 
-    logger.info("Intent: action=%s query=%r params=%s", intent.action, intent.device_query, intent.params)
+    intent_type = decision_engine.classify_intent(normalized_command)
+    logger.info(
+        "Intent: action=%s query=%r type=%s params=%s",
+        intent.action, intent.device_query, intent_type, intent.params,
+    )
+
+    ctx = behavior_engine.current_context()
 
     # ------------------------------------------------------------------
-    # Tier 1 — TF cosine resolver
+    # Tier 1 — TF cosine + behavior scoring via decision engine
     # ------------------------------------------------------------------
-    device, confidence = resolve_device(intent.device_query)
+    device, cosine_score = resolve_device(intent.device_query)
 
     if device is None:
         return _error(503, "Device catalog is empty.")
 
-    logger.info("Tier 1: device=%s conf=%.4f", device["id"], confidence)
+    final_score, _, b_score = decision_engine.compute_score(
+        cosine_score, device, intent.action, ctx
+    )
 
-    if confidence >= CONFIDENCE_THRESHOLD:
+    logger.info(
+        "Tier 1: device=%s cosine=%.4f behavior=%.4f final=%.4f",
+        device["id"], cosine_score, b_score, final_score,
+    )
+
+    if final_score >= CONFIDENCE_THRESHOLD:
         return _execute_device(
             device, intent.action, intent.params,
-            normalized_command, confidence, tier="cosine",
+            normalized_command, final_score, tier="cosine",
+            cosine_score=cosine_score, behavior_score=b_score,
         )
 
     # ------------------------------------------------------------------
-    # Tier 2 — LLM contextual inference (Haiku 4.5 via Bedrock)
+    # Tier 2 — LLM contextual / behavioral inference
     # ------------------------------------------------------------------
-    logger.info("Tier 1 miss (%.4f < %.2f) — invoking LLM resolver.", confidence, CONFIDENCE_THRESHOLD)
+    logger.info(
+        "Tier 1 miss (%.4f < %.2f) — invoking LLM resolver (intent_type=%s).",
+        final_score, CONFIDENCE_THRESHOLD, intent_type,
+    )
 
     llm_result = llm_resolve(normalized_command, intent.action, _get_active_catalog())
 
     if llm_result and llm_result.get("confidence", 0) >= CONFIDENCE_THRESHOLD:
         catalog = _get_active_catalog()
-        llm_device = next((d for d in catalog if d["id"] == llm_result.get("device_id")), None)
+        llm_device = next(
+            (d for d in catalog if d["id"] == llm_result.get("device_id")), None
+        )
         if llm_device:
+            llm_action = llm_result["action"]
+            llm_conf = llm_result["confidence"]
+            _, _, llm_b_score = decision_engine.compute_score(
+                llm_conf, llm_device, llm_action, ctx
+            )
             return _execute_device(
-                llm_device,
-                llm_result["action"],
+                llm_device, llm_action,
                 llm_result.get("params") or {},
-                normalized_command,
-                llm_result["confidence"],
+                normalized_command, llm_conf,
                 tier="llm",
                 reasoning=llm_result.get("reasoning", ""),
+                cosine_score=cosine_score,
+                behavior_score=llm_b_score,
             )
 
     # ------------------------------------------------------------------
@@ -264,11 +283,13 @@ def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
     return _error(
         422,
         f"Could not resolve command with sufficient confidence "
-        f"(cosine={confidence:.4f}, threshold={CONFIDENCE_THRESHOLD}). "
+        f"(final={final_score:.4f}, threshold={CONFIDENCE_THRESHOLD}). "
         f"Closest cosine match: '{device['name']}'.",
         extra={
             "best_match_id": device["id"],
-            "cosine_confidence": confidence,
+            "cosine_score": cosine_score,
+            "behavior_score": b_score,
+            "final_score": final_score,
             "threshold": CONFIDENCE_THRESHOLD,
             "hint": "Use POST /learn to add new phrases for a device.",
         },
@@ -283,8 +304,9 @@ def _execute_device(
     confidence: float,
     tier: str,
     reasoning: str = "",
+    cosine_score: float = 0.0,
+    behavior_score: float = 0.5,
 ) -> Dict[str, Any]:
-    # --- Capability check ---
     if action not in device["capabilities"]:
         return _error(
             422,
@@ -292,11 +314,12 @@ def _execute_device(
             extra={"supported": device["capabilities"]},
         )
 
-    # --- Parameter check ---
     if action == "set_brightness" and "brightness" not in params:
-        return _error(400, "set_brightness requires a brightness value, e.g. 'set brightness to 75%'.")
+        return _error(
+            400,
+            "set_brightness requires a brightness value, e.g. 'set brightness to 75%'.",
+        )
 
-    # --- Execute ---
     steps = plan_device_execution(device, action, params)
     try:
         results: List[StepResult] = asyncio.run(execute_steps(steps))
@@ -308,22 +331,33 @@ def _execute_device(
     if not result.success:
         return _error(502, result.error, extra={"device_id": device["id"]})
 
-    logger.info("Executed via %s tier — %s/%s → %s", tier, device["id"], action, result.result)
+    logger.info(
+        "Executed via %s tier — %s/%s → %s (final=%.4f cosine=%.4f behavior=%.4f)",
+        tier, device["id"], action, result.result,
+        confidence, cosine_score, behavior_score,
+    )
 
-    # --- Auto-learn ---
+    # Auto-learn
     if is_configured() and confidence >= LEARNING_THRESHOLD:
-        phrase = original_command if tier == "llm" else original_command
-        save_learned_phrase(device["id"], phrase, confidence)
+        save_learned_phrase(device["id"], original_command, confidence)
         if tier == "llm":
             invalidate_learned_phrases_cache()
 
-    response = {
+    # Persist behavior event in Memgraph
+    graph_engine.record_event(device["id"], action, original_command)
+
+    response: Dict[str, Any] = {
         "type": "device",
         "device_id": device["id"],
         "device_name": device["name"],
         "action": action,
         "confidence": confidence,
         "resolution_tier": tier,
+        "scores": {
+            "cosine": cosine_score,
+            "behavior": behavior_score,
+            "final": confidence,
+        },
         "result": result.result,
     }
     if reasoning:
