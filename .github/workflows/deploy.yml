@@ -126,13 +126,15 @@ jobs:
       # ----------------------------------------------------------------
       # 6. Resolve Memgraph parameters
       #
-      #    Memgraph host is discovered directly from EC2 by tag:
-      #      tag:memgraph=true (running instance)
+      #    Host IP is no longer needed at deploy time — the Lambda discovers
+      #    it at runtime by querying EC2 for tag:memgraph=true.
       #
-      #    Secret ARN is still sourced from the contextweave stack:
-      #      MemgraphSecretArn
+      #    Instance ID is still resolved here so step 10 can open the
+      #    Bolt ingress rule on the Memgraph security group.
+      #
+      #    Secret ARN comes from the contextweave stack: MemgraphSecretArn.
       # ----------------------------------------------------------------
-      - name: Resolve Memgraph host (EC2 tag) and secret
+      - name: Resolve Memgraph instance and secret
         id: memgraph
         run: |
           MEMGRAPH_INSTANCE_ID=$(aws ec2 describe-instances \
@@ -143,13 +145,9 @@ jobs:
             --query "Reservations[].Instances[].InstanceId | [0]" \
             --output text)
 
-          MEMGRAPH_HOST=""
-          if [ -n "$MEMGRAPH_INSTANCE_ID" ] && [ "$MEMGRAPH_INSTANCE_ID" != "None" ]; then
-            MEMGRAPH_HOST=$(aws ec2 describe-instances \
-              --region "$AWS_REGION" \
-              --instance-ids "$MEMGRAPH_INSTANCE_ID" \
-              --query "Reservations[0].Instances[0].PrivateIpAddress" \
-              --output text)
+          if [ -z "$MEMGRAPH_INSTANCE_ID" ] || [ "$MEMGRAPH_INSTANCE_ID" = "None" ]; then
+            echo "WARNING: No running EC2 instance with tag memgraph=true — ingress rule step will be skipped"
+            MEMGRAPH_INSTANCE_ID=""
           fi
 
           MEMGRAPH_SECRET_ARN=$(aws cloudformation describe-stacks \
@@ -158,25 +156,14 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='MemgraphSecretArn'].OutputValue" \
             --output text)
 
-          # Non-fatal: DeviceWeave runs without Memgraph (behavior scores disabled)
-          if [ -z "$MEMGRAPH_INSTANCE_ID" ] || [ "$MEMGRAPH_INSTANCE_ID" = "None" ]; then
-            echo "WARNING: No running EC2 instance found with tag memgraph=true — behavior engine will be disabled"
-            MEMGRAPH_INSTANCE_ID=""
-            MEMGRAPH_HOST=""
-          elif [ -z "$MEMGRAPH_HOST" ] || [ "$MEMGRAPH_HOST" = "None" ]; then
-            echo "WARNING: Could not resolve private IP for instance $MEMGRAPH_INSTANCE_ID — behavior engine will be disabled"
-            MEMGRAPH_HOST=""
-          fi
-
           if [ -z "$MEMGRAPH_SECRET_ARN" ] || [ "$MEMGRAPH_SECRET_ARN" = "None" ]; then
             MEMGRAPH_SECRET_ARN=""
           fi
 
           echo "memgraph_instance_id=$MEMGRAPH_INSTANCE_ID" >> "$GITHUB_OUTPUT"
-          echo "memgraph_host=$MEMGRAPH_HOST"             >> "$GITHUB_OUTPUT"
-          echo "memgraph_secret_arn=$MEMGRAPH_SECRET_ARN" >> "$GITHUB_OUTPUT"
+          echo "memgraph_secret_arn=$MEMGRAPH_SECRET_ARN"   >> "$GITHUB_OUTPUT"
 
-          echo "Resolved MemgraphInstanceId=$MEMGRAPH_INSTANCE_ID MemgraphHost=$MEMGRAPH_HOST"
+          echo "Resolved MemgraphInstanceId=$MEMGRAPH_INSTANCE_ID"
 
       # ----------------------------------------------------------------
       # 7. Validate SAM template
@@ -209,7 +196,6 @@ jobs:
               StageName="$STAGE" \
               VpcId="${{ steps.vpc.outputs.vpc_id }}" \
               "LambdaSubnetIds=${{ steps.vpc.outputs.subnet_ids }}" \
-              MemgraphHost="${{ steps.memgraph.outputs.memgraph_host }}" \
               MemgraphSecretArn="${{ steps.memgraph.outputs.memgraph_secret_arn }}"
 
       # ----------------------------------------------------------------

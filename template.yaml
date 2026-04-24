@@ -21,7 +21,6 @@ Globals:
         KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
         SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
         GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
-        MEMGRAPH_HOST: !Ref MemgraphHost
         MEMGRAPH_PORT: !Ref MemgraphPort
         MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
         WEATHER_LAT: !Ref WeatherLat
@@ -53,15 +52,9 @@ Parameters:
       (e.g. subnet-01714c0c1b4590e4e,subnet-0a3a13a3a3b5105cd).
 
   # -----------------------------------------------------------------------
-  # Memgraph — resolved from the contextweave-rag-prod stack by GitHub Actions
+  # Memgraph — host is discovered at Lambda runtime via EC2 tag memgraph=true.
+  # Only the port and secret ARN are supplied at deploy time.
   # -----------------------------------------------------------------------
-  MemgraphHost:
-    Type: String
-    Description: >
-      Private IP of the Memgraph EC2 instance.
-      From contextweave-rag-prod stack output MemgraphPrivateIP.
-    Default: ""
-
   MemgraphPort:
     Type: Number
     Description: Memgraph Bolt port (default 7687).
@@ -233,7 +226,6 @@ Resources:
           KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
           SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
           GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
-          MEMGRAPH_HOST: !Ref MemgraphHost
           MEMGRAPH_PORT: !Ref MemgraphPort
           MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
       Policies:
