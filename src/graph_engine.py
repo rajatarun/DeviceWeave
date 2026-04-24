@@ -84,12 +84,27 @@ def _get_driver():
 def _ensure_schema(driver) -> None:
     """Create indexes on first connection so queries stay fast."""
     with driver.session() as session:
-        session.run(
-            "CREATE INDEX ON :Device(device_id) IF NOT EXISTS;"
+        _create_index_if_missing(session, "CREATE INDEX ON :Device(device_id);")
+        _create_index_if_missing(
+            session, "CREATE INDEX ON :BehaviorEvent(action);"
         )
-        session.run(
-            "CREATE INDEX ON :BehaviorEvent(action) IF NOT EXISTS;"
-        )
+
+
+def _create_index_if_missing(session, statement: str) -> None:
+    """
+    Run Memgraph index DDL in a backwards-compatible, idempotent way.
+
+    Some Memgraph versions reject `IF NOT EXISTS` in `CREATE INDEX` syntax.
+    We execute vanilla `CREATE INDEX` and tolerate "already exists" errors.
+    """
+    try:
+        session.run(statement)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "already exists" in msg or "equivalent index already exists" in msg:
+            logger.debug("Index already exists for statement: %s", statement)
+            return
+        raise
 
 
 # ---------------------------------------------------------------------------
