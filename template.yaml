@@ -175,6 +175,7 @@ Resources:
                 - ec2:CreateNetworkInterface
                 - ec2:DescribeNetworkInterfaces
                 - ec2:DeleteNetworkInterface
+                - ec2:DescribeInstances
               Resource: "*"
       Events:
         ExecuteCommand:
@@ -264,6 +265,7 @@ Resources:
                 - ec2:CreateNetworkInterface
                 - ec2:DescribeNetworkInterfaces
                 - ec2:DeleteNetworkInterface
+                - ec2:DescribeInstances
               Resource: "*"
       Events:
         TriggerIngest:
