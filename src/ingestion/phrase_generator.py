@@ -51,7 +51,17 @@ def generate_phrases(name: str, device_type: str, capabilities: List[str]) -> Li
 
     try:
         resp = client.invoke_model(modelId=_MODEL_ID, body=body)
-        text = json.loads(resp["body"].read())["content"][0]["text"].strip()
+        payload = json.loads(resp["body"].read())
+        logger.debug("Bedrock raw response for %r: %s", name, payload)
+        text = payload["content"][0]["text"].strip()
+        # Strip markdown code fences if the model wrapped the JSON
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1]  # drop opening fence line
+            text = text.rsplit("```", 1)[0]  # drop closing fence
+            text = text.strip()
+        if not text:
+            logger.warning("Bedrock returned empty text for %r — skipping.", name)
+            return []
         phrases = json.loads(text)
         if not isinstance(phrases, list):
             raise ValueError(f"Expected list, got {type(phrases).__name__}")
