@@ -12,6 +12,7 @@ Globals:
         LOG_LEVEL: INFO
         LEARNING_TABLE_NAME: !Ref LearningTable
         LEARNING_CONFIDENCE_THRESHOLD: "0.85"
+        CONFIDENCE_THRESHOLD: "0.4"
         DEVICE_REGISTRY_TABLE: !Ref DeviceRegistryTable
 
 Parameters:
