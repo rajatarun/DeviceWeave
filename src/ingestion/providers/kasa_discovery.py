@@ -20,10 +20,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from kasa import Discover, SmartBulb, SmartPlug
+from kasa import Credentials, Discover, SmartBulb, SmartPlug
 
 from ingestion.providers.base import AbstractDiscoveryProvider
 
@@ -32,6 +33,43 @@ logger = logging.getLogger(__name__)
 # UDP broadcast timeout in seconds.  5 s is sufficient for a quiet LAN;
 # raise to 10 if devices are consistently missed on first attempt.
 _DISCOVERY_TIMEOUT = 5
+
+_KASA_SECRET_ARN: str = os.environ.get("KASA_SECRET_ARN", "")
+
+# Module-level cache — populated once per warm Lambda container.
+_credentials_cache: Optional[Credentials] = None
+
+
+def _get_credentials() -> Optional[Credentials]:
+    """
+    Fetch Kasa credentials from Secrets Manager on first call; return cached
+    value on subsequent calls within the same Lambda container.
+
+    Expected secret value (JSON):
+        {"email": "user@example.com", "password": "secret"}
+
+    Returns None if KASA_SECRET_ARN is not set (local / unauthenticated use).
+    """
+    global _credentials_cache
+    if _credentials_cache is not None:
+        return _credentials_cache
+    if not _KASA_SECRET_ARN:
+        return None
+
+    import boto3
+    client = boto3.client("secretsmanager")
+    try:
+        resp = client.get_secret_value(SecretId=_KASA_SECRET_ARN)
+        secret = json.loads(resp["SecretString"])
+        _credentials_cache = Credentials(
+            username=secret["email"],
+            password=secret["password"],
+        )
+        logger.info("Kasa credentials loaded from Secrets Manager.")
+        return _credentials_cache
+    except Exception as exc:
+        logger.error("Failed to load Kasa credentials from Secrets Manager: %s", exc)
+        return None
 
 
 class KasaDiscovery(AbstractDiscoveryProvider):
@@ -50,8 +88,12 @@ class KasaDiscovery(AbstractDiscoveryProvider):
         """
         from ingestion.device_registry import DeviceRecord  # local to avoid circular
 
+        credentials = _get_credentials()
         try:
-            raw: Dict[str, Any] = await Discover.discover(timeout=_DISCOVERY_TIMEOUT)
+            raw: Dict[str, Any] = await Discover.discover(
+                credentials=credentials,
+                timeout=_DISCOVERY_TIMEOUT,
+            )
         except Exception as exc:
             logger.error("Kasa broadcast discovery failed: %s", exc)
             return []
