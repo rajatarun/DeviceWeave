@@ -2,32 +2,98 @@
 Memgraph graph engine — Bolt client for behavior events and scene graphs.
 
 Connection is lazy and optional: every public function returns a safe default
-when MEMGRAPH_HOST is unset or the instance is unreachable.  The rest of the
-system never sees an exception from this module.
+when no Memgraph instance is reachable.  The rest of the system never sees an
+exception from this module.
+
+Host resolution (runtime, cached for process lifetime):
+  1. MEMGRAPH_HOST env var — static override, used as-is when set.
+  2. EC2 tag discovery — queries EC2 for a running instance tagged
+     memgraph=true and uses its PrivateIpAddress.
 
 Credentials come from Secrets Manager (MEMGRAPH_SECRET_ARN):
     {"username": "memgraph", "password": "..."}
 If the secret is absent the driver connects unauthenticated (Memgraph default).
+
+record_event() is fire-and-forget (daemon thread): it never blocks the Lambda
+response.  Behavior READ queries (query_behavior_history, query_top_actions)
+remain synchronous because they inform confidence scoring.
 
 Schema (Cypher, created on first use):
     (:Device {device_id})
     (:Device)-[:HAD_EVENT]->(:BehaviorEvent {action, hour, day_of_week, command, ts})
 """
 
+import concurrent.futures
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_MEMGRAPH_HOST: str = os.environ.get("MEMGRAPH_HOST", "")
+_MEMGRAPH_HOST_OVERRIDE: str = os.environ.get("MEMGRAPH_HOST", "")
 _MEMGRAPH_PORT: int = int(os.environ.get("MEMGRAPH_PORT", "7687"))
 _MEMGRAPH_SECRET_ARN: str = os.environ.get("MEMGRAPH_SECRET_ARN", "")
 
 _driver = None
 _cred_cache: Optional[Dict[str, str]] = None
+_resolved_host: Optional[str] = None  # None = not yet resolved; "" = not found
+_host_lock = threading.Lock()
+
+# Module-level executor: persists across Lambda warm-container reuses.
+# Lambda freezes (not kills) the process after each invocation, so work
+# submitted here can complete before the next request unfreezes the container.
+# max_workers=1 keeps Bolt writes sequential on a single-node Memgraph.
+_graph_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="graph-write"
+)
+
+
+# ---------------------------------------------------------------------------
+# Runtime EC2 host discovery
+# ---------------------------------------------------------------------------
+
+def _resolve_host() -> str:
+    """
+    Return the Memgraph private IP for this process, resolving once and caching.
+
+    Priority:
+      1. MEMGRAPH_HOST env var (static override from CloudFormation / local dev).
+      2. EC2 describe-instances filtered by tag memgraph=true + running state.
+    """
+    global _resolved_host
+    if _MEMGRAPH_HOST_OVERRIDE:
+        return _MEMGRAPH_HOST_OVERRIDE
+    if _resolved_host is not None:
+        return _resolved_host
+    with _host_lock:
+        if _resolved_host is not None:
+            return _resolved_host
+        try:
+            import boto3
+            resp = boto3.client("ec2").describe_instances(
+                Filters=[
+                    {"Name": "tag:memgraph", "Values": ["true"]},
+                    {"Name": "instance-state-name", "Values": ["running"]},
+                ]
+            )
+            reservations = resp.get("Reservations", [])
+            ip = ""
+            if reservations:
+                ip = reservations[0]["Instances"][0].get("PrivateIpAddress", "") or ""
+            _resolved_host = ip
+            if ip:
+                logger.info("Memgraph EC2 discovered at %s (tag memgraph=true)", ip)
+            else:
+                logger.warning(
+                    "No running EC2 instance with tag memgraph=true — behavior scoring disabled"
+                )
+        except Exception as exc:
+            logger.warning("EC2 Memgraph host discovery failed: %s — behavior scoring disabled", exc)
+            _resolved_host = ""
+    return _resolved_host
 
 
 # ---------------------------------------------------------------------------
@@ -62,19 +128,20 @@ def _get_driver():
     global _driver
     if _driver is not None:
         return _driver
-    if not _MEMGRAPH_HOST:
+    host = _resolve_host()
+    if not host:
         return None
     try:
         from neo4j import GraphDatabase
         creds = _get_credentials()
         auth = (creds["username"], creds["password"]) if creds["password"] else None
         _driver = GraphDatabase.driver(
-            f"bolt://{_MEMGRAPH_HOST}:{_MEMGRAPH_PORT}",
+            f"bolt://{host}:{_MEMGRAPH_PORT}",
             auth=auth,
             connection_timeout=3,
         )
         _ensure_schema(_driver)
-        logger.info("Memgraph connected — %s:%d", _MEMGRAPH_HOST, _MEMGRAPH_PORT)
+        logger.info("Memgraph connected — %s:%d", host, _MEMGRAPH_PORT)
         return _driver
     except Exception as exc:
         logger.warning("Memgraph unavailable (%s) — behavior scoring disabled", exc)
@@ -113,11 +180,17 @@ def _create_index_if_missing(session, statement: str) -> None:
 
 def record_event(device_id: str, action: str, command: str) -> None:
     """
-    Persist one behavior event for a device.
+    Fire-and-forget: submit a behavior event write to the module-level executor
+    and return immediately so the Lambda response is never delayed by Memgraph.
 
-    Called after every successful command execution so the behavior engine
-    can learn usage patterns over time.
+    The executor persists across Lambda warm-container reuses: work submitted
+    here can finish during the frozen container window before the next request
+    arrives.  Best-effort — silently skipped when Memgraph is unavailable.
     """
+    _graph_executor.submit(_write_event, device_id, action, command)
+
+
+def _write_event(device_id: str, action: str, command: str) -> None:
     driver = _get_driver()
     if driver is None:
         return
