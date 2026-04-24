@@ -16,22 +16,22 @@ DeviceWeave is not a smart home app or a voice assistant. It is an **AI executio
 ## Architecture
 
 ```
-POST /execute
-     │
-     ▼
- Scene Resolver ── conf ≥ 0.70 ──────► Execution Planner
-     │ (nearest-neighbour                   │  (asyncio.gather —
-     │  phrase cosine)                      │   all steps concurrent)
-     │ below threshold                      ▼
-     ▼                               Provider Registry
- Intent Parser                       ├── KasaAdapter (SmartPlug)
-     │ (deterministic regex)         └── KasaAdapter (SmartBulb)
-     ▼                                         │
- Device Resolver ── conf ≥ 0.70 ──► Safety Layer
-     │ (TF cosine +                  ├── capability check
-     │  learned phrases)             └── param validation
-     │ below threshold                         │
-     ▼                                         ▼
+POST /execute                       POST /ingest  ·  EventBridge schedule
+     │                                    │
+     ▼                                    ▼
+ Scene Resolver ── conf ≥ 0.70 ──► Execution Planner   Ingestion Pipeline
+     │ (nearest-neighbour              │ (asyncio.gather  ├── full sync (daily)
+     │  phrase cosine)                 │  concurrent)     └── delta sync (6 h)
+     │ below threshold                 ▼                        │
+     ▼                          Provider Registry         Kasa Discovery
+ Intent Parser                  ├── KasaAdapter           (UDP broadcast)
+     │ (deterministic regex)    └── KasaAdapter                 │
+     ▼                                    │               Secrets Manager
+ Device Resolver ── conf ≥ 0.70 ──► Safety Layer         (kasa credentials)
+     │ (TF cosine +                  ├── capability check        │
+     │  learned phrases)             └── param validation        ▼
+     │ below threshold                         │          DynamoDB registry
+     ▼                                         ▼          (device fleet)
   422 Rejected                        Kasa LAN execution
                                                │
                                                ▼
@@ -52,6 +52,8 @@ POST /execute
 
 ## API
 
+### Execution API
+
 | Method | Path | Body | Description |
 |--------|------|------|-------------|
 | `POST` | `/execute` | `{"command": "..."}` | Execute a natural language device or scene command |
@@ -60,7 +62,64 @@ POST /execute
 | `GET` | `/devices` | — | List registered devices and their capabilities |
 | `GET` | `/scenes` | — | List registered scenes and sample phrases |
 
-### Example requests
+### Ingestion API
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/ingest` | `{"provider": "kasa", "mode": "full" \| "delta"}` | Trigger device discovery and sync to DynamoDB registry |
+
+#### Sync modes
+
+| Mode | Behaviour |
+|------|-----------|
+| `full` | Discovers all devices on the network, upserts every record, and marks any previously-active device not found this run as `offline`. Used for daily reconciliation. |
+| `delta` | Discovers all devices, but only writes records whose fingerprint (SHA-256 of ip + name + model + mac) has changed. Unchanged devices get a `last_seen` touch only. Never marks offline. Used for frequent background polls. |
+
+`mode` defaults to `delta` if omitted. `provider` defaults to `kasa` if omitted.
+
+Schedules run automatically via EventBridge:
+- **Full sync** — once per day (`rate(24 hours)`)
+- **Delta sync** — every 6 hours (`rate(6 hours)`)
+
+#### Example requests
+
+```bash
+# On-demand full sync — discover all Kasa devices and reconcile registry
+curl -X POST $API_URL/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "kasa", "mode": "full"}'
+
+# On-demand delta sync — only write changed records
+curl -X POST $API_URL/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "kasa", "mode": "delta"}'
+```
+
+#### Response (202 Accepted)
+
+```json
+{
+  "provider": "kasa",
+  "mode": "full",
+  "discovered": 4,
+  "upserted": 3,
+  "unchanged": 0,
+  "offline": 1,
+  "errors": 0,
+  "duration_ms": 3241.7
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `discovered` | Devices that responded to the UDP broadcast and were probed successfully |
+| `upserted` | Records written or overwritten in DynamoDB |
+| `unchanged` | Records whose fingerprint matched — `last_seen` updated only (delta mode) |
+| `offline` | Active registry entries not found this run, now marked `offline` (full mode) |
+| `errors` | Devices that responded to broadcast but failed during `update()` probe |
+| `duration_ms` | Total wall time including network discovery |
+
+### Execution example requests
 
 ```bash
 # Single device command
@@ -84,7 +143,7 @@ curl -X POST $API_URL/learn \
   -d '{"device_id": "office_light", "phrase": "my reading lamp"}'
 ```
 
-### Response shapes
+### Execution response shapes
 
 **Device command**
 ```json
@@ -155,8 +214,11 @@ DeviceWeave/
 ├── .github/
 │   └── workflows/
 │       └── deploy.yml               GitHub Actions CI/CD
+├── docs/
+│   └── oidc-trust-policy.json       IAM trust policy for GitHub OIDC role
 └── src/
-    ├── app.py                       Lambda handler — routing and dispatch
+    ├── app.py                       Execution Lambda handler — routing and dispatch
+    ├── ingestion_handler.py         Ingestion Lambda handler — API GW / EventBridge / direct
     ├── intent_parser.py             Deterministic regex intent parser
     ├── device_resolver.py           TF-cosine device resolver + catalog
     ├── scene_catalog.py             Scene catalog + nearest-neighbour resolver
@@ -164,10 +226,18 @@ DeviceWeave/
     ├── learning_store.py            DynamoDB phrase learning store
     ├── kasa_provider.py             Compatibility shim → KasaAdapter
     ├── requirements.txt             Runtime dep: python-kasa==0.7.7
-    └── providers/
-        ├── __init__.py              Protocol registry
-        ├── base.py                  BaseDeviceProvider ABC + ProviderError
-        └── kasa_adapter.py         TP-Link Kasa LAN adapter
+    ├── providers/                   Execution protocol adapters
+    │   ├── __init__.py              Protocol registry
+    │   ├── base.py                  BaseDeviceProvider ABC + ProviderError
+    │   └── kasa_adapter.py          TP-Link Kasa LAN adapter
+    └── ingestion/                   Device discovery and registry sync
+        ├── __init__.py
+        ├── pipeline.py              IngestionPipeline orchestrator (full / delta)
+        ├── device_registry.py       DeviceRecord dataclass + DynamoDB operations
+        └── providers/               Discovery provider adapters
+            ├── __init__.py
+            ├── base.py              AbstractDiscoveryProvider ABC
+            └── kasa_discovery.py    Kasa UDP broadcast discovery
 ```
 
 ---
@@ -233,6 +303,19 @@ The role `arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer` 
   ]
 }
 ```
+
+### Kasa credentials secret (one-time)
+
+The ingestion Lambda reads Kasa account credentials from a single Secrets Manager secret. Create it before the first deploy:
+
+```bash
+aws secretsmanager create-secret \
+  --name deviceweave/kasa-credentials \
+  --region us-east-1 \
+  --secret-string '{"email":"you@example.com","password":"yourpassword"}'
+```
+
+The secret ARN is injected automatically into the Lambda via `KASA_SECRET_ARN`. If the variable is absent (local dev), discovery falls back to unauthenticated mode (compatible with older Kasa firmware).
 
 ### Required GitHub Secret
 
