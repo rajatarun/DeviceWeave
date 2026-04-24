@@ -10,11 +10,11 @@ API: https://open-meteo.com/
 No credentials required.  Rate limit is generous for single-device use.
 
 Required env vars:
-    WEATHER_LAT   float   Latitude   (default 37.7749  — San Francisco)
-    WEATHER_LON   float   Longitude  (default -122.4194)
+    WEATHER_LAT   float   Latitude   (default 33.1962097 — Plano, TX)
+    WEATHER_LON   float   Longitude  (default -96.5158954)
 
-The defaults deliberately point somewhere so the system degrades gracefully
-(reasonable weather data) rather than hard-failing when lat/lon are unconfigured.
+The defaults point to your deployment location so the system works correctly
+out of the box without any parameter override.
 """
 
 import json
@@ -27,8 +27,8 @@ from urllib.error import URLError
 
 logger = logging.getLogger(__name__)
 
-_LAT: float = float(os.environ.get("WEATHER_LAT", "37.7749"))
-_LON: float = float(os.environ.get("WEATHER_LON", "-122.4194"))
+_LAT: float = float(os.environ.get("WEATHER_LAT", "33.1962097"))
+_LON: float = float(os.environ.get("WEATHER_LON", "-96.5158954"))
 _API_URL = "https://api.open-meteo.com/v1/forecast"
 _TIMEOUT_S = 3  # fail fast — weather is enrichment, not critical path
 

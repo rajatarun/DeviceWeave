@@ -79,13 +79,13 @@ Parameters:
   # -----------------------------------------------------------------------
   WeatherLat:
     Type: String
-    Default: "37.7749"
-    Description: Latitude for Open-Meteo weather lookups (default San Francisco).
+    Default: "33.1962097"
+    Description: Latitude for Open-Meteo weather lookups (Plano, TX).
 
   WeatherLon:
     Type: String
-    Default: "-122.4194"
-    Description: Longitude for Open-Meteo weather lookups (default San Francisco).
+    Default: "-96.5158954"
+    Description: Longitude for Open-Meteo weather lookups (Plano, TX).
 
 Resources:
   # -------------------------------------------------------------------
