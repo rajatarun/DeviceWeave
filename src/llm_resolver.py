@@ -15,6 +15,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+import weather_client
+
 logger = logging.getLogger(__name__)
 
 _MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
@@ -64,9 +66,10 @@ def llm_resolve(
     )
 
     hint_line = f"\nRule-based parser action hint: {action_hint}" if action_hint else ""
+    weather_line = f"\n{weather_client.summary_line()}"
 
     user_msg = (
-        f'User command: "{query}"{hint_line}\n\n'
+        f'User command: "{query}"{hint_line}{weather_line}\n\n'
         f"Available devices:\n{device_lines}\n\n"
         f"Return the JSON object."
     )

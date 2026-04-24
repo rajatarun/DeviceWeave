@@ -25,26 +25,25 @@ jobs:
   deploy:
     name: Build & Deploy via AWS SAM
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     # ----------------------------------------------------------------
     # OIDC permissions — id-token:write lets the runner request a JWT
     # from GitHub's OIDC provider, which AWS STS exchanges for temporary
     # credentials via AssumeRoleWithWebIdentity.
-    # contents:read is required by actions/checkout.
-    # No other permissions are granted; the principle of least privilege
-    # is enforced at the IAM role level (see docs/oidc-trust-policy.json).
     # ----------------------------------------------------------------
     permissions:
       id-token: write
       contents: read
 
     env:
-      # Default stage for push-triggered runs; overridden by workflow_dispatch input.
       STAGE: ${{ github.event.inputs.stage || 'prod' }}
       STACK_NAME: deviceweave-${{ github.event.inputs.stage || 'prod' }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       ASSUME_ROLE_ARN: arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer
+      # Cross-stack source names (override via repo secrets if they differ per env)
+      SHARED_STACK_NAME: ${{ secrets.SHARED_STACK_NAME || 'tarun-teamweave-shared' }}
+      MEMGRAPH_STACK_NAME: ${{ secrets.MEMGRAPH_STACK_NAME || 'contextweave-rag-prod' }}
 
     steps:
       # ----------------------------------------------------------------
@@ -62,26 +61,18 @@ jobs:
           python-version: '3.11'
 
       # ----------------------------------------------------------------
-      # 3. Install AWS SAM CLI explicitly (do NOT assume pre-installed)
+      # 3. Install AWS SAM CLI
       # ----------------------------------------------------------------
       - name: Install AWS SAM CLI
         run: |
           pip install --upgrade pip
           pip install aws-sam-cli==1.121.0
 
-      # Verify SAM is usable before spending AWS credits.
       - name: Verify SAM CLI version
         run: sam --version
 
       # ----------------------------------------------------------------
-      # 4. Assume IAM role via GitHub OIDC (no long-lived keys required)
-      #
-      #    The action requests a GitHub-signed OIDC JWT, then calls
-      #    sts:AssumeRoleWithWebIdentity to exchange it for temporary
-      #    credentials scoped to ASSUME_ROLE_ARN.
-      #
-      #    The IAM role trust policy must allow this GitHub repo as a
-      #    federated principal — see docs/oidc-trust-policy.json.
+      # 4. Assume IAM role via GitHub OIDC
       # ----------------------------------------------------------------
       - name: Assume deployer role via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -91,13 +82,93 @@ jobs:
           role-session-name: GitHubActions-DeviceWeave-${{ github.run_id }}
 
       # ----------------------------------------------------------------
-      # 5. Validate the SAM template before building
+      # 5. Resolve VPC parameters from shared infrastructure stack
+      #
+      #    Stack: tarun-teamweave-shared  (or SHARED_STACK_NAME secret)
+      #    Outputs consumed:
+      #      LambdaSubnetIds  — comma-separated private subnet IDs
+      #
+      #    VpcId is derived from the first subnet via EC2 DescribeSubnets
+      #    (the shared stack does not export VpcId directly).
+      # ----------------------------------------------------------------
+      - name: Resolve VPC parameters from shared stack
+        id: vpc
+        run: |
+          SUBNET_IDS=$(aws cloudformation describe-stacks \
+            --stack-name "$SHARED_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='LambdaSubnetIds'].OutputValue" \
+            --output text)
+
+          if [ -z "$SUBNET_IDS" ] || [ "$SUBNET_IDS" = "None" ]; then
+            echo "ERROR: Could not resolve LambdaSubnetIds from stack $SHARED_STACK_NAME"
+            exit 1
+          fi
+
+          # Derive VPC ID from the first subnet
+          FIRST_SUBNET=$(echo "$SUBNET_IDS" | cut -d',' -f1 | tr -d ' ')
+          VPC_ID=$(aws ec2 describe-subnets \
+            --subnet-ids "$FIRST_SUBNET" \
+            --region "$AWS_REGION" \
+            --query "Subnets[0].VpcId" \
+            --output text)
+
+          if [ -z "$VPC_ID" ] || [ "$VPC_ID" = "None" ]; then
+            echo "ERROR: Could not derive VpcId from subnet $FIRST_SUBNET"
+            exit 1
+          fi
+
+          echo "vpc_id=$VPC_ID"           >> "$GITHUB_OUTPUT"
+          echo "subnet_ids=$SUBNET_IDS"   >> "$GITHUB_OUTPUT"
+
+          echo "Resolved VpcId=$VPC_ID from subnets=$SUBNET_IDS"
+
+      # ----------------------------------------------------------------
+      # 6. Resolve Memgraph parameters from contextweave-rag-prod stack
+      #
+      #    Stack: contextweave-rag-prod  (or MEMGRAPH_STACK_NAME secret)
+      #    Outputs consumed:
+      #      MemgraphPrivateIP   — bolt host for neo4j driver
+      #      MemgraphSecretArn   — credentials in Secrets Manager
+      # ----------------------------------------------------------------
+      - name: Resolve Memgraph parameters from contextweave stack
+        id: memgraph
+        run: |
+          MEMGRAPH_HOST=$(aws cloudformation describe-stacks \
+            --stack-name "$MEMGRAPH_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='MemgraphPrivateIP'].OutputValue" \
+            --output text)
+
+          MEMGRAPH_SECRET_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$MEMGRAPH_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='MemgraphSecretArn'].OutputValue" \
+            --output text)
+
+          # Non-fatal: DeviceWeave runs without Memgraph (behavior scores disabled)
+          if [ -z "$MEMGRAPH_HOST" ] || [ "$MEMGRAPH_HOST" = "None" ]; then
+            echo "WARNING: MemgraphPrivateIP not found in $MEMGRAPH_STACK_NAME — behavior engine will be disabled"
+            MEMGRAPH_HOST=""
+          fi
+
+          if [ -z "$MEMGRAPH_SECRET_ARN" ] || [ "$MEMGRAPH_SECRET_ARN" = "None" ]; then
+            MEMGRAPH_SECRET_ARN=""
+          fi
+
+          echo "memgraph_host=$MEMGRAPH_HOST"             >> "$GITHUB_OUTPUT"
+          echo "memgraph_secret_arn=$MEMGRAPH_SECRET_ARN" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved MemgraphHost=$MEMGRAPH_HOST"
+
+      # ----------------------------------------------------------------
+      # 7. Validate SAM template
       # ----------------------------------------------------------------
       - name: Validate SAM template
         run: sam validate --region "$AWS_REGION"
 
       # ----------------------------------------------------------------
-      # 6. Build Lambda package (resolves requirements.txt, creates .aws-sam/)
+      # 8. SAM build
       # ----------------------------------------------------------------
       - name: SAM build
         run: |
@@ -106,7 +177,7 @@ jobs:
             --parallel
 
       # ----------------------------------------------------------------
-      # 7. sam deploy --resolve-s3 creates/reuses a managed artifact bucket.
+      # 9. SAM deploy — passes all cross-stack resolved parameters
       # ----------------------------------------------------------------
       - name: SAM deploy
         run: |
@@ -118,10 +189,57 @@ jobs:
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
             --parameter-overrides \
-                StageName="$STAGE"
+              StageName="$STAGE" \
+              VpcId="${{ steps.vpc.outputs.vpc_id }}" \
+              "LambdaSubnetIds=${{ steps.vpc.outputs.subnet_ids }}" \
+              MemgraphHost="${{ steps.memgraph.outputs.memgraph_host }}" \
+              MemgraphSecretArn="${{ steps.memgraph.outputs.memgraph_secret_arn }}"
 
       # ----------------------------------------------------------------
-      # 8. Print stack outputs for easy post-deploy verification
+      # 10. Open Memgraph Bolt ingress from the new Lambda SG
+      #
+      #     After deploy, the Lambda SG ID is known. Add it as an ingress
+      #     rule on the Memgraph instance's SG so Lambda can reach port 7687.
+      #     This step is idempotent — it is a no-op if the rule already exists.
+      # ----------------------------------------------------------------
+      - name: Allow Lambda SG ingress on Memgraph port 7687
+        if: ${{ steps.memgraph.outputs.memgraph_host != '' }}
+        run: |
+          # Get the Lambda SG just created by the deploy
+          LAMBDA_SG=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='LambdaSecurityGroupId'].OutputValue" \
+            --output text)
+
+          # Find the Memgraph instance's primary security group
+          MEMGRAPH_HOST="${{ steps.memgraph.outputs.memgraph_host }}"
+          MEMGRAPH_SG=$(aws ec2 describe-instances \
+            --region "$AWS_REGION" \
+            --filters "Name=private-ip-address,Values=$MEMGRAPH_HOST" \
+            --query "Reservations[0].Instances[0].SecurityGroups[0].GroupId" \
+            --output text)
+
+          if [ -z "$MEMGRAPH_SG" ] || [ "$MEMGRAPH_SG" = "None" ]; then
+            echo "WARNING: Could not find Memgraph instance security group — add ingress rule manually"
+            echo "  Source SG: $LAMBDA_SG  Port: 7687  Target SG: (Memgraph instance SG)"
+            exit 0
+          fi
+
+          # Add ingress rule — fails gracefully if the rule already exists
+          aws ec2 authorize-security-group-ingress \
+            --region "$AWS_REGION" \
+            --group-id "$MEMGRAPH_SG" \
+            --protocol tcp \
+            --port 7687 \
+            --source-group "$LAMBDA_SG" \
+            --tag-specifications "ResourceType=security-group-rule,Tags=[{Key=Name,Value=deviceweave-lambda-memgraph-bolt}]" \
+          || echo "Ingress rule already exists — skipping"
+
+          echo "Memgraph SG $MEMGRAPH_SG ← Lambda SG $LAMBDA_SG :7687"
+
+      # ----------------------------------------------------------------
+      # 11. Print stack outputs
       # ----------------------------------------------------------------
       - name: Print stack outputs
         run: |
