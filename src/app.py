@@ -45,6 +45,8 @@ from scene_catalog import SCENE_CATALOG, resolve_scene, scene_public_view
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(LOG_LEVEL)  # basicConfig is a no-op in Lambda
+for _noisy in ("botocore", "boto3", "urllib3", "s3transfer"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.70
