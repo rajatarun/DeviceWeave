@@ -21,12 +21,25 @@ logger = logging.getLogger(__name__)
 _MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _LEARNING_TABLE = os.environ.get("LEARNING_TABLE_NAME", "")
 
-_SYSTEM_PROMPT = (
-    "You are a smart home voice assistant expert. Generate diverse natural-language "
-    "phrases a user might say to control a smart home device. Vary formality, "
-    "phrasing, and context. Include both device-name phrases and context-only phrases. "
-    "Return ONLY a valid JSON array of strings — no explanation, no markdown."
-)
+_SYSTEM_PROMPT = """\
+You are a home automation command interpreter. Your job is to produce training \
+phrases that a real person would speak or type to control a smart home device.
+
+Rules:
+- Output ONLY a raw JSON array of strings. No markdown, no code fences, no explanation.
+- Each phrase must be something a person would naturally say to a voice assistant or \
+chat interface (e.g. Alexa, Google Home, or a custom assistant).
+- Cover a variety of intents: turning on/off, checking status, adjusting settings \
+(brightness, speed, colour temperature), and situational/contextual triggers.
+- Mix short commands ("lights off"), full sentences ("can you turn the fan on?"), \
+and context phrases ("it's too dark in here", "getting warm").
+- Include phrases that mention the device by name AND phrases that don't \
+(context-only, location-only).
+- Do NOT include phrases about schedules, timers, or routines.
+
+Example output format:
+["turn on the kitchen light", "switch off the fan", "dim the bedroom light to 50%", \
+"it's too bright", "I'm cold, turn on the heater"]"""
 
 
 def generate_phrases(name: str, device_type: str, capabilities: List[str]) -> List[str]:
@@ -34,17 +47,34 @@ def generate_phrases(name: str, device_type: str, capabilities: List[str]) -> Li
     import boto3
 
     client = boto3.client("bedrock-runtime", region_name="us-east-1")
+
+    cap_list = ", ".join(capabilities)
+    location_hint = ""
+    name_lower = name.lower()
+    for word in ("bedroom", "living", "kitchen", "office", "bathroom",
+                 "garage", "staircase", "gameroom", "hallway", "basement"):
+        if word in name_lower:
+            location_hint = f"  Location context: {word}\n"
+            break
+
     user_msg = (
-        f"Generate 12 natural-language control phrases for:\n"
-        f"  Name: {name}\n"
-        f"  Type: {device_type}\n"
-        f"  Capabilities: {', '.join(capabilities)}\n\n"
-        f"Include on/off phrases and any capability-specific phrases "
-        f"(brightness, colour, etc.)."
+        f"Generate 15 home automation control phrases for this device:\n"
+        f"  Device name: {name}\n"
+        f"  Device type: {device_type}\n"
+        f"  Capabilities: {cap_list}\n"
+        f"{location_hint}"
+        f"\n"
+        f"Include: on/off commands, status queries, capability-specific commands "
+        f"({'brightness levels, dimming' if 'set_brightness' in capabilities else ''}"
+        f"{'colour and colour temperature' if 'set_color' in capabilities else ''}"
+        f"), and situational phrases a person might say when they want this device "
+        f"to act without naming it directly.\n"
+        f"\n"
+        f"Return a raw JSON array of strings only."
     )
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 512,
+        "max_tokens": 768,
         "system": _SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_msg}],
     })
@@ -52,7 +82,8 @@ def generate_phrases(name: str, device_type: str, capabilities: List[str]) -> Li
     try:
         resp = client.invoke_model(modelId=_MODEL_ID, body=body)
         payload = json.loads(resp["body"].read())
-        logger.debug("Bedrock raw response for %r: %s", name, payload)
+        logger.debug("Bedrock response for %r — stop_reason=%s text=%r",
+                     name, payload.get("stop_reason"), payload.get("content"))
         text = payload["content"][0]["text"].strip()
         # Strip markdown code fences if the model wrapped the JSON
         if text.startswith("```"):
