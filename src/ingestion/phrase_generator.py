@@ -82,8 +82,8 @@ def generate_phrases(name: str, device_type: str, capabilities: List[str]) -> Li
     try:
         resp = client.invoke_model(modelId=_MODEL_ID, body=body)
         payload = json.loads(resp["body"].read())
-        logger.debug("Bedrock response for %r — stop_reason=%s text=%r",
-                     name, payload.get("stop_reason"), payload.get("content"))
+        logger.info("Bedrock response for %r — stop_reason=%s text=%r",
+                    name, payload.get("stop_reason"), payload.get("content"))
         text = payload["content"][0]["text"].strip()
         # Strip markdown code fences if the model wrapped the JSON
         if text.startswith("```"):
