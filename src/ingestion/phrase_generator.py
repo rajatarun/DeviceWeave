@@ -82,8 +82,8 @@ def generate_phrases(name: str, device_type: str, capabilities: List[str]) -> Li
     try:
         resp = client.invoke_model(modelId=_MODEL_ID, body=body)
         payload = json.loads(resp["body"].read())
-        logger.debug("Bedrock response for %r — stop_reason=%s text=%r",
-                     name, payload.get("stop_reason"), payload.get("content"))
+        logger.info("Bedrock response for %r — stop_reason=%s text=%r",
+                    name, payload.get("stop_reason"), payload.get("content"))
         text = payload["content"][0]["text"].strip()
         # Strip markdown code fences if the model wrapped the JSON
         if text.startswith("```"):
@@ -104,15 +104,25 @@ def generate_phrases(name: str, device_type: str, capabilities: List[str]) -> Li
 
 def save_generated_phrases(device_id: str, phrases: List[str]) -> int:
     """Write phrases to the learning table. Skips duplicates. Returns count saved."""
-    if not _LEARNING_TABLE or not phrases:
+    if not _LEARNING_TABLE:
+        logger.error(
+            "LEARNING_TABLE_NAME env var is not set — cannot save phrases for %s.", device_id
+        )
         return 0
+    if not phrases:
+        logger.warning("No phrases to save for %s.", device_id)
+        return 0
+
+    logger.info(
+        "Writing %d phrases for device %s to table %s…", len(phrases), device_id, _LEARNING_TABLE
+    )
 
     import boto3
     from botocore.exceptions import ClientError
 
     table = boto3.resource("dynamodb").Table(_LEARNING_TABLE)
     now = datetime.now(timezone.utc).isoformat()
-    saved = 0
+    saved = skipped = 0
 
     for phrase in phrases:
         normalized = phrase.lower()
@@ -130,14 +140,24 @@ def save_generated_phrases(device_id: str, phrases: List[str]) -> int:
             )
             saved += 1
         except ClientError as exc:
-            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            code = exc.response["Error"]["Code"]
+            if code == "ConditionalCheckFailedException":
+                skipped += 1
+            elif code == "AccessDeniedException":
+                logger.error(
+                    "DynamoDB AccessDenied writing to %s — role missing DynamoDBCrudPolicy "
+                    "for LearningTable. Patch the role or redeploy the stack. phrase=%r",
+                    _LEARNING_TABLE, normalized,
+                )
+                break
+            else:
                 logger.warning(
                     "Failed to save phrase %r for %s: %s", normalized, device_id, exc
                 )
 
     logger.info(
-        "Phrases for %s — generated=%d saved=%d skipped=%d",
-        device_id, len(phrases), saved, len(phrases) - saved,
+        "Phrases for %s — total=%d saved=%d skipped(dup)=%d",
+        device_id, len(phrases), saved, skipped,
     )
     return saved
 
