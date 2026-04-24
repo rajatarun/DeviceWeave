@@ -89,20 +89,34 @@ class KasaDiscovery(AbstractDiscoveryProvider):
         from ingestion.device_registry import DeviceRecord  # local to avoid circular
 
         credentials = _get_credentials()
+        logger.info(
+            "Starting Kasa discovery — timeout=%ds credentials=%s",
+            _DISCOVERY_TIMEOUT,
+            "loaded" if credentials else "none (unauthenticated)",
+        )
+
         try:
             raw: Dict[str, Any] = await Discover.discover(
                 credentials=credentials,
                 timeout=_DISCOVERY_TIMEOUT,
             )
         except Exception as exc:
-            logger.error("Kasa broadcast discovery failed: %s", exc)
+            logger.error("Kasa broadcast discovery failed: %s", exc, exc_info=True)
             return []
+
+        logger.info(
+            "Kasa broadcast complete — %d device(s) responded: %s",
+            len(raw),
+            list(raw.keys()) if raw else "[]",
+        )
 
         if not raw:
-            logger.info("Kasa discovery found 0 devices.")
+            logger.warning(
+                "No Kasa devices responded. Possible causes: Lambda not on the same "
+                "LAN/VPC subnet as devices, UDP broadcast blocked by a firewall or "
+                "security group, or all devices are offline."
+            )
             return []
-
-        logger.info("Kasa discovery found %d candidate devices; probing…", len(raw))
 
         tasks = [self._probe(ip, device) for ip, device in raw.items()]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -112,9 +126,14 @@ class KasaDiscovery(AbstractDiscoveryProvider):
             if isinstance(result, DeviceRecord):
                 records.append(result)
             elif isinstance(result, Exception):
-                logger.warning("Probe raised unexpected exception: %s", result)
+                logger.warning("Probe raised unexpected exception: %s", result, exc_info=result)
 
-        logger.info("Kasa discovery produced %d valid records.", len(records))
+        logger.info(
+            "Kasa discovery complete — responded=%d probed_ok=%d failed=%d",
+            len(raw),
+            len(records),
+            len(raw) - len(records),
+        )
         return records
 
     async def _probe(self, ip: str, device: Any) -> Any:
@@ -126,16 +145,31 @@ class KasaDiscovery(AbstractDiscoveryProvider):
         """
         from ingestion.device_registry import DeviceRecord
 
+        logger.debug("Probing device at %s (type=%s)…", ip, type(device).__name__)
         try:
             await device.update()
         except Exception as exc:
-            logger.warning("Failed to probe Kasa device at %s: %s", ip, exc)
+            logger.warning(
+                "update() failed for device at %s: %s", ip, exc, exc_info=True
+            )
             return None
+
+        logger.info(
+            "Probed %s — alias=%r model=%r mac=%r is_on=%s device_id=%r",
+            ip,
+            getattr(device, "alias", None),
+            getattr(device, "model", None),
+            getattr(device, "mac", None),
+            getattr(device, "is_on", None),
+            getattr(device, "device_id", None),
+        )
 
         try:
             return self._to_record(ip, device)
         except Exception as exc:
-            logger.warning("Failed to build DeviceRecord for %s: %s", ip, exc)
+            logger.warning(
+                "Failed to build DeviceRecord for %s: %s", ip, exc, exc_info=True
+            )
             return None
 
     # ------------------------------------------------------------------
