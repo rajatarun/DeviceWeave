@@ -12,6 +12,7 @@ Globals:
         LOG_LEVEL: INFO
         LEARNING_TABLE_NAME: !Ref LearningTable
         LEARNING_CONFIDENCE_THRESHOLD: "0.85"
+        DEVICE_REGISTRY_TABLE: !Ref DeviceRegistryTable
 
 Parameters:
   StageName:
@@ -41,7 +42,7 @@ Resources:
           - '*'
 
   # -------------------------------------------------------------------
-  # Lambda Function
+  # Execution Lambda — intent, scene, device resolution, Kasa execution
   # -------------------------------------------------------------------
   DeviceWeaveFunction:
     Type: AWS::Serverless::Function
@@ -54,26 +55,21 @@ Resources:
         semantic device matching, Kasa execution, phrase learning.
       Policies:
         - CloudWatchLogsFullAccess
-        # SAM policy template: grants PutItem, GetItem, DeleteItem,
-        # Query, Scan, UpdateItem, BatchWriteItem on the learning table.
         - DynamoDBCrudPolicy:
             TableName: !Ref LearningTable
       Events:
-        # --- Command execution (single device or scene) ---
         ExecuteCommand:
           Type: HttpApi
           Properties:
             ApiId: !Ref DeviceWeaveApi
             Path: /execute
             Method: POST
-        # --- Manual phrase learning ---
         LearnPhrase:
           Type: HttpApi
           Properties:
             ApiId: !Ref DeviceWeaveApi
             Path: /learn
             Method: POST
-        # --- Read-only introspection endpoints ---
         HealthCheck:
           Type: HttpApi
           Properties:
@@ -93,13 +89,67 @@ Resources:
             Path: /scenes
             Method: GET
 
-  # -------------------------------------------------------------------
-  # CloudWatch Log Group (explicit — avoids orphaned groups on deletion)
-  # -------------------------------------------------------------------
   DeviceWeaveFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/deviceweave-handler-${StageName}"
+      RetentionInDays: 14
+
+  # -------------------------------------------------------------------
+  # Ingestion Lambda — device discovery and registry sync
+  #
+  # Network requirement: this function must run in a VPC subnet that has
+  # L2 or routable access to the IoT device LAN so that UDP broadcast
+  # discovery can reach the Kasa devices.  For local / dev use, invoke
+  # the function directly from a host on the same LAN segment.
+  # -------------------------------------------------------------------
+  DeviceWeaveIngestionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "deviceweave-ingestion-${StageName}"
+      CodeUri: src/
+      Handler: ingestion_handler.handler
+      # Discovery (UDP broadcast + per-device update()) takes 5–30 s.
+      # 120 s provides headroom for ~100-device fleets.
+      Timeout: 120
+      Description: >
+        DeviceWeave ingestion engine — Kasa network discovery, full and delta
+        sync to DynamoDB device registry, scheduled and on-demand execution.
+      Policies:
+        - CloudWatchLogsFullAccess
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DeviceRegistryTable
+      Events:
+        # On-demand trigger via HTTP — returns 202 with result JSON
+        TriggerIngest:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /ingest
+            Method: POST
+        # Full sync once per day — upserts all, marks missing as offline
+        ScheduledFullSync:
+          Type: Schedule
+          Properties:
+            Schedule: rate(24 hours)
+            Name: !Sub "deviceweave-full-sync-${StageName}"
+            Description: Daily full device discovery and registry reconciliation
+            Input: '{"provider": "kasa", "mode": "full"}'
+            Enabled: true
+        # Delta sync every 6 hours — fingerprint-gated writes; no offline marking
+        ScheduledDeltaSync:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Name: !Sub "deviceweave-delta-sync-${StageName}"
+            Description: 6-hourly delta sync — writes only changed device records
+            Input: '{"provider": "kasa", "mode": "delta"}'
+            Enabled: true
+
+  DeviceWeaveIngestionFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/deviceweave-ingestion-${StageName}"
       RetentionInDays: 14
 
   # -------------------------------------------------------------------
@@ -109,11 +159,11 @@ Resources:
   #   PK: device_id  (String) — catalog device id, e.g. "office_light"
   #   SK: phrase     (String) — normalised user command or manual phrase
   #
-  # Attributes stored per item:
-  #   source              : "learned" | "manual"
-  #   confidence          : Decimal (stored as String to avoid type issues)
-  #   created_at          : ISO 8601 String
-  #   use_count           : Number
+  # Attributes:
+  #   source         "learned" | "manual"
+  #   confidence     String (stored as String to avoid Decimal type issues)
+  #   created_at     ISO 8601
+  #   use_count      Number
   # -------------------------------------------------------------------
   LearningTable:
     Type: AWS::DynamoDB::Table
@@ -134,6 +184,59 @@ Resources:
         - AttributeName: phrase
           KeyType: RANGE
 
+  # -------------------------------------------------------------------
+  # DynamoDB — Device Registry
+  #
+  # Populated by the ingestion pipeline.  One item per discovered device.
+  #
+  # Schema:
+  #   PK: device_id  (String) — hardware-stable ID (device.device_id or MAC)
+  #   SK: provider   (String) — "kasa" | "matter" | …
+  #
+  # Attributes:
+  #   name, ip, mac, device_type, model
+  #   capabilities   List<String> — supported action strings
+  #   fingerprint    String — SHA-256[:16] of identity fields; drives delta writes
+  #   status         "active" | "offline"
+  #   last_seen      ISO 8601 — updated every sync (even delta unchanged)
+  #   last_synced    ISO 8601 — updated only on full upsert
+  #   sync_mode      "full" | "delta" — which pass wrote this item
+  #   provider_meta  Map — provider-specific raw metadata
+  #
+  # GSI (provider-status-index):
+  #   PK: provider — query all devices for a given provider
+  #   SK: status   — filter active vs offline efficiently
+  # -------------------------------------------------------------------
+  DeviceRegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-registry-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: device_id
+          AttributeType: S
+        - AttributeName: provider
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: device_id
+          KeyType: HASH
+        - AttributeName: provider
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: provider-status-index
+          KeySchema:
+            - AttributeName: provider
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
 Outputs:
   ApiBaseUrl:
     Description: Base URL for the DeviceWeave API
@@ -142,15 +245,19 @@ Outputs:
       Name: !Sub "DeviceWeaveApiBaseUrl-${StageName}"
 
   ExecuteEndpoint:
-    Description: POST /execute — submit a natural language device or scene command
+    Description: POST /execute — natural language device or scene command
     Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/execute"
 
   LearnEndpoint:
     Description: POST /learn — add a phrase binding to a device
     Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/learn"
 
+  IngestEndpoint:
+    Description: POST /ingest — trigger device discovery and registry sync
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/ingest"
+
   DevicesEndpoint:
-    Description: GET /devices — list registered devices and capabilities
+    Description: GET /devices — list static device catalog
     Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/devices"
 
   ScenesEndpoint:
@@ -163,8 +270,20 @@ Outputs:
     Export:
       Name: !Sub "DeviceWeaveLearningTable-${StageName}"
 
+  DeviceRegistryTableName:
+    Description: DynamoDB device registry table (ingestion output)
+    Value: !Ref DeviceRegistryTable
+    Export:
+      Name: !Sub "DeviceWeaveRegistryTable-${StageName}"
+
   FunctionArn:
-    Description: Lambda function ARN
+    Description: Execution Lambda ARN
     Value: !GetAtt DeviceWeaveFunction.Arn
     Export:
       Name: !Sub "DeviceWeaveFunctionArn-${StageName}"
+
+  IngestionFunctionArn:
+    Description: Ingestion Lambda ARN
+    Value: !GetAtt DeviceWeaveIngestionFunction.Arn
+    Export:
+      Name: !Sub "DeviceWeaveIngestionFunctionArn-${StageName}"
