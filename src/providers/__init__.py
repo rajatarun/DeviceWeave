@@ -11,13 +11,15 @@ instances — they must be stateless.
 
 from providers.base import BaseDeviceProvider, ProviderError
 from providers.kasa_adapter import KasaAdapter
+from providers.switchbot_adapter import SwitchBotAdapter
+from providers.govee_adapter import GoveeAdapter
 
 # Maps device_type → provider instance.
 _REGISTRY: dict[str, BaseDeviceProvider] = {}
 
-_kasa = KasaAdapter()
-for _device_type in KasaAdapter.supported_device_types():
-    _REGISTRY[_device_type] = _kasa
+for _adapter in (KasaAdapter(), SwitchBotAdapter(), GoveeAdapter()):
+    for _device_type in _adapter.supported_device_types():
+        _REGISTRY[_device_type] = _adapter
 
 
 def get_provider(device_type: str) -> BaseDeviceProvider:

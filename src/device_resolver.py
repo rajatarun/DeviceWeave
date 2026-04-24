@@ -74,7 +74,7 @@ def _load_device_registry() -> List[Dict[str, Any]]:
         table = boto3.resource("dynamodb").Table(_REGISTRY_TABLE)
         resp = table.scan(
             FilterExpression=Attr("status").eq("active"),
-            ProjectionExpression="device_id, #n, device_type, capabilities, ip",
+            ProjectionExpression="device_id, #n, device_type, capabilities, ip, model",
             ExpressionAttributeNames={"#n": "name"},
         )
         items = resp.get("Items", [])
@@ -86,6 +86,7 @@ def _load_device_registry() -> List[Dict[str, Any]]:
                 "ip": item.get("ip", ""),
                 "device_type": item.get("device_type", "SmartPlug"),
                 "capabilities": item.get("capabilities", []),
+                "model": item.get("model", ""),
                 "sample_phrases": [],  # phrases come from learning table
             }
             for item in items

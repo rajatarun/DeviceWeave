@@ -94,12 +94,24 @@ def get_discovery_provider(name: str) -> AbstractDiscoveryProvider:
     return provider
 
 
-# Register Kasa provider at import time.
+# Register discovery providers at import time.
 try:
     from ingestion.providers.kasa_discovery import KasaDiscovery
     register_provider(KasaDiscovery())
 except Exception as _exc:  # pragma: no cover
     logger.warning("Could not register KasaDiscovery: %s", _exc)
+
+try:
+    from ingestion.providers.switchbot_discovery import SwitchBotDiscovery
+    register_provider(SwitchBotDiscovery())
+except Exception as _exc:  # pragma: no cover
+    logger.warning("Could not register SwitchBotDiscovery: %s", _exc)
+
+try:
+    from ingestion.providers.govee_discovery import GoveeDiscovery
+    register_provider(GoveeDiscovery())
+except Exception as _exc:  # pragma: no cover
+    logger.warning("Could not register GoveeDiscovery: %s", _exc)
 
 
 # ---------------------------------------------------------------------------
