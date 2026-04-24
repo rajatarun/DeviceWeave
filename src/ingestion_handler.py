@@ -34,7 +34,7 @@ from typing import Any, Dict, Optional
 from ingestion.pipeline import IngestionPipeline, SyncMode
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL)
+logging.getLogger().setLevel(LOG_LEVEL)  # basicConfig is a no-op in Lambda
 logger = logging.getLogger(__name__)
 
 _VALID_MODES = {m.value for m in SyncMode}

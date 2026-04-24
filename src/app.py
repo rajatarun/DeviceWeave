@@ -44,7 +44,7 @@ from learning_store import (
 from scene_catalog import SCENE_CATALOG, resolve_scene, scene_public_view
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL)
+logging.getLogger().setLevel(LOG_LEVEL)  # basicConfig is a no-op in Lambda
 logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.70
