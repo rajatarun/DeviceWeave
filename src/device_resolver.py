@@ -1,23 +1,28 @@
 """
 Device resolver using deterministic TF-vector cosine similarity.
 
-Resolution accuracy improves continuously through the learning store:
-on each call, learned phrases are merged into the device corpus before
-similarity is computed. Learned phrases are cached in module-level memory
-for the lifetime of the Lambda container (typically several hours) to
-avoid a DynamoDB read on every request.
+Devices are loaded from the DynamoDB device registry (DEVICE_REGISTRY_TABLE)
+at cold start and cached for the container lifetime.  The static DEVICE_CATALOG
+below is used only when the env var is unset (local dev without DynamoDB).
 
-No external ML model is invoked. The embedding is a term-frequency vector
-over a shared vocabulary built from the query and all device corpora.
+Phrases for each device come from the DynamoDB learning table — the Bedrock-
+generated phrases written during ingestion form the primary corpus.  Learned
+phrases from successful executions are merged in on top.
 """
 
+import logging
 import math
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+logger = logging.getLogger(__name__)
+
+_REGISTRY_TABLE: str = os.environ.get("DEVICE_REGISTRY_TABLE", "")
+
 
 # ---------------------------------------------------------------------------
-# Device catalog — single source of truth for device identity and capabilities
+# Static fallback catalog — used only when DEVICE_REGISTRY_TABLE is not set
 # ---------------------------------------------------------------------------
 
 DEVICE_CATALOG: List[Dict[str, Any]] = [
@@ -28,19 +33,10 @@ DEVICE_CATALOG: List[Dict[str, Any]] = [
         "device_type": "SmartBulb",
         "capabilities": ["turn_on", "turn_off", "get_status", "toggle", "set_brightness"],
         "sample_phrases": [
-            "office light",
-            "desk light",
-            "room light",
-            "ceiling light",
-            "light bulb",
-            "lamp office",
-            "switch light",
-            "light in the office",
-            "overhead light",
-            "brightness light",
-            "dim light",
-            "brightness control light",
-            "adjust brightness light",
+            "office light", "desk light", "room light", "ceiling light",
+            "light bulb", "lamp office", "switch light", "light in the office",
+            "overhead light", "brightness light", "dim light",
+            "brightness control light", "adjust brightness light",
         ],
     },
     {
@@ -50,26 +46,68 @@ DEVICE_CATALOG: List[Dict[str, Any]] = [
         "device_type": "SmartPlug",
         "capabilities": ["turn_on", "turn_off", "get_status", "toggle"],
         "sample_phrases": [
-            "office fan",
-            "desk fan",
-            "room fan",
-            "cooling fan",
-            "electric fan",
-            "fan in office",
-            "table fan",
-            "switch fan",
-            "ventilation",
+            "office fan", "desk fan", "room fan", "cooling fan",
+            "electric fan", "fan in office", "table fan", "switch fan", "ventilation",
         ],
     },
 ]
 
 
 # ---------------------------------------------------------------------------
+# Dynamic device registry cache (DynamoDB)
+# ---------------------------------------------------------------------------
+
+_device_registry_cache: Optional[List[Dict[str, Any]]] = None
+
+
+def invalidate_device_registry_cache() -> None:
+    global _device_registry_cache
+    _device_registry_cache = None
+
+
+def _load_device_registry() -> List[Dict[str, Any]]:
+    """Scan active devices from DynamoDB and normalise to catalog format."""
+    import boto3
+    from boto3.dynamodb.conditions import Attr
+
+    try:
+        table = boto3.resource("dynamodb").Table(_REGISTRY_TABLE)
+        resp = table.scan(
+            FilterExpression=Attr("status").eq("active"),
+            ProjectionExpression="device_id, #n, device_type, capabilities, ip",
+            ExpressionAttributeNames={"#n": "name"},
+        )
+        items = resp.get("Items", [])
+        logger.info("Loaded %d active device(s) from registry.", len(items))
+        return [
+            {
+                "id": item["device_id"],
+                "name": item.get("name", item["device_id"]),
+                "ip": item.get("ip", ""),
+                "device_type": item.get("device_type", "SmartPlug"),
+                "capabilities": item.get("capabilities", []),
+                "sample_phrases": [],  # phrases come from learning table
+            }
+            for item in items
+        ]
+    except Exception as exc:
+        logger.warning("Failed to load device registry: %s — falling back to static catalog.", exc)
+        return []
+
+
+def _get_active_catalog() -> List[Dict[str, Any]]:
+    """Return the live registry (cached) or the static catalog for local dev."""
+    global _device_registry_cache
+    if not _REGISTRY_TABLE:
+        return DEVICE_CATALOG
+    if _device_registry_cache is None:
+        _device_registry_cache = _load_device_registry() or DEVICE_CATALOG
+    return _device_registry_cache
+
+
+# ---------------------------------------------------------------------------
 # Stop-word list
 # ---------------------------------------------------------------------------
-# Tokens that carry no device-identification signal are removed before
-# vectorisation. Action verbs are included because they have already been
-# captured by intent_parser and would only dilute the cosine angle.
 
 _STOP_WORDS: frozenset[str] = frozenset({
     "a", "an", "the", "this", "that", "it", "its",
@@ -81,7 +119,6 @@ _STOP_WORDS: frozenset[str] = frozenset({
     "toggle", "flip", "set", "check", "activate",
     "deactivate", "get", "show", "tell", "make",
     "status", "state", "what", "how", "dim", "darken", "brighten",
-    # Additional conjugations and contraction fragments
     "am", "im", "re", "ve", "ll", "don", "won", "can",
 })
 
@@ -89,15 +126,11 @@ _STOP_WORDS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 # In-memory learned-phrase cache
 # ---------------------------------------------------------------------------
-# Populated lazily on the first resolve_device call and retained for the
-# lifetime of the Lambda container. Explicitly invalidated by
-# invalidate_learned_phrases_cache() after a POST /learn write.
 
 _learned_phrases_cache: Optional[Dict[str, List[str]]] = None
 
 
 def invalidate_learned_phrases_cache() -> None:
-    """Force a fresh DynamoDB read on the next resolve_device call."""
     global _learned_phrases_cache
     _learned_phrases_cache = None
 
@@ -146,11 +179,11 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
 
 def _build_device_corpus(device: Dict[str, Any], learned: Dict[str, List[str]]) -> str:
     """
-    Combine catalog sample_phrases with any learned phrases for this device.
-
-    The resulting corpus string is tokenised and vectorised during resolution.
+    Combine static sample_phrases (if any) with learned/generated phrases.
+    Registry devices have no sample_phrases — their corpus comes entirely
+    from the learning table (Bedrock-generated + user-learned phrases).
     """
-    base = list(device["sample_phrases"])
+    base = list(device.get("sample_phrases") or [device["name"]])
     extra = learned.get(device["id"], [])
     return " ".join(base + extra)
 
@@ -163,31 +196,36 @@ def resolve_device(query: str) -> Tuple[Optional[Dict[str, Any]], float]:
     """
     Find the best-matching device for a natural-language query.
 
-    Merges catalog phrases with learned phrases from DynamoDB (cached)
-    before computing cosine similarity so resolution accuracy improves
-    automatically as the system learns from successful executions.
+    Loads devices from the DynamoDB registry (cached per container) and
+    merges with learned/generated phrases from the learning table before
+    computing cosine similarity.
 
     Returns:
         (device_dict, confidence)  where confidence ∈ [0, 1].
-        Returns (None, 0.0) when the catalog is empty or query is blank.
+        Returns (None, 0.0) when no devices are available or query is blank.
     """
-    if not query.strip() or not DEVICE_CATALOG:
+    catalog = _get_active_catalog()
+    if not query.strip() or not catalog:
         return None, 0.0
 
     learned = _get_learned_phrases()
-    corpora = [_build_device_corpus(d, learned) for d in DEVICE_CATALOG]
+    corpora = [_build_device_corpus(d, learned) for d in catalog]
     vocab = _build_vocab(corpora + [query])
     query_vec = _tf_vector(query, vocab)
 
     best_device: Optional[Dict[str, Any]] = None
     best_score = -1.0
 
-    for device, corpus in zip(DEVICE_CATALOG, corpora):
+    for device, corpus in zip(catalog, corpora):
         score = _cosine_similarity(query_vec, _tf_vector(corpus, vocab))
         if score > best_score:
             best_score = score
             best_device = device
 
+    logger.debug(
+        "resolve_device(%r) → %s (%.4f)",
+        query, best_device["id"] if best_device else None, best_score,
+    )
     return best_device, round(best_score, 4)
 
 
