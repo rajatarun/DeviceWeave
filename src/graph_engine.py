@@ -14,9 +14,10 @@ Credentials come from Secrets Manager (MEMGRAPH_SECRET_ARN):
     {"username": "memgraph", "password": "..."}
 If the secret is absent the driver connects unauthenticated (Memgraph default).
 
-record_event() is fire-and-forget (daemon thread): it never blocks the Lambda
-response.  Behavior READ queries (query_behavior_history, query_top_actions)
-remain synchronous because they inform confidence scoring.
+record_event() is fire-and-forget via a module-level ThreadPoolExecutor: it
+never blocks the Lambda response.  Behavior READ queries
+(query_behavior_history, query_top_actions) remain synchronous because they
+inform confidence scoring.
 
 Schema (Cypher, created on first use):
     (:Device {device_id})
