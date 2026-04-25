@@ -58,6 +58,7 @@ from learning_store import (
 from scene_catalog import SCENE_CATALOG, resolve_scene, scene_public_view
 from policy_engine.middleware import enforce as policy_enforce, filter_steps as policy_filter_steps
 from policy_engine.context_provider import get_context as get_policy_context
+from intent_sources import get_intent_from_payload
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(LOG_LEVEL)
@@ -465,24 +466,30 @@ def _route_execute(event: Dict[str, Any]) -> Dict[str, Any]:
     if body is None:
         return _error(400, "Request body is not valid JSON.")
 
-    command: str = body.get("command", "").strip()
-    if not command:
-        return _error(400, "Missing or empty 'command' field.")
+    intent = get_intent_from_payload(body)
+    if intent is None:
+        return _error(
+            400,
+            "Could not extract intent from request. "
+            "Provide {'command': '...'} for text or "
+            "{'source': 'vision', 'observation': {...}} for camera input.",
+        )
 
-    logger.info("Command received: %s", command)
-    normalized = command.lower()
+    logger.info("Intent received: source=%s confidence=%.2f text=%r",
+                intent.source, intent.confidence, intent.raw_text)
+    normalized = intent.raw_text.lower()
 
     # ------------------------------------------------------------------
     # 1. Scene resolution
     # ------------------------------------------------------------------
     scene, scene_conf = resolve_scene(normalized)
     if scene is not None and scene_conf >= CONFIDENCE_THRESHOLD:
-        return _handle_scene(scene, scene_conf, normalized)
+        return _handle_scene(scene, scene_conf, normalized, intent_source=intent.source)
 
     # ------------------------------------------------------------------
     # 2. Single-device resolution
     # ------------------------------------------------------------------
-    return _handle_device_command(normalized)
+    return _handle_device_command(normalized, intent_source=intent.source)
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +500,7 @@ def _handle_scene(
     scene: Dict[str, Any],
     confidence: float,
     original_command: str,
+    intent_source: str = "text",
 ) -> Dict[str, Any]:
     logger.info("Scene matched: %s (conf=%.4f)", scene["id"], confidence)
 
@@ -533,6 +541,7 @@ def _handle_scene(
         "scene_id": scene["id"],
         "scene_name": scene["name"],
         "confidence": confidence,
+        "intent_source": intent_source,
         "results": [_step_result_dict(r) for r in results],
         "succeeded": len(successes),
         "failed": len(failures),
@@ -597,7 +606,7 @@ def _execute_llm_devices(
     return _ok(resp)
 
 
-def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
+def _handle_device_command(normalized_command: str, intent_source: str = "text") -> Dict[str, Any]:
     try:
         intent: Intent = parse_intent(normalized_command)
     except ValueError as exc:
@@ -637,7 +646,7 @@ def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
             device, intent.action, intent.params,
             normalized_command, final_score, tier="cosine",
             cosine_score=cosine_score, behavior_score=b_score,
-            policy_ctx=policy_ctx,
+            policy_ctx=policy_ctx, intent_source=intent_source,
         )
 
     # ------------------------------------------------------------------
@@ -687,6 +696,7 @@ def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
                     cosine_score=cosine_score,
                     behavior_score=llm_b_score,
                     policy_ctx=policy_ctx,
+                    intent_source=intent_source,
                 )
             # Multiple devices — execute concurrently like a scene
             return _execute_llm_devices(
@@ -726,6 +736,7 @@ def _execute_device(
     cosine_score: float = 0.0,
     behavior_score: float = 0.5,
     policy_ctx: Optional[Dict[str, Any]] = None,
+    intent_source: str = "text",
 ) -> Dict[str, Any]:
     if action not in device["capabilities"]:
         return _error(
@@ -801,6 +812,7 @@ def _execute_device(
         "action": action,
         "confidence": confidence,
         "resolution_tier": tier,
+        "intent_source": intent_source,
         "scores": {
             "cosine": cosine_score,
             "behavior": behavior_score,

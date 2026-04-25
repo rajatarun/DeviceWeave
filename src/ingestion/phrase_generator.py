@@ -10,15 +10,15 @@ not already exist (attribute_not_exists condition), so repeated ingestion
 runs are safe and manual/learned phrases are never overwritten.
 """
 
-import json
 import logging
 import os
 from datetime import datetime, timezone
 from typing import List
 
+from llm_provider import get_llm_provider
+
 logger = logging.getLogger(__name__)
 
-_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _LEARNING_TABLE = os.environ.get("LEARNING_TABLE_NAME", "")
 
 _SYSTEM_PROMPT = """\
@@ -43,10 +43,8 @@ Example output format:
 
 
 def generate_phrases(name: str, device_type: str, capabilities: List[str]) -> List[str]:
-    """Ask Claude Haiku 4.5 for sample control phrases. Returns [] on any error."""
-    import boto3
-
-    client = boto3.client("bedrock-runtime", region_name="us-east-1")
+    """Ask the configured LLM provider for sample control phrases. Returns [] on any error."""
+    import json
 
     cap_list = ", ".join(capabilities)
     location_hint = ""
@@ -72,19 +70,10 @@ def generate_phrases(name: str, device_type: str, capabilities: List[str]) -> Li
         f"\n"
         f"Return a raw JSON array of strings only."
     )
-    body = json.dumps({
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 768,
-        "system": _SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_msg}],
-    })
 
     try:
-        resp = client.invoke_model(modelId=_MODEL_ID, body=body)
-        payload = json.loads(resp["body"].read())
-        logger.info("Bedrock response for %r — stop_reason=%s text=%r",
-                    name, payload.get("stop_reason"), payload.get("content"))
-        text = payload["content"][0]["text"].strip()
+        llm = get_llm_provider()
+        text = llm.invoke(_SYSTEM_PROMPT, user_msg, max_tokens=768)
         # Strip markdown code fences if the model wrapped the JSON
         if text.startswith("```"):
             text = text.split("\n", 1)[-1]  # drop opening fence line
