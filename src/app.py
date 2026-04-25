@@ -34,6 +34,7 @@ import behavior_engine
 import decision_engine
 import graph_engine
 from device_resolver import (
+    DeviceRegistryError,
     _get_active_catalog,
     device_public_view,
     invalidate_device_registry_cache,
@@ -134,14 +135,25 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _route_health() -> Dict[str, Any]:
-    catalog = _get_active_catalog()
-    return _ok({
+    try:
+        device_count = len(_get_active_catalog())
+        registry_ok = True
+        registry_error = None
+    except DeviceRegistryError as exc:
+        device_count = 0
+        registry_ok = False
+        registry_error = str(exc)
+    resp: Dict[str, Any] = {
         "status": "healthy",
-        "devices": len(catalog),
+        "devices": device_count,
+        "registry_ok": registry_ok,
         "scenes": len(get_active_scenes()),
         "learning_enabled": is_configured(),
         "graph_enabled": graph_engine.is_available(),
-    })
+    }
+    if registry_error:
+        resp["registry_error"] = registry_error
+    return _ok(resp)
 
 
 def _route_providers() -> Dict[str, Any]:
@@ -150,7 +162,10 @@ def _route_providers() -> Dict[str, Any]:
 
 
 def _route_devices() -> Dict[str, Any]:
-    catalog = _get_active_catalog()
+    try:
+        catalog = _get_active_catalog()
+    except DeviceRegistryError as exc:
+        return _error(503, str(exc))
     return _ok({
         "devices": [device_public_view(d) for d in catalog],
         "count": len(catalog),
@@ -190,7 +205,10 @@ def _route_learn(event: Dict[str, Any]) -> Dict[str, Any]:
     if not phrase:
         return _error(400, "Missing 'phrase' field.")
 
-    known_ids = {d["id"] for d in _get_active_catalog()}
+    try:
+        known_ids = {d["id"] for d in _get_active_catalog()}
+    except DeviceRegistryError as exc:
+        return _error(503, str(exc))
     if device_id not in known_ids:
         return _error(
             422,
@@ -244,7 +262,10 @@ def _route_presence(event: Dict[str, Any]) -> Dict[str, Any]:
 
 def _route_get_device(device_id: str) -> Dict[str, Any]:
     """GET /devices/{device_id} — single device detail."""
-    catalog = _get_active_catalog()
+    try:
+        catalog = _get_active_catalog()
+    except DeviceRegistryError as exc:
+        return _error(503, str(exc))
     device = next((d for d in catalog if d["id"] == device_id), None)
     if device is None:
         return _error(404, f"Device '{device_id}' not found.")
@@ -684,10 +705,16 @@ def _handle_device_command(normalized_command: str, intent_source: str = "text")
     # ------------------------------------------------------------------
     # Tier 1 — TF cosine + behavior scoring via decision engine
     # ------------------------------------------------------------------
-    device, cosine_score = resolve_device(intent.device_query)
+    try:
+        device, cosine_score = resolve_device(intent.device_query)
+    except DeviceRegistryError as exc:
+        return _error(503, str(exc))
 
     if device is None:
-        return _error(503, "Device catalog is empty.")
+        return _error(
+            422,
+            "No devices found in registry. Run POST /ingest to sync your devices.",
+        )
 
     final_score, _, b_score = decision_engine.compute_score(
         cosine_score, device, intent.action, ctx
@@ -714,10 +741,15 @@ def _handle_device_command(normalized_command: str, intent_source: str = "text")
         final_score, CONFIDENCE_THRESHOLD, intent_type,
     )
 
-    llm_result = llm_resolve(normalized_command, intent.action, _get_active_catalog())
+    try:
+        active_catalog = _get_active_catalog()
+    except DeviceRegistryError as exc:
+        return _error(503, str(exc))
+
+    llm_result = llm_resolve(normalized_command, intent.action, active_catalog)
 
     if llm_result and llm_result.get("confidence", 0) >= CONFIDENCE_THRESHOLD:
-        catalog_index = {d["id"]: d for d in _get_active_catalog()}
+        catalog_index = {d["id"]: d for d in active_catalog}
         llm_conf = llm_result["confidence"]
 
         steps: List[ExecutionStep] = []

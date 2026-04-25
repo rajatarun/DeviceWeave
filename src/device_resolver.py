@@ -2,8 +2,7 @@
 Device resolver using deterministic TF-vector cosine similarity.
 
 Devices are loaded from the DynamoDB device registry (DEVICE_REGISTRY_TABLE)
-at cold start and cached for the container lifetime.  The static DEVICE_CATALOG
-below is used only when the env var is unset (local dev without DynamoDB).
+at cold start and cached for the container lifetime.
 
 Phrases for each device come from the DynamoDB learning table — the Bedrock-
 generated phrases written during ingestion form the primary corpus.  Learned
@@ -21,36 +20,8 @@ logger = logging.getLogger(__name__)
 _REGISTRY_TABLE: str = os.environ.get("DEVICE_REGISTRY_TABLE", "")
 
 
-# ---------------------------------------------------------------------------
-# Static fallback catalog — used only when DEVICE_REGISTRY_TABLE is not set
-# ---------------------------------------------------------------------------
-
-DEVICE_CATALOG: List[Dict[str, Any]] = [
-    {
-        "id": "office_light",
-        "name": "Office Light",
-        "ip": "192.168.1.101",
-        "device_type": "SmartBulb",
-        "capabilities": ["turn_on", "turn_off", "get_status", "toggle", "set_brightness"],
-        "sample_phrases": [
-            "office light", "desk light", "room light", "ceiling light",
-            "light bulb", "lamp office", "switch light", "light in the office",
-            "overhead light", "brightness light", "dim light",
-            "brightness control light", "adjust brightness light",
-        ],
-    },
-    {
-        "id": "office_fan",
-        "name": "Office Fan",
-        "ip": "192.168.1.102",
-        "device_type": "SmartPlug",
-        "capabilities": ["turn_on", "turn_off", "get_status", "toggle"],
-        "sample_phrases": [
-            "office fan", "desk fan", "room fan", "cooling fan",
-            "electric fan", "fan in office", "table fan", "switch fan", "ventilation",
-        ],
-    },
-]
+class DeviceRegistryError(RuntimeError):
+    """Raised when the device registry is misconfigured or unreachable."""
 
 
 # ---------------------------------------------------------------------------
@@ -92,17 +63,25 @@ def _load_device_registry() -> List[Dict[str, Any]]:
             for item in items
         ]
     except Exception as exc:
-        logger.warning("Failed to load device registry: %s — falling back to static catalog.", exc)
-        return []
+        raise DeviceRegistryError(f"Failed to load device registry: {exc}") from exc
 
 
 def _get_active_catalog() -> List[Dict[str, Any]]:
-    """Return the live registry (cached) or the static catalog for local dev."""
+    """
+    Return active devices from the DynamoDB registry (cached per container).
+
+    Raises DeviceRegistryError if DEVICE_REGISTRY_TABLE is not configured or
+    the DynamoDB scan fails.  Returns an empty list when the registry is
+    reachable but contains no active devices — callers should surface this
+    as a "no devices synced yet" message rather than treating it as an error.
+    """
     global _device_registry_cache
     if not _REGISTRY_TABLE:
-        return DEVICE_CATALOG
+        raise DeviceRegistryError(
+            "Device registry not configured (DEVICE_REGISTRY_TABLE env var not set)."
+        )
     if _device_registry_cache is None:
-        _device_registry_cache = _load_device_registry() or DEVICE_CATALOG
+        _device_registry_cache = _load_device_registry()
     return _device_registry_cache
 
 
@@ -203,9 +182,12 @@ def resolve_device(query: str) -> Tuple[Optional[Dict[str, Any]], float]:
 
     Returns:
         (device_dict, confidence)  where confidence ∈ [0, 1].
-        Returns (None, 0.0) when no devices are available or query is blank.
+        Returns (None, 0.0) when the registry is empty or the query is blank.
+
+    Raises:
+        DeviceRegistryError  if the registry is not configured or unreachable.
     """
-    catalog = _get_active_catalog()
+    catalog = _get_active_catalog()   # may raise DeviceRegistryError
     if not query.strip() or not catalog:
         return None, 0.0
 
