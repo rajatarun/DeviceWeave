@@ -1,0 +1,195 @@
+version: "3.9"
+
+# ============================================================================
+# DeviceWeave — local development stack
+#
+# Services
+# --------
+#   memgraph       Graph store (device relationships, behavior history)
+#   dynamodb-local DynamoDB replacement (in-memory, persists while running)
+#   init-tables    One-shot: creates DynamoDB tables then exits
+#   ollama         Local LLM inference; pulls llama3.2 on first start
+#   app            Python 3.11 + Apache2 + mod_wsgi  →  http://localhost:8080
+#
+# Quick start
+# -----------
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# NOTE: Ollama downloads ~2 GB of model weights on the first run.
+#       Set OLLAMA_MODEL env var to choose a different model (e.g. mistral).
+#
+# Device credentials (Kasa / Govee / SwitchBot)
+# -----------------------------------------------
+# The credential env vars below are empty by default.
+# For real device testing, pass them as environment overrides or add a
+# .env file next to this compose file:
+#
+#   KASA_USERNAME=you@example.com
+#   KASA_PASSWORD=secret
+#   GOVEE_API_KEY=abc123
+#   SWITCHBOT_TOKEN=...
+#   SWITCHBOT_SECRET=...
+#
+# The app reads these from the environment when KASA_SECRET_ARN etc. are "".
+# ============================================================================
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Memgraph — graph store
+  # --------------------------------------------------------------------------
+  memgraph:
+    image: memgraph/memgraph:2.18.1
+    container_name: deviceweave-memgraph
+    restart: unless-stopped
+    ports:
+      - "7687:7687"    # Bolt (clients + app)
+      - "7444:7444"    # monitoring / HTTP API
+    volumes:
+      - memgraph-data:/var/lib/memgraph
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/7687' 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  # --------------------------------------------------------------------------
+  # DynamoDB Local — in-memory, shared database file
+  # --------------------------------------------------------------------------
+  dynamodb-local:
+    image: amazon/dynamodb-local:2.5.2
+    container_name: deviceweave-dynamodb
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/shell/index.html > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --------------------------------------------------------------------------
+  # Table initialiser — one-shot; exits 0 on success
+  # --------------------------------------------------------------------------
+  init-tables:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: deviceweave-app:local
+    container_name: deviceweave-init-tables
+    depends_on:
+      dynamodb-local:
+        condition: service_healthy
+    entrypoint: ["python", "/app/init_tables.py"]
+    environment:
+      # AWS_ENDPOINT_URL_DYNAMODB is the boto3 >= 1.28 standard env var;
+      # init_tables.py also reads it as primary.
+      AWS_ENDPOINT_URL_DYNAMODB: http://dynamodb-local:8000
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_DEFAULT_REGION: us-east-1
+      LEARNING_TABLE_NAME:      deviceweave-phrases-dev
+      DEVICE_REGISTRY_TABLE:    deviceweave-registry-dev
+      POLICY_TABLE_NAME:        deviceweave-policies-dev
+      PRESENCE_TABLE_NAME:      deviceweave-presence-dev
+    restart: "no"
+
+  # --------------------------------------------------------------------------
+  # Ollama — local LLM inference
+  # On first start: `ollama serve` starts, then llama3.2 is pulled (~2 GB).
+  # Model weights are cached in the ollama-models volume across restarts.
+  # --------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: deviceweave-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2}
+      OLLAMA_KEEP_ALIVE: "-1"
+    # Start server in background, pull model, then keep server in foreground
+    entrypoint: >
+      /bin/sh -c "
+        ollama serve &
+        echo 'Waiting for Ollama to be ready...' &&
+        until curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; do sleep 2; done &&
+        echo 'Pulling model: '\"$${OLLAMA_MODEL:-llama3.2}\" &&
+        ollama pull $${OLLAMA_MODEL:-llama3.2} &&
+        echo 'Model ready.' &&
+        wait
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  # --------------------------------------------------------------------------
+  # DeviceWeave app — Python 3.11 + Apache2 + mod_wsgi
+  # API available at http://localhost:8080
+  # --------------------------------------------------------------------------
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: deviceweave-app:local
+    container_name: deviceweave-app
+    restart: unless-stopped
+    depends_on:
+      init-tables:
+        condition: service_completed_successfully
+      memgraph:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    environment:
+      # ── LLM ──────────────────────────────────────────────────────────────
+      LLM_PROVIDER:    ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL:    ${OLLAMA_MODEL:-llama3.2}
+
+      # ── DynamoDB Local ────────────────────────────────────────────────────
+      # boto3 >= 1.28 routes DynamoDB calls here automatically
+      AWS_ENDPOINT_URL_DYNAMODB: http://dynamodb-local:8000
+      AWS_ACCESS_KEY_ID:         local
+      AWS_SECRET_ACCESS_KEY:     local
+      AWS_DEFAULT_REGION:        us-east-1
+
+      # ── Table names ───────────────────────────────────────────────────────
+      LEARNING_TABLE_NAME:   deviceweave-phrases-dev
+      DEVICE_REGISTRY_TABLE: deviceweave-registry-dev
+      POLICY_TABLE_NAME:     deviceweave-policies-dev
+      PRESENCE_TABLE_NAME:   deviceweave-presence-dev
+
+      # ── Memgraph ──────────────────────────────────────────────────────────
+      MEMGRAPH_HOST:       memgraph
+      MEMGRAPH_PORT:       "7687"
+      MEMGRAPH_SECRET_ARN: ""
+
+      # ── Device credentials (optional — for real device testing) ───────────
+      KASA_SECRET_ARN:      ""
+      SWITCHBOT_SECRET_ARN: ""
+      GOVEE_SECRET_ARN:     ""
+      KASA_USERNAME:        ${KASA_USERNAME:-}
+      KASA_PASSWORD:        ${KASA_PASSWORD:-}
+      GOVEE_API_KEY:        ${GOVEE_API_KEY:-}
+      SWITCHBOT_TOKEN:      ${SWITCHBOT_TOKEN:-}
+      SWITCHBOT_SECRET:     ${SWITCHBOT_SECRET:-}
+
+      # ── Tuning ────────────────────────────────────────────────────────────
+      LEARNING_CONFIDENCE_THRESHOLD: "0.85"
+      CONFIDENCE_THRESHOLD:          "0.4"
+      POLICY_CONFIDENCE_THRESHOLD:   "0.85"
+      LOG_LEVEL: DEBUG
+
+volumes:
+  memgraph-data:
+  ollama-models:
