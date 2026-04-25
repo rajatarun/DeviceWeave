@@ -20,6 +20,7 @@ Globals:
         DEVICE_REGISTRY_TABLE: !Ref DeviceRegistryTable
         POLICY_TABLE_NAME: !Ref PolicyTable
         POLICY_CONFIDENCE_THRESHOLD: "0.85"
+        PRESENCE_TABLE_NAME: !Ref PresenceTable
         KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
         SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
         GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
@@ -148,6 +149,10 @@ Resources:
             TableName: !Ref LearningTable
         - DynamoDBReadPolicy:
             TableName: !Ref DeviceRegistryTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref PolicyTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PresenceTable
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
@@ -204,6 +209,12 @@ Resources:
             ApiId: !Ref DeviceWeaveApi
             Path: /scenes
             Method: GET
+        UpdatePresence:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence
+            Method: POST
 
   DeviceWeaveFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -411,6 +422,25 @@ Resources:
             ProjectionType: ALL
 
   # -------------------------------------------------------------------
+  # DynamoDB — Presence Store
+  # Single-item table tracking home-occupancy state for the Policy Engine.
+  # Updated via POST /presence; read by context_provider.py on each
+  # /execute call.
+  # -------------------------------------------------------------------
+  PresenceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-presence-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+
+  # -------------------------------------------------------------------
   # DynamoDB — Policy Store
   # Stores validated Policy DSL rules with full version history.
   # -------------------------------------------------------------------
@@ -525,3 +555,13 @@ Outputs:
   ListPoliciesEndpoint:
     Description: GET /policies — list active policies
     Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/policies"
+
+  PresenceEndpoint:
+    Description: POST /presence — update home-occupancy state for the Policy Engine
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/presence"
+
+  PresenceTableName:
+    Description: DynamoDB presence table (home-occupancy state)
+    Value: !Ref PresenceTable
+    Export:
+      Name: !Sub "DeviceWeavePresenceTable-${StageName}"

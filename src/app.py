@@ -5,6 +5,7 @@ Routes
 ------
   POST /execute   Natural-language device or scene command.
   POST /learn     Manually bind a phrase to a device.
+  POST /presence  Update home-occupancy state (is_home: true/false).
   GET  /health    Liveness probe.
   GET  /devices   List registered devices (no IPs).
   GET  /scenes    List registered scenes.
@@ -14,14 +15,19 @@ POST /execute dispatch order
   1. Scene resolution  — nearest-neighbour cosine, conf ≥ threshold.
   2. Tier 1 device     — TF cosine + learned phrases, scored via decision engine.
   3. Tier 2 device     — Claude Haiku 4.5 via Bedrock (contextual / behavioral).
-  4. Auto-learn        — successful resolutions written to learning table.
-  5. Behavior record   — every successful execution recorded in Memgraph.
+  4. Policy Engine     — check resolved (device_type, action) against DynamoDB rules.
+                         BLOCK  → 403 Forbidden (no device I/O).
+                         MODIFY → updated params forwarded to execution.
+                         ALLOW  → pass-through.
+  5. Auto-learn        — successful resolutions written to learning table.
+  6. Behavior record   — every successful execution recorded in Memgraph.
 """
 
 import asyncio
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import behavior_engine
@@ -49,6 +55,8 @@ from learning_store import (
     save_manual_phrase,
 )
 from scene_catalog import SCENE_CATALOG, resolve_scene, scene_public_view
+from policy_engine.middleware import enforce as policy_enforce, filter_steps as policy_filter_steps
+from policy_engine.context_provider import get_context as get_policy_context
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(LOG_LEVEL)
@@ -78,6 +86,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return _route_scenes()
     if method == "POST" and path.endswith("/learn"):
         return _route_learn(event)
+    if method == "POST" and path.endswith("/presence"):
+        return _route_presence(event)
     if method == "POST" and path.endswith("/execute"):
         return _route_execute(event)
 
@@ -149,6 +159,36 @@ def _route_learn(event: Dict[str, Any]) -> Dict[str, Any]:
     })
 
 
+def _route_presence(event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /presence — update home-occupancy state used by the Policy Engine."""
+    body = _parse_body(event)
+    if body is None:
+        return _error(400, "Request body is not valid JSON.")
+
+    if "is_home" not in body:
+        return _error(400, "Missing 'is_home' field (boolean).")
+
+    is_home = body["is_home"]
+    if not isinstance(is_home, bool):
+        return _error(400, "'is_home' must be a boolean (true or false).")
+
+    table_name = os.environ.get("PRESENCE_TABLE_NAME", "")
+    if not table_name:
+        return _error(503, "Presence store not configured (PRESENCE_TABLE_NAME not set).")
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        import boto3
+        table = boto3.resource("dynamodb").Table(table_name)
+        table.put_item(Item={"pk": "home_state", "is_home": is_home, "updated_at": now})
+    except Exception as exc:
+        logger.error("Presence update failed: %s", exc, exc_info=True)
+        return _error(500, f"Failed to update presence state: {exc}")
+
+    logger.info("Presence updated: is_home=%s", is_home)
+    return _ok({"is_home": is_home, "updated_at": now})
+
+
 def _route_execute(event: Dict[str, Any]) -> Dict[str, Any]:
     body = _parse_body(event)
     if body is None:
@@ -189,7 +229,26 @@ def _handle_scene(
     if not steps:
         return _error(422, f"Scene '{scene['id']}' produced no executable steps.")
 
-    results: List[StepResult] = asyncio.run(execute_steps(steps))
+    # Policy Engine — filter out steps that are blocked by an active policy.
+    policy_ctx = get_policy_context()
+    allowed_steps, policy_blocks = policy_filter_steps(steps, context=policy_ctx)
+
+    if policy_blocks:
+        logger.info(
+            "Scene '%s': %d step(s) blocked by policy: %s",
+            scene["id"],
+            len(policy_blocks),
+            [(b["device_id"], b["reason"]) for b in policy_blocks],
+        )
+
+    if not allowed_steps:
+        return _error(
+            403,
+            f"All steps in scene '{scene['id']}' were blocked by active policies.",
+            extra={"policy_blocks": policy_blocks},
+        )
+
+    results: List[StepResult] = asyncio.run(execute_steps(allowed_steps))
     successes = [r for r in results if r.success]
     failures = [r for r in results if not r.success]
 
@@ -198,7 +257,7 @@ def _handle_scene(
             save_learned_phrase(result.device_id, original_command, confidence)
         graph_engine.record_event(result.device_id, result.action, original_command)
 
-    return _ok({
+    resp: Dict[str, Any] = {
         "type": "scene",
         "scene_id": scene["id"],
         "scene_name": scene["name"],
@@ -206,7 +265,10 @@ def _handle_scene(
         "results": [_step_result_dict(r) for r in results],
         "succeeded": len(successes),
         "failed": len(failures),
-    })
+    }
+    if policy_blocks:
+        resp["policy_blocks"] = policy_blocks
+    return _ok(resp)
 
 
 def _execute_llm_devices(
@@ -215,10 +277,28 @@ def _execute_llm_devices(
     confidence: float,
     reasoning: str,
     cosine_score: float,
+    policy_ctx: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute multiple devices returned by the LLM resolver concurrently."""
+    # Policy Engine — filter blocked steps before any I/O.
+    allowed_steps, policy_blocks = policy_filter_steps(steps, context=policy_ctx)
+
+    if policy_blocks:
+        logger.info(
+            "LLM multi-device: %d step(s) blocked by policy: %s",
+            len(policy_blocks),
+            [(b["device_id"], b["reason"]) for b in policy_blocks],
+        )
+
+    if not allowed_steps:
+        return _error(
+            403,
+            "All resolved devices were blocked by active policies.",
+            extra={"policy_blocks": policy_blocks},
+        )
+
     try:
-        results: List[StepResult] = asyncio.run(execute_steps(steps))
+        results: List[StepResult] = asyncio.run(execute_steps(allowed_steps))
     except Exception as exc:
         logger.exception("LLM multi-device execution error")
         return _error(502, f"Device execution error: {exc}")
@@ -231,7 +311,7 @@ def _execute_llm_devices(
             save_learned_phrase(result.device_id, original_command, confidence)
         graph_engine.record_event(result.device_id, result.action, original_command)
 
-    return _ok({
+    resp: Dict[str, Any] = {
         "type": "multi_device",
         "resolution_tier": "llm",
         "confidence": confidence,
@@ -240,7 +320,10 @@ def _execute_llm_devices(
         "results": [_step_result_dict(r) for r in results],
         "succeeded": len(successes),
         "failed": len(failures),
-    })
+    }
+    if policy_blocks:
+        resp["policy_blocks"] = policy_blocks
+    return _ok(resp)
 
 
 def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
@@ -256,6 +339,10 @@ def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
     )
 
     ctx = behavior_engine.current_context()
+
+    # Fetch policy context once — shared across Tier 1, Tier 2, and any
+    # multi-device execution so weather/presence I/O happens once per request.
+    policy_ctx = get_policy_context()
 
     # ------------------------------------------------------------------
     # Tier 1 — TF cosine + behavior scoring via decision engine
@@ -279,6 +366,7 @@ def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
             device, intent.action, intent.params,
             normalized_command, final_score, tier="cosine",
             cosine_score=cosine_score, behavior_score=b_score,
+            policy_ctx=policy_ctx,
         )
 
     # ------------------------------------------------------------------
@@ -327,12 +415,14 @@ def _handle_device_command(normalized_command: str) -> Dict[str, Any]:
                     reasoning=llm_result.get("reasoning", ""),
                     cosine_score=cosine_score,
                     behavior_score=llm_b_score,
+                    policy_ctx=policy_ctx,
                 )
             # Multiple devices — execute concurrently like a scene
             return _execute_llm_devices(
                 steps, normalized_command, llm_conf,
                 llm_result.get("reasoning", ""),
                 cosine_score,
+                policy_ctx=policy_ctx,
             )
 
     # ------------------------------------------------------------------
@@ -364,6 +454,7 @@ def _execute_device(
     reasoning: str = "",
     cosine_score: float = 0.0,
     behavior_score: float = 0.5,
+    policy_ctx: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if action not in device["capabilities"]:
         return _error(
@@ -377,6 +468,34 @@ def _execute_device(
             400,
             "set_brightness requires a brightness value, e.g. 'set brightness to 75%'.",
         )
+
+    # ------------------------------------------------------------------
+    # Policy Engine — enforce before any device I/O
+    # ------------------------------------------------------------------
+    policy_decision = policy_enforce(
+        device["device_type"], action, params, context=policy_ctx
+    )
+    if policy_decision.is_blocked:
+        logger.info(
+            "Policy BLOCK: device=%s action=%s rule_id=%s reason=%r",
+            device["id"], action, policy_decision.rule_id, policy_decision.reason,
+        )
+        return _error(
+            403,
+            f"Policy blocked: {policy_decision.reason}",
+            extra={
+                "device_id": device["id"],
+                "device_name": device["name"],
+                "action": action,
+                "rule_id": policy_decision.rule_id,
+            },
+        )
+    if policy_decision.is_modified:
+        logger.info(
+            "Policy MODIFY: device=%s action=%s rule_id=%s new_params=%s",
+            device["id"], action, policy_decision.rule_id, policy_decision.modified_params,
+        )
+        params = policy_decision.modified_params or {}
 
     steps = plan_device_execution(device, action, params)
     try:
@@ -420,6 +539,12 @@ def _execute_device(
     }
     if reasoning:
         response["reasoning"] = reasoning
+    if policy_decision.is_modified:
+        response["policy"] = {
+            "verdict": "modify",
+            "rule_id": policy_decision.rule_id,
+            "reason": policy_decision.reason,
+        }
     return _ok(response)
 
 
