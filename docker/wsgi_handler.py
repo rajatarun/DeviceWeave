@@ -9,10 +9,10 @@ Route table
   GET    /health               → app.handler
   GET    /devices              → app.handler
   GET    /devices/{id}         → app.handler
-  POST   /devices              → app.handler
   PUT    /devices/{id}         → app.handler
   DELETE /devices/{id}         → app.handler
   GET    /scenes               → app.handler
+  DELETE /scenes/{scene_id}    → app.handler
   GET    /learnings            → app.handler
   DELETE /learnings            → app.handler
   GET    /presence             → app.handler
@@ -84,6 +84,9 @@ def _build_event(environ: dict) -> dict:
     # /devices/{device_id}
     if len(segments) == 2 and segments[0] == "devices":
         path_params["device_id"] = segments[1]
+    # /scenes/{scene_id}
+    if len(segments) == 2 and segments[0] == "scenes":
+        path_params["scene_id"] = segments[1]
     # /policies/{rule_id}  (but not /policies/author)
     if len(segments) == 2 and segments[0] == "policies" and segments[1] != "author":
         path_params["rule_id"] = segments[1]

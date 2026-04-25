@@ -21,6 +21,7 @@ Globals:
         POLICY_TABLE_NAME: !Ref PolicyTable
         POLICY_CONFIDENCE_THRESHOLD: "0.85"
         PRESENCE_TABLE_NAME: !Ref PresenceTable
+        SCENE_TABLE_NAME: !Ref SceneTable
         LLM_PROVIDER: "bedrock"
         LLM_MODEL_ID: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
         OLLAMA_BASE_URL: ""
@@ -158,6 +159,8 @@ Resources:
             TableName: !Ref PolicyTable
         - DynamoDBCrudPolicy:
             TableName: !Ref PresenceTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SceneTable
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
@@ -261,6 +264,12 @@ Resources:
           Properties:
             ApiId: !Ref DeviceWeaveApi
             Path: /learnings
+            Method: DELETE
+        DeleteScene:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /scenes/{scene_id}
             Method: DELETE
 
   DeviceWeaveFunctionLogGroup:
@@ -523,6 +532,24 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
+
+  # -------------------------------------------------------------------
+  # DynamoDB — Scene Deletion Store
+  # Tracks scenes deleted via DELETE /scenes/{scene_id}.
+  # The active catalog is SCENE_CATALOG minus any deleted IDs here.
+  # -------------------------------------------------------------------
+  SceneTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-scenes-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      AttributeDefinitions:
+        - AttributeName: scene_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: scene_id
+          KeyType: HASH
 
 Conditions:
   HasMemgraphSecret: !Not [!Equals [!Ref MemgraphSecretArn, ""]]

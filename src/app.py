@@ -55,7 +55,13 @@ from learning_store import (
     save_learned_phrase,
     save_manual_phrase,
 )
-from scene_catalog import SCENE_CATALOG, resolve_scene, scene_public_view
+from scene_catalog import (
+    SCENE_CATALOG,
+    delete_scene,
+    get_active_scenes,
+    resolve_scene,
+    scene_public_view,
+)
 from policy_engine.middleware import enforce as policy_enforce, filter_steps as policy_filter_steps
 from policy_engine.context_provider import get_context as get_policy_context
 from intent_sources import get_intent_from_payload
@@ -91,12 +97,17 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if method == "DELETE":
             return _route_delete_device(device_id)
 
+    if path_params.get("scene_id"):
+        scene_id = path_params["scene_id"]
+        if method == "DELETE":
+            return _route_delete_scene(scene_id)
+
     if method == "GET" and path.endswith("/health"):
         return _route_health()
     if method == "GET" and path.endswith("/devices"):
         return _route_devices()
     if method == "POST" and path.endswith("/devices"):
-        return _route_create_device(event)
+        return _error(405, "Devices are managed via provider ingest. Use POST /ingest to sync.")
     if method == "GET" and path.endswith("/scenes"):
         return _route_scenes()
     if method == "GET" and path.endswith("/learnings"):
@@ -124,7 +135,7 @@ def _route_health() -> Dict[str, Any]:
     return _ok({
         "status": "healthy",
         "devices": len(catalog),
-        "scenes": len(SCENE_CATALOG),
+        "scenes": len(get_active_scenes()),
         "learning_enabled": is_configured(),
         "graph_enabled": graph_engine.is_available(),
     })
@@ -139,10 +150,23 @@ def _route_devices() -> Dict[str, Any]:
 
 
 def _route_scenes() -> Dict[str, Any]:
+    active = get_active_scenes()
     return _ok({
-        "scenes": [scene_public_view(s) for s in SCENE_CATALOG],
-        "count": len(SCENE_CATALOG),
+        "scenes": [scene_public_view(s) for s in active],
+        "count": len(active),
     })
+
+
+def _route_delete_scene(scene_id: str) -> Dict[str, Any]:
+    """DELETE /scenes/{scene_id} — remove a scene from the active catalog."""
+    try:
+        found = delete_scene(scene_id)
+    except Exception as exc:
+        logger.error("Delete scene failed: %s", exc, exc_info=True)
+        return _error(500, f"Failed to delete scene: {exc}")
+    if not found:
+        return _error(404, f"Scene '{scene_id}' not found.")
+    return _ok({"scene_id": scene_id, "status": "deleted"})
 
 
 def _route_learn(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -339,7 +363,32 @@ def _route_update_device(device_id: str, event: Dict[str, Any]) -> Dict[str, Any
         logger.error("Update device failed: %s", exc, exc_info=True)
         return _error(500, f"Failed to update device: {exc}")
 
-    return _ok({"device_id": device_id, "updated": list(updates.keys()), "updated_at": now})
+    # Push name change to providers that support rename
+    provider_rename: Dict[str, str] = {}
+    if "name" in updates:
+        new_name = updates["name"]
+        for item in items:
+            provider = item.get("provider", "")
+            if provider == "kasa":
+                try:
+                    from providers.kasa_adapter import KasaAdapter
+                    asyncio.run(KasaAdapter().rename_device(device_id, new_name))
+                    provider_rename["kasa"] = "synced"
+                except Exception as exc:
+                    logger.warning("Kasa rename failed for %s: %s", device_id, exc)
+                    provider_rename["kasa"] = f"failed: {exc}"
+            else:
+                # Govee and SwitchBot APIs do not expose a rename endpoint
+                provider_rename[provider] = "registry_only"
+
+    result: Dict[str, Any] = {
+        "device_id": device_id,
+        "updated": list(updates.keys()),
+        "updated_at": now,
+    }
+    if provider_rename:
+        result["provider_rename"] = provider_rename
+    return _ok(result)
 
 
 def _route_delete_device(device_id: str) -> Dict[str, Any]:

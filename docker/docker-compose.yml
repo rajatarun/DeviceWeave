@@ -94,6 +94,7 @@ services:
       DEVICE_REGISTRY_TABLE:    deviceweave-registry-dev
       POLICY_TABLE_NAME:        deviceweave-policies-dev
       PRESENCE_TABLE_NAME:      deviceweave-presence-dev
+      SCENE_TABLE_NAME:         deviceweave-scenes-dev
     restart: "no"
 
   # --------------------------------------------------------------------------
@@ -168,6 +169,7 @@ services:
       DEVICE_REGISTRY_TABLE: deviceweave-registry-dev
       POLICY_TABLE_NAME:     deviceweave-policies-dev
       PRESENCE_TABLE_NAME:   deviceweave-presence-dev
+      SCENE_TABLE_NAME:      deviceweave-scenes-dev
 
       # ── Memgraph ──────────────────────────────────────────────────────────
       MEMGRAPH_HOST:       memgraph

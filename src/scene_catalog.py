@@ -10,9 +10,16 @@ Adding a new scene: append an entry to SCENE_CATALOG. No other code
 changes required.
 """
 
+import logging
 import math
+import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
+
+_SCENE_TABLE_NAME: str = os.environ.get("SCENE_TABLE_NAME", "")
+_deleted_ids_cache: Optional[Set[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +199,66 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Scene persistence — deleted scene IDs stored in DynamoDB SceneTable
+# ---------------------------------------------------------------------------
+
+def _load_deleted_ids() -> Set[str]:
+    if not _SCENE_TABLE_NAME:
+        return set()
+    import boto3
+    from boto3.dynamodb.conditions import Attr
+    try:
+        table = boto3.resource("dynamodb").Table(_SCENE_TABLE_NAME)
+        resp = table.scan(FilterExpression=Attr("status").eq("deleted"))
+        return {item["scene_id"] for item in resp.get("Items", [])}
+    except Exception as exc:
+        logger.warning("Could not load deleted scene IDs: %s", exc)
+        return set()
+
+
+def _get_deleted_ids() -> Set[str]:
+    global _deleted_ids_cache
+    if _deleted_ids_cache is None:
+        _deleted_ids_cache = _load_deleted_ids()
+    return _deleted_ids_cache
+
+
+def invalidate_scene_cache() -> None:
+    global _deleted_ids_cache
+    _deleted_ids_cache = None
+
+
+def get_active_scenes() -> List[Scene]:
+    """Return SCENE_CATALOG minus any scenes deleted via delete_scene()."""
+    deleted = _get_deleted_ids()
+    return [s for s in SCENE_CATALOG if s["id"] not in deleted]
+
+
+def delete_scene(scene_id: str) -> bool:
+    """
+    Persist a scene deletion to DynamoDB.
+    Returns True if the scene_id exists in the catalog, False otherwise.
+    """
+    if not any(s["id"] == scene_id for s in SCENE_CATALOG):
+        return False
+    if _SCENE_TABLE_NAME:
+        import boto3
+        from datetime import datetime, timezone
+        try:
+            table = boto3.resource("dynamodb").Table(_SCENE_TABLE_NAME)
+            table.put_item(Item={
+                "scene_id": scene_id,
+                "status": "deleted",
+                "deleted_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            logger.error("Failed to persist scene deletion: %s", exc)
+            raise
+    invalidate_scene_cache()
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -213,13 +280,14 @@ def resolve_scene(query: str) -> Tuple[Optional[Scene], float]:
         Returns (None, 0.0) if the catalog is empty or the query is blank.
     """
     query_tokens = _tokenize(query)
-    if not query_tokens or not SCENE_CATALOG:
+    active = get_active_scenes()
+    if not query_tokens or not active:
         return None, 0.0
 
     best_scene: Optional[Scene] = None
     best_score = -1.0
 
-    for scene in SCENE_CATALOG:
+    for scene in active:
         scene_max = 0.0
         for phrase in scene["sample_phrases"]:
             # Build vocab only from this query↔phrase pair.

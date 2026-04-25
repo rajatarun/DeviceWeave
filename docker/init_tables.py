@@ -74,6 +74,16 @@ TABLES = [
         "BillingMode": "PAY_PER_REQUEST",
     },
     {
+        "TableName": os.environ.get("SCENE_TABLE_NAME", "deviceweave-scenes-dev"),
+        "AttributeDefinitions": [
+            {"AttributeName": "scene_id", "AttributeType": "S"},
+        ],
+        "KeySchema": [
+            {"AttributeName": "scene_id", "KeyType": "HASH"},
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+    },
+    {
         "TableName": os.environ.get("POLICY_TABLE_NAME", "deviceweave-policies-dev"),
         "AttributeDefinitions": [
             {"AttributeName": "rule_id",     "AttributeType": "S"},
