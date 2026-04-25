@@ -111,6 +111,9 @@ Reject when:
 ## ABSOLUTE RULES:
 
 - Return ONLY a raw JSON object.  NO markdown.  NO code fences.  NO prose.
+- The ONLY allowed top-level keys are: rule_id, scope, conditions, action, confidence.
+  Do NOT add params, device_type, or any other key at the top level.
+  params belongs INSIDE action, nowhere else.
 - NEVER include fields not listed in the schema above.
 - NEVER invent device types, condition fields, or operators.
 - NEVER auto-correct an ambiguous rule — if uncertain, reject.
