@@ -232,8 +232,15 @@ def resolve_device(query: str) -> Tuple[Optional[Dict[str, Any]], float]:
 
 def device_public_view(device: Dict[str, Any]) -> Dict[str, Any]:
     """Strip internal fields (IP) before returning a device to API callers."""
+    device_id = device["id"]
+
+    # Preserve the full canonical ID for API workflows, and provide a
+    # UI-friendly truncated representation for narrow/mobile layouts.
+    id_truncated = f"{device_id[:16]}…" if len(device_id) > 16 else device_id
+
     return {
-        "id": device["id"],
+        "id": device_id,
+        "id_truncated": id_truncated,
         "name": device["name"],
         "device_type": device["device_type"],
         "capabilities": device["capabilities"],
