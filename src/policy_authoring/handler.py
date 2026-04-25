@@ -227,14 +227,26 @@ def _route_delete(rule_id: str) -> Dict[str, Any]:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _clean(obj: Any) -> Any:
+    """Recursively convert DynamoDB Decimal types to int/float for JSON serialization."""
+    from decimal import Decimal
+    if isinstance(obj, Decimal):
+        return int(obj) if obj % 1 == 0 else float(obj)
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean(v) for v in obj]
+    return obj
+
+
 def _policy_view(item: Dict[str, Any]) -> Dict[str, Any]:
     """Return a clean, client-facing representation of a DynamoDB policy item."""
     return {
         "rule_id": item["rule_id"],
         "version": int(item["version"]),
-        "scope": item["scope"],
-        "conditions": item["conditions"],
-        "action": item["action"],
+        "scope": _clean(item["scope"]),
+        "conditions": _clean(item["conditions"]),
+        "action": _clean(item["action"]),
         "confidence": float(item["confidence"]),
         "source_text": item.get("source_text", ""),
         "status": item.get("status", "active"),

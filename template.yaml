@@ -124,6 +124,7 @@ Resources:
         AllowMethods:
           - POST
           - GET
+          - PUT
           - DELETE
         AllowHeaders:
           - Content-Type
@@ -147,7 +148,7 @@ Resources:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
             TableName: !Ref LearningTable
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref DeviceRegistryTable
         - DynamoDBReadPolicy:
             TableName: !Ref PolicyTable
@@ -215,6 +216,48 @@ Resources:
             ApiId: !Ref DeviceWeaveApi
             Path: /presence
             Method: POST
+        GetPresence:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence
+            Method: GET
+        CreateDevice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /devices
+            Method: POST
+        GetDevice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /devices/{device_id}
+            Method: GET
+        UpdateDevice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /devices/{device_id}
+            Method: PUT
+        DeleteDevice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /devices/{device_id}
+            Method: DELETE
+        ListLearnings:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /learnings
+            Method: GET
+        DeleteLearning:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /learnings
+            Method: DELETE
 
   DeviceWeaveFunctionLogGroup:
     Type: AWS::Logs::LogGroup
