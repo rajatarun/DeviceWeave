@@ -177,3 +177,96 @@ This tags every `AssumeRoleWithWebIdentity` call with a unique, traceable identi
 **One GitHub Secret retained**: `AWS_REGION`. This is not sensitive but is kept as a Secret (rather than a hardcoded value or repository variable) to allow per-environment overrides without modifying the workflow file. If the account always deploys to one region this could be promoted to a repository variable.
 
 **IAM role ARN is hardcoded in the workflow env block**, not a secret. The role ARN contains the account ID (`239571291755`) which is not secret — it is visible in any CloudFormation stack output or AWS Console URL. Hardcoding it makes the trust relationship explicit and auditable directly in the workflow file.
+
+---
+
+## 19. LLM as sole semantic interpreter for policy authoring
+
+**Chosen**: natural language → LLM → Policy DSL JSON → deterministic validation → storage
+**Rejected**: regex extraction, keyword mapping, heuristic parsing
+
+Rule authoring is a semantic task: "cold" needs to map to `temperature < 65`, "at night" to `time_hour >= 22`, "nobody home" to `is_home == false`. These mappings are not enumerable — they require understanding natural language context. Regex and keyword approaches require maintaining a handcrafted mapping table for every possible phrasing and fail silently on novel input.
+
+The LLM acts as a **compiler**, not a classifier. It receives a structured system prompt that enumerates every allowed field, every allowed value, and every rejection trigger explicitly. It must output valid Policy DSL JSON or an explicit `{"rejected": true, ...}` object — there is no middle ground. Guessing is prohibited by the prompt.
+
+The deterministic validation layer runs after the LLM and enforces the schema independently. The LLM provides the semantic mapping; the validator provides the safety net. Neither step alone is sufficient — together they guarantee that stored rules are both semantically correct and structurally valid.
+
+---
+
+## 20. Confidence threshold at 0.85 for policy compilation
+
+**Chosen**: reject rules with LLM confidence < 0.85
+**Rejected**: lower threshold (0.70), no threshold, manual review queue
+
+Policy rules are persistent safety constraints, not one-shot commands. A mis-compiled rule could silently block devices for days or weeks. The execute threshold (0.70) is appropriate for commands — the system acts and the user immediately sees the result. For policies, the feedback loop is much slower: a wrong rule might not be noticed until the user wonders why their fan is always blocked.
+
+The 0.85 threshold is the same as the learning threshold (decision 9): both represent "the system is confident enough to create a durable record". The LLM is instructed to return an explicit rejection object rather than a low-confidence policy, so the user receives a clear error message explaining what the system could not resolve rather than a silently degraded rule.
+
+The threshold is stored as `POLICY_CONFIDENCE_THRESHOLD` in the environment so it can be tuned per stage without code changes.
+
+---
+
+## 21. Policy Engine positioned between resolution and execution
+
+**Chosen**: check policies after device resolution, before device I/O
+**Rejected**: check at intent parse time, check at API entry, post-execution audit
+
+The policy check must know the resolved `device_type` and `action` to evaluate rules — it cannot run before resolution. Checking after execution (audit mode) would allow the blocked action to proceed and creates inconsistency between what the rule says and what happens. Checking at API entry requires parsing intent before the resolver runs, duplicating work.
+
+The chosen position is the only one where both preconditions are met (device + action are known) and the postcondition is guaranteed (no I/O has happened). This gives the Policy Engine complete information with no side effects to undo.
+
+Context (temperature, humidity, time, is_home) is fetched **once per request** at the start of `_handle_device_command` and passed to every enforcement call. This avoids redundant weather API calls on scene commands that evaluate multiple devices.
+
+---
+
+## 22. Context defaults are safe-fail, not safe-block
+
+Every context field has a default used when the data source is unavailable:
+
+| Field | Default | Rationale |
+|-------|---------|-----------|
+| `temperature` | 70°F | Neutral — neither hot nor cold; prevents spurious temperature policy triggers |
+| `humidity` | 50% | Neutral — prevents humidity policy triggers |
+| `is_home` | `true` | Prevents accidental "nobody home" lockouts when the presence table is unreachable |
+
+The alternative — default `is_home` to `false` — is safe from a power consumption perspective but creates operational risk: a transient DynamoDB connectivity issue would block all presence-gated devices until the table recovers. "Safe-fail" in a home automation context means the resident can operate their home normally in degraded state, not that devices lock down. Block policies are an opt-in constraint, not a default.
+
+---
+
+## 23. Block > Modify > Allow verdict priority
+
+When multiple policies match the same `(device_type, action, context)` triple, the first BLOCK wins over any MODIFY, which wins over any ALLOW:
+
+```
+BLOCK  — safety constraint, highest priority
+MODIFY — preference, applies only when no BLOCK matches
+ALLOW  — explicit permit, informational in this version (no override semantics)
+```
+
+The rationale for BLOCK > MODIFY: if the user said "never run fan when cold" and also "run fan at low speed when cool", the temperature condition that triggers both is ambiguous about intent. Conservatively, BLOCK wins — the user can delete the block rule if the modify rule is intended to supersede it.
+
+ALLOW has no override semantics in the current implementation. An ALLOW policy does not supersede a BLOCK. This is intentional for the v1 safety model: granting an explicit override requires an explicit rule deletion, not an implicit order-of-operations. A future version could add a `priority` field to policies if use cases for allow-overrides-block emerge.
+
+---
+
+## 24. TTL-based policy cache, not event-driven invalidation
+
+**Chosen**: module-level dict with 60-second TTL, reloaded from DynamoDB on expiry
+**Rejected**: SNS/EventBridge notification on policy write, ElastiCache, no cache
+
+Policies are safety constraints that should take effect quickly but do not need sub-second propagation. A 60-second window between authoring a rule and its enforcement is acceptable for home automation — users are not authoring rules and immediately testing edge cases in a tight loop. The TTL avoids a DynamoDB read on every `/execute` call (which would add 5–15 ms latency and a DynamoDB read unit cost).
+
+Event-driven invalidation (SNS on write → Lambda subscribes → cache cleared) would add infrastructure complexity (SNS topic, subscription, IAM) for a marginal improvement in propagation time. The PolicyAuthoringFunction and DeviceWeaveFunction are separate Lambda functions; there is no shared memory to invalidate. A cross-function cache coherence mechanism would be more complex than the problem warrants.
+
+`invalidate()` is included for same-container cache busting (e.g. if a future change merges the two Lambdas or in local testing), but cross-container propagation relies entirely on TTL. The 10-second retry TTL on load failure ensures rapid recovery without hammering DynamoDB during an outage.
+
+---
+
+## 25. Separate PresenceTable for home-occupancy state
+
+**Chosen**: `deviceweave-presence-{stage}` DynamoDB table, single item `pk=home_state`
+**Rejected**: environment variable, SSM Parameter Store, item in PolicyTable, item in LearningTable
+
+Presence state changes at runtime (user leaves, arrives) and must be writable via the API. An environment variable requires a Lambda redeploy on every change — unacceptable. SSM Parameter Store requires a separate IAM permission and `ssm:GetParameter` API call, adding latency. Storing the state as a special item in PolicyTable (e.g. `rule_id=__system_state__`) is a schema violation — the table's PK is a UUID and the sort key is a version number; a synthetic key breaks both the schema and query patterns.
+
+A single-key DynamoDB table (`pk` String only) is the simplest correct solution: one read per `/execute` call at 1 read unit, one write per presence update, and a clear data model that is easy to reason about and extend (e.g. per-room presence in the future).

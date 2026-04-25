@@ -1,6 +1,6 @@
 # DeviceWeave
 
-An AI-native execution layer that converts human intent into safe, semantic, real-time control of physical IoT environments.
+An AI-native execution layer that converts human intent into safe, semantic, real-time control of physical IoT environments — with a policy authoring system that enforces automation rules at runtime before any device I/O.
 
 ```
 "I'm starting work"          →  office light on, fan on
@@ -9,44 +9,68 @@ An AI-native execution layer that converts human intent into safe, semantic, rea
 "leaving"                    →  all devices off
 ```
 
-DeviceWeave is not a smart home app or a voice assistant. It is an **AI execution substrate for the physical world**: LLMs generate intent, DeviceWeave guarantees safe execution.
+Rules you can author:
+
+```
+"Don't turn on fan when it's cold"         →  blocked (temperature < 65°F)
+"Don't turn on lights between 11am–3pm"   →  blocked (time_hour >= 11 and <= 15)
+"Dim lights after 10 PM"                  →  params modified (brightness: 20)
+```
+
+DeviceWeave is not a smart home app or a voice assistant. It is an **AI execution substrate for the physical world**: LLMs generate intent, DeviceWeave enforces policy, hardware executes.
 
 ---
 
 ## Architecture
 
 ```
-POST /execute                       POST /ingest  ·  EventBridge schedule
-     │                                    │
-     ▼                                    ▼
- Scene Resolver ── conf ≥ 0.70 ──► Execution Planner   Ingestion Pipeline
-     │ (nearest-neighbour              │ (asyncio.gather  ├── full sync (daily)
-     │  phrase cosine)                 │  concurrent)     └── delta sync (6 h)
-     │ below threshold                 ▼                        │
-     ▼                          Provider Registry         Kasa Discovery
- Intent Parser                  ├── KasaAdapter           (UDP broadcast)
-     │ (deterministic regex)    └── KasaAdapter                 │
-     ▼                                    │               Secrets Manager
- Device Resolver ── conf ≥ 0.70 ──► Safety Layer         (kasa credentials)
-     │ (TF cosine +                  ├── capability check        │
-     │  learned phrases)             └── param validation        ▼
-     │ below threshold                         │          DynamoDB registry
-     ▼                                         ▼          (device fleet)
-  422 Rejected                        Kasa LAN execution
-                                               │
-                                               ▼
-                                      DynamoDB learning write
-                                      (conf ≥ 0.85 only)
+POST /execute                                POST /policies/author   POST /ingest · EventBridge
+     │                                              │                      │
+     ▼                                              ▼                      ▼
+ Scene Resolver ── conf ≥ 0.70 ──►         LLM Policy Compiler     Ingestion Pipeline
+     │ (nearest-neighbour                  (Claude Haiku 4.5)       ├── full sync (daily)
+     │  phrase cosine)                            │                  └── delta sync (6 h)
+     │ below threshold                     Policy Validator                │
+     ▼                                     (schema + conf ≥ 0.85)   Kasa Discovery
+ Intent Parser                                    │                  (UDP broadcast)
+     │ (deterministic regex)               DynamoDB PolicyTable            │
+     ▼                                     (versioned rules)         Secrets Manager
+ Device Resolver ── conf ≥ 0.70 ──►               │
+     │ (TF cosine +                  ┌────────────────────────────────────────┐
+     │  learned phrases)             │         Policy Engine                  │
+     │ below threshold               │  context_provider (temp·hum·time·home) │
+     ▼                               │  policy_loader    (DynamoDB TTL cache) │
+ LLM Resolver ── conf ≥ 0.70 ──►    │  evaluator        (condition matching)  │
+     │ (Claude Haiku 4.5)            │  verdict: BLOCK → 403  no device I/O   │
+     │ below threshold               │           MODIFY → updated params      │
+     ▼                               │           ALLOW  → pass-through        │
+  422 Rejected                       └────────────────────────────────────────┘
+                                                   │
+                                             Safety Layer
+                                             ├── capability check
+                                             └── param validation
+                                                   │
+                                           Provider Registry
+                                           ├── KasaAdapter
+                                           ├── SwitchBotAdapter
+                                           └── GoveeAdapter
+                                                   │
+                                           Device execution (LAN)
+                                                   │
+                                           DynamoDB learning write
+                                           (conf ≥ 0.85 only)
 ```
 
-### Request flow
+### Execution request flow
 
-1. **Scene resolution** — nearest-neighbour cosine similarity against each individual sample phrase. Exact phrase matches score 1.0. Confidence ≥ 0.70 triggers the scene (potentially multi-device).
+1. **Scene resolution** — nearest-neighbour cosine similarity against each individual sample phrase. Confidence ≥ 0.70 triggers the scene (potentially multi-device).
 2. **Intent parsing** — deterministic regex parser extracts `action`, `device_query`, and `params`. No model calls, no network I/O.
 3. **Device resolution** — TF-vector cosine similarity against the device catalog, augmented with phrases learned from prior successful executions.
-4. **Safety layer** — confidence gate (< 0.70 → 422), capability validation, parameter validation. No device I/O until all checks pass.
-5. **Execution** — routed through the provider registry to the correct protocol adapter. Scene steps run concurrently via `asyncio.gather`.
-6. **Learning** — confidence ≥ 0.85 causes the normalized command to be written to DynamoDB as a new sample phrase for the resolved device.
+4. **LLM resolver (Tier 2)** — invoked only when Tier 1 cosine falls below 0.70. Claude Haiku 4.5 resolves contextual and behavioural commands using weather data and device roster.
+5. **Policy Engine** — evaluates the resolved `(device_type, action)` pair against active Policy DSL rules stored in DynamoDB. BLOCK returns 403 with no I/O. MODIFY updates params before execution.
+6. **Safety layer** — capability gate, parameter validation, idempotency check. No device I/O until all checks pass.
+7. **Execution** — routed through the provider registry. Scene and multi-device steps run concurrently via `asyncio.gather`.
+8. **Learning** — confidence ≥ 0.85 writes the normalized command to DynamoDB as a new sample phrase for the resolved device.
 
 ---
 
@@ -58,9 +82,19 @@ POST /execute                       POST /ingest  ·  EventBridge schedule
 |--------|------|------|-------------|
 | `POST` | `/execute` | `{"command": "..."}` | Execute a natural language device or scene command |
 | `POST` | `/learn` | `{"device_id": "...", "phrase": "..."}` | Manually bind a phrase to a device |
+| `POST` | `/presence` | `{"is_home": true\|false}` | Update home-occupancy state for the Policy Engine |
 | `GET` | `/health` | — | Liveness probe with device/scene counts and learning status |
 | `GET` | `/devices` | — | List registered devices and their capabilities |
 | `GET` | `/scenes` | — | List registered scenes and sample phrases |
+
+### Policy Authoring API
+
+| Method | Path | Body / Query | Description |
+|--------|------|------|-------------|
+| `POST` | `/policies/author` | `{"rule": "..."}` | Compile NL rule → Policy DSL → validate → store |
+| `GET` | `/policies` | `?device_type=fan&limit=50` | List active policies (optional device_type filter) |
+| `GET` | `/policies/{rule_id}` | `?version=2` | Get a specific policy (latest version by default) |
+| `DELETE` | `/policies/{rule_id}` | — | Deactivate a policy |
 
 ### Ingestion API
 
@@ -183,6 +217,127 @@ curl -X POST $API_URL/learn \
 }
 ```
 
+### Policy authoring example
+
+```bash
+# Author a rule — natural language compiled by LLM, validated, stored
+curl -X POST $API_URL/policies/author \
+  -H "Content-Type: application/json" \
+  -d '{"rule": "Don'\''t turn on the fan when it'\''s cold"}'
+```
+
+**Response (201 Created)**
+```json
+{
+  "rule_id": "c3f8a2d1-7e45-4b9a-a312-8f1d2e3c4b5a",
+  "version": 1,
+  "scope": {"device_type": "fan"},
+  "conditions": [{"field": "temperature", "operator": "<", "value": 65}],
+  "action": {"type": "block", "reason": "Too cold to run fan", "params": {}},
+  "confidence": 0.92,
+  "source_text": "Don't turn on the fan when it's cold",
+  "status": "active",
+  "created_at": "2026-04-25T01:14:00.000000+00:00"
+}
+```
+
+Once stored, any `/execute` call that resolves to a `fan` device with `turn_on` at < 65°F will receive:
+
+```json
+HTTP 403
+{"error": "Policy blocked: Too cold to run fan", "rule_id": "c3f8a2d1-..."}
+```
+
+---
+
+## Policy System
+
+### Allowed Policy DSL schema
+
+```json
+{
+  "rule_id": "auto",
+  "scope": {
+    "device_type": "fan | light | ac | plug | heater"
+  },
+  "conditions": [
+    {
+      "field": "temperature | humidity | time_hour | is_home",
+      "operator": "> | < | >= | <= | == | !=",
+      "value": "<number for temperature/humidity/time_hour  |  boolean for is_home>"
+    }
+  ],
+  "action": {
+    "type": "block | allow | modify",
+    "reason": "<explanation>",
+    "params": {}
+  },
+  "confidence": 0.0
+}
+```
+
+| Field | Allowed values |
+|-------|---------------|
+| `scope.device_type` | `fan`, `light`, `ac`, `plug`, `heater` |
+| `conditions[].field` | `temperature` (°F), `humidity` (%), `time_hour` (0–23), `is_home` (bool) |
+| `conditions[].operator` | `>`, `<`, `>=`, `<=`, `==`, `!=` |
+| `action.type` | `block` — prevent execution · `modify` — override params · `allow` — explicit permit |
+
+### Authoring pipeline
+
+```
+Natural language rule
+        │
+        ▼  Claude Haiku 4.5 via Bedrock
+LLM Policy Compiler   (system prompt enforces strict JSON output;
+        │              explicit rejection on ambiguity or conf < 0.85)
+        ▼
+Policy Validator      (13-step deterministic check: whitelist, enums,
+        │              type guards, confidence threshold)
+        ▼
+DynamoDB PolicyTable  (versioned — each update creates a new version row;
+                       previous versions become "superseded", never deleted)
+```
+
+Rules with `confidence < 0.85` are rejected — the LLM is instructed to emit an explicit rejection object rather than guess.
+
+### Runtime enforcement (Policy Engine)
+
+On every `/execute` call the Policy Engine fires **after** device resolution and **before** any device I/O:
+
+```
+context_provider  →  {temperature: 60°F, humidity: 45%, time_hour: 14, is_home: true}
+policy_loader     →  load active policies for device_type (60 s TTL cache)
+evaluator         →  test all conditions (AND semantics per policy)
+                     priority: BLOCK > MODIFY > ALLOW
+```
+
+**Verdict behaviour:**
+
+| Verdict | HTTP | Behaviour |
+|---------|------|-----------|
+| `block` | 403 | Request rejected; `rule_id` and reason in response; zero device I/O |
+| `modify` | 200 | Params replaced with policy `params`; `policy` field added to response |
+| `allow` | 200 | Transparent pass-through; no response change |
+
+**Safe-action bypass:** `turn_off` and `get_status` always bypass policy evaluation — deactivation is never restricted.
+
+**Scene behaviour:** blocked steps are removed from the execution set and listed in `policy_blocks`. If all steps are blocked the request returns 403.
+
+### Presence tracking
+
+The `is_home` condition field is backed by a DynamoDB singleton. Update it before leaving or arriving home:
+
+```bash
+# Leaving
+curl -X POST $API_URL/presence -H "Content-Type: application/json" -d '{"is_home": false}'
+
+# Arriving
+curl -X POST $API_URL/presence -H "Content-Type: application/json" -d '{"is_home": true}'
+```
+
+Defaults to `true` when not set — avoids accidental lockout from "nobody home" policies.
+
 ---
 
 ## Built-in devices
@@ -222,22 +377,44 @@ DeviceWeave/
     ├── intent_parser.py             Deterministic regex intent parser
     ├── device_resolver.py           TF-cosine device resolver + catalog
     ├── scene_catalog.py             Scene catalog + nearest-neighbour resolver
+    ├── decision_engine.py           Unified confidence scoring + intent classification
+    ├── behavior_engine.py           Context-aware behavior scoring (Memgraph)
     ├── execution_planner.py         Concurrent multi-device execution
     ├── learning_store.py            DynamoDB phrase learning store
+    ├── llm_resolver.py              Tier 2 LLM device resolver (Claude Haiku 4.5)
+    ├── graph_engine.py              Memgraph behavior event persistence
+    ├── weather_client.py            Open-Meteo weather client (cached daily)
     ├── kasa_provider.py             Compatibility shim → KasaAdapter
-    ├── requirements.txt             Runtime dep: python-kasa==0.7.7
+    ├── requirements.txt             Runtime deps: aiohttp, neo4j
+    ├── policy_authoring/            Policy Authoring Lambda (POST /policies/*)
+    │   ├── __init__.py
+    │   ├── handler.py               Lambda handler — author / list / get / delete routes
+    │   ├── llm_compiler.py          NL → Policy DSL via Claude Haiku 4.5 (Bedrock)
+    │   ├── validator.py             13-step deterministic schema + confidence validator
+    │   └── policy_store.py          DynamoDB PolicyTable CRUD with version history
+    ├── policy_engine/               Runtime enforcement layer (injected in app.py)
+    │   ├── __init__.py
+    │   ├── context_provider.py      Runtime context: temp (°F), humidity, time, is_home
+    │   ├── evaluator.py             Condition matching + BLOCK/MODIFY/ALLOW verdict
+    │   ├── policy_loader.py         DynamoDB policy cache (60 s TTL, paginated scan)
+    │   └── middleware.py            enforce() + filter_steps() — called by app.py
     ├── providers/                   Execution protocol adapters
     │   ├── __init__.py              Protocol registry
     │   ├── base.py                  BaseDeviceProvider ABC + ProviderError
-    │   └── kasa_adapter.py          TP-Link Kasa LAN adapter
+    │   ├── kasa_adapter.py          TP-Link Kasa LAN adapter
+    │   ├── switchbot_adapter.py     SwitchBot cloud adapter
+    │   └── govee_adapter.py         Govee cloud adapter
     └── ingestion/                   Device discovery and registry sync
         ├── __init__.py
         ├── pipeline.py              IngestionPipeline orchestrator (full / delta)
         ├── device_registry.py       DeviceRecord dataclass + DynamoDB operations
+        ├── phrase_generator.py      Bedrock-based sample phrase enrichment
         └── providers/               Discovery provider adapters
             ├── __init__.py
             ├── base.py              AbstractDiscoveryProvider ABC
-            └── kasa_discovery.py    Kasa UDP broadcast discovery
+            ├── kasa_discovery.py    Kasa UDP broadcast discovery
+            ├── govee_discovery.py   Govee API discovery
+            └── switchbot_discovery.py SwitchBot API discovery
 ```
 
 ---
@@ -402,16 +579,20 @@ for _device_type in MatterAdapter.supported_device_types():
 
 ## Safety model
 
-Four checks fire in sequence before any device I/O:
+Six checks fire in sequence before any device I/O:
 
 | # | Check | Failure response |
 |---|-------|-----------------|
 | 1 | Confidence ≥ 0.70 | `422` — low confidence, suggests `/learn` |
 | 2 | Action in `device["capabilities"]` | `422` — unsupported action |
 | 3 | `set_brightness` has a numeric value | `400` — missing parameter |
-| 4 | Idempotency — device already in target state | `200` with `"changed": false` |
+| 4 | **Policy Engine — BLOCK verdict** | `403` — blocked by active policy rule |
+| 5 | **Policy Engine — MODIFY verdict** | params replaced, execution continues |
+| 6 | Idempotency — device already in target state | `200` with `"changed": false` |
 
-LLMs are not connected to the execution path. The only route to device I/O is through the deterministic parser → resolver → safety layer.
+The Policy Engine is check 4–5: it fires after resolution (the system knows what device and action is intended) but before capability validation and device I/O.
+
+LLM calls are bounded to two roles: (a) Tier 2 device resolution when cosine confidence fails, and (b) policy compilation via `/policies/author`. Neither LLM call can directly trigger device I/O — the deterministic safety layer and Policy Engine sit between them and the hardware.
 
 ---
 
