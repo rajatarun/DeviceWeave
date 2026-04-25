@@ -481,9 +481,21 @@ The role `arn:aws:iam::239571291755:role/teamweave-github-actions-sam-deployer` 
 }
 ```
 
-### Kasa credentials secret (one-time)
+### Device provider credentials (one-time per provider)
 
-The ingestion Lambda reads Kasa account credentials from a single Secrets Manager secret. Create it before the first deploy:
+Each provider reads its credentials from a dedicated AWS Secrets Manager secret. Create the secrets before the first deploy. Providers whose secret is absent are silently skipped during ingestion — you only need to create secrets for providers you own devices from.
+
+---
+
+#### TP-Link Kasa
+
+Kasa discovery uses the **Kasa cloud API** (not LAN broadcast), so it works from Lambda inside a VPC without any special routing.
+
+**Step 1 — Find your credentials**
+
+Use the email address and password you registered with in the **Kasa app** (iOS / Android). Two-factor authentication is not supported by the cloud API — if your account has 2FA enabled, create a sub-account without it.
+
+**Step 2 — Create the secret**
 
 ```bash
 aws secretsmanager create-secret \
@@ -492,7 +504,123 @@ aws secretsmanager create-secret \
   --secret-string '{"email":"you@example.com","password":"yourpassword"}'
 ```
 
-The secret ARN is injected automatically into the Lambda via `KASA_SECRET_ARN`. If the variable is absent (local dev), discovery falls back to unauthenticated mode (compatible with older Kasa firmware).
+| Secret key | Value |
+|------------|-------|
+| `email` | The email address on your Kasa account |
+| `password` | Your Kasa account password |
+
+The Lambda reads this via `KASA_SECRET_ARN` (injected automatically by SAM). If the variable is absent, Kasa discovery is skipped.
+
+---
+
+#### Govee
+
+Govee discovery uses the **Govee Developer API** (cloud, HTTPS). Devices must have cloud service enabled in the Govee Home app.
+
+**Step 1 — Get a Govee API key**
+
+1. Open the **Govee Home** app (iOS / Android).
+2. Tap the profile icon → **Settings** (top right gear icon).
+3. Scroll to **Apply for API Key**.
+4. Enter your email address and a brief note (e.g. "Home automation").
+5. Govee sends the API key to your email within a few minutes.
+
+**Step 2 — Create the secret**
+
+```bash
+aws secretsmanager create-secret \
+  --name deviceweave/govee-credentials \
+  --region us-east-1 \
+  --secret-string '{"api_key":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"}'
+```
+
+| Secret key | Value |
+|------------|-------|
+| `api_key` | The API key emailed to you by Govee |
+
+**Supported device types discovered:**
+
+| Govee device | DeviceWeave type | Capabilities added |
+|---|---|---|
+| Color Bulb, Strip Light, Ceiling Light | `GoveeBulb` | set_brightness, set_color, set_color_temp |
+| Plug, Plug Mini, Smart Plug | `GoveePlug` | turn_on, turn_off, toggle, get_status |
+
+Only devices with `controllable: true` in the Govee API response are registered. The Lambda reads this via `GOVEE_SECRET_ARN`.
+
+---
+
+#### SwitchBot
+
+SwitchBot discovery uses the **SwitchBot Cloud API v1.1** with HMAC-SHA256 request signing. You need both a token and a secret key.
+
+**Step 1 — Get your token and secret**
+
+1. Open the **SwitchBot** app (iOS / Android).
+2. Tap the profile icon (bottom right) → **Preferences**.
+3. Tap **App Version** repeatedly (10 taps) until a "Developer Options" menu appears.
+4. Tap **Developer Options**.
+5. Copy both the **Token** and the **Client Secret**.
+
+> The secret was added in SwitchBot API v1.1. If you only see a token (no secret), update the SwitchBot app to the latest version.
+
+**Step 2 — Create the secret**
+
+```bash
+aws secretsmanager create-secret \
+  --name deviceweave/switchbot-credentials \
+  --region us-east-1 \
+  --secret-string '{"token":"your-long-token-here","secret":"your-client-secret-here"}'
+```
+
+| Secret key | Value |
+|------------|-------|
+| `token` | The token from Developer Options |
+| `secret` | The client secret from Developer Options |
+
+**Supported device types discovered:**
+
+| SwitchBot device | DeviceWeave type | Capabilities added |
+|---|---|---|
+| Color Bulb, Strip Light, Ceiling Light (Pro) | `SwitchBotBulb` | set_brightness, set_color, set_color_temp |
+| Plug, Plug Mini (US/JP), Smart Plug | `SwitchBotPlug` | turn_on, turn_off, toggle, get_status |
+| Fan, Ceiling Fan | `SwitchBotFan` | turn_on, turn_off, toggle, get_status |
+| Curtain, Curtain3, Roller Shade | `SwitchBotCurtain` | turn_on, turn_off, toggle, get_status |
+
+Devices with `enableCloudService: false` are skipped (they require BLE and cannot be reached from Lambda). The Lambda reads this via `SWITCHBOT_SECRET_ARN`.
+
+---
+
+#### Updating a secret
+
+To rotate or correct a credential after the stack is already deployed:
+
+```bash
+# Kasa
+aws secretsmanager put-secret-value \
+  --secret-id deviceweave/kasa-credentials \
+  --region us-east-1 \
+  --secret-string '{"email":"new@example.com","password":"newpassword"}'
+
+# Govee
+aws secretsmanager put-secret-value \
+  --secret-id deviceweave/govee-credentials \
+  --region us-east-1 \
+  --secret-string '{"api_key":"new-api-key"}'
+
+# SwitchBot
+aws secretsmanager put-secret-value \
+  --secret-id deviceweave/switchbot-credentials \
+  --region us-east-1 \
+  --secret-string '{"token":"new-token","secret":"new-secret"}'
+```
+
+Secrets are cached per Lambda container. After updating, trigger a fresh sync to pick up the new credentials:
+
+```bash
+curl -X POST $API_URL/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "kasa", "mode": "full"}'
+```
 
 ### Required GitHub Secret
 
