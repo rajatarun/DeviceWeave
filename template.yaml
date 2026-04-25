@@ -314,6 +314,7 @@ Resources:
       FunctionName: !Sub "deviceweave-policy-authoring-${StageName}"
       CodeUri: src/
       Handler: policy_authoring.handler.handler
+      Timeout: 60
       Description: >
         DeviceWeave policy authoring engine — natural language → LLM compiler
         → strict Policy DSL validation → DynamoDB persistence.
@@ -325,8 +326,8 @@ Resources:
             - Effect: Allow
               Action: bedrock:InvokeModel
               Resource:
-                - "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-5-20251001-v1:0"
-                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-sonnet-4-5-20251001-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
         - Statement:
             - Effect: Allow
               Action:
