@@ -36,6 +36,7 @@ import graph_engine
 from device_resolver import (
     _get_active_catalog,
     device_public_view,
+    invalidate_device_registry_cache,
     invalidate_learned_phrases_cache,
     resolve_device,
 )
@@ -75,15 +76,34 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     ctx = event.get("requestContext", {}).get("http", {})
     method: str = ctx.get("method", "POST").upper()
     path: str = ctx.get("path", "/execute")
+    path_params: Dict[str, str] = event.get("pathParameters") or {}
 
     logger.debug("Request: %s %s", method, path)
+
+    # Parameterized routes — must be checked before collection routes
+    if path_params.get("device_id"):
+        device_id = path_params["device_id"]
+        if method == "GET":
+            return _route_get_device(device_id)
+        if method == "PUT":
+            return _route_update_device(device_id, event)
+        if method == "DELETE":
+            return _route_delete_device(device_id)
 
     if method == "GET" and path.endswith("/health"):
         return _route_health()
     if method == "GET" and path.endswith("/devices"):
         return _route_devices()
+    if method == "POST" and path.endswith("/devices"):
+        return _route_create_device(event)
     if method == "GET" and path.endswith("/scenes"):
         return _route_scenes()
+    if method == "GET" and path.endswith("/learnings"):
+        return _route_list_learnings()
+    if method == "DELETE" and path.endswith("/learnings"):
+        return _route_delete_learning(event)
+    if method == "GET" and path.endswith("/presence"):
+        return _route_get_presence()
     if method == "POST" and path.endswith("/learn"):
         return _route_learn(event)
     if method == "POST" and path.endswith("/presence"):
@@ -187,6 +207,257 @@ def _route_presence(event: Dict[str, Any]) -> Dict[str, Any]:
 
     logger.info("Presence updated: is_home=%s", is_home)
     return _ok({"is_home": is_home, "updated_at": now})
+
+
+def _route_get_device(device_id: str) -> Dict[str, Any]:
+    """GET /devices/{device_id} — single device detail."""
+    catalog = _get_active_catalog()
+    device = next((d for d in catalog if d["id"] == device_id), None)
+    if device is None:
+        return _error(404, f"Device '{device_id}' not found.")
+    return _ok(device_public_view(device))
+
+
+def _route_create_device(event: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /devices — manually register a device."""
+    body = _parse_body(event)
+    if body is None:
+        return _error(400, "Request body is not valid JSON.")
+
+    device_id = (body.get("device_id") or "").strip()
+    name = (body.get("name") or "").strip()
+    device_type = (body.get("device_type") or "SmartPlug").strip()
+    capabilities = body.get("capabilities") or ["turn_on", "turn_off", "get_status"]
+    ip = (body.get("ip") or "").strip()
+    model = (body.get("model") or "manual").strip()
+
+    if not device_id:
+        return _error(400, "Missing 'device_id' field.")
+    if not name:
+        return _error(400, "Missing 'name' field.")
+
+    known_ids = {d["id"] for d in _get_active_catalog()}
+    if device_id in known_ids:
+        return _error(409, f"Device '{device_id}' already exists.")
+
+    registry_table = os.environ.get("DEVICE_REGISTRY_TABLE", "")
+    if not registry_table:
+        return _error(503, "Device registry not configured.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        import boto3
+        table = boto3.resource("dynamodb").Table(registry_table)
+        table.put_item(Item={
+            "device_id": device_id,
+            "provider": "manual",
+            "name": name,
+            "device_type": device_type,
+            "capabilities": capabilities,
+            "ip": ip,
+            "model": model,
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+        })
+        invalidate_device_registry_cache()
+    except Exception as exc:
+        logger.error("Create device failed: %s", exc, exc_info=True)
+        return _error(500, f"Failed to create device: {exc}")
+
+    return {
+        "statusCode": 201,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({
+            "device_id": device_id,
+            "name": name,
+            "device_type": device_type,
+            "capabilities": capabilities,
+            "ip": ip,
+            "model": model,
+            "status": "active",
+            "created_at": now,
+        }),
+    }
+
+
+def _route_update_device(device_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    """PUT /devices/{device_id} — update mutable device fields."""
+    body = _parse_body(event)
+    if body is None:
+        return _error(400, "Request body is not valid JSON.")
+
+    registry_table = os.environ.get("DEVICE_REGISTRY_TABLE", "")
+    if not registry_table:
+        return _error(503, "Device registry not configured.")
+
+    import boto3
+    from boto3.dynamodb.conditions import Key
+
+    try:
+        table = boto3.resource("dynamodb").Table(registry_table)
+        resp = table.query(KeyConditionExpression=Key("device_id").eq(device_id))
+        items = resp.get("Items", [])
+    except Exception as exc:
+        logger.error("Update device query failed: %s", exc, exc_info=True)
+        return _error(500, f"Registry query failed: {exc}")
+
+    if not items:
+        return _error(404, f"Device '{device_id}' not found.")
+
+    allowed = {"name", "capabilities", "ip", "device_type", "model"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        return _error(400, f"No updatable fields. Allowed: {sorted(allowed)}.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    expr_names: Dict[str, str] = {"#ua": "updated_at"}
+    expr_values: Dict[str, Any] = {":ua": now}
+    set_parts = ["#ua = :ua"]
+
+    if "name" in updates:
+        expr_names["#n"] = "name"
+        expr_values[":n"] = updates["name"]
+        set_parts.append("#n = :n")
+    for field in ("capabilities", "ip", "device_type", "model"):
+        if field in updates:
+            expr_values[f":{field}"] = updates[field]
+            set_parts.append(f"{field} = :{field}")
+
+    update_expr = "SET " + ", ".join(set_parts)
+    try:
+        for item in items:
+            table.update_item(
+                Key={"device_id": device_id, "provider": item["provider"]},
+                UpdateExpression=update_expr,
+                ExpressionAttributeNames=expr_names,
+                ExpressionAttributeValues=expr_values,
+            )
+        invalidate_device_registry_cache()
+    except Exception as exc:
+        logger.error("Update device failed: %s", exc, exc_info=True)
+        return _error(500, f"Failed to update device: {exc}")
+
+    return _ok({"device_id": device_id, "updated": list(updates.keys()), "updated_at": now})
+
+
+def _route_delete_device(device_id: str) -> Dict[str, Any]:
+    """DELETE /devices/{device_id} — deactivate a device (status → inactive)."""
+    registry_table = os.environ.get("DEVICE_REGISTRY_TABLE", "")
+    if not registry_table:
+        return _error(503, "Device registry not configured.")
+
+    import boto3
+    from boto3.dynamodb.conditions import Key
+
+    try:
+        table = boto3.resource("dynamodb").Table(registry_table)
+        resp = table.query(KeyConditionExpression=Key("device_id").eq(device_id))
+        items = resp.get("Items", [])
+    except Exception as exc:
+        logger.error("Delete device query failed: %s", exc, exc_info=True)
+        return _error(500, f"Registry query failed: {exc}")
+
+    if not items:
+        return _error(404, f"Device '{device_id}' not found.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        for item in items:
+            table.update_item(
+                Key={"device_id": device_id, "provider": item["provider"]},
+                UpdateExpression="SET #s = :s, updated_at = :ua",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":s": "inactive", ":ua": now},
+            )
+        invalidate_device_registry_cache()
+    except Exception as exc:
+        logger.error("Delete device failed: %s", exc, exc_info=True)
+        return _error(500, f"Failed to deactivate device: {exc}")
+
+    return _ok({"device_id": device_id, "status": "inactive", "updated_at": now})
+
+
+def _route_list_learnings() -> Dict[str, Any]:
+    """GET /learnings — list all phrase→device learnings with metadata."""
+    table_name = os.environ.get("LEARNING_TABLE_NAME", "")
+    if not table_name:
+        return _error(503, "Learning store not configured.")
+
+    try:
+        import boto3
+        table = boto3.resource("dynamodb").Table(table_name)
+        resp = table.scan()
+        items = sorted(
+            resp.get("Items", []),
+            key=lambda x: x.get("created_at", ""),
+            reverse=True,
+        )
+        return _ok({
+            "learnings": [
+                {
+                    "device_id": item["device_id"],
+                    "phrase": item["phrase"],
+                    "source": item.get("source", "learned"),
+                    "confidence": float(item.get("confidence", 0)),
+                    "use_count": int(item.get("use_count", 0)),
+                    "created_at": item.get("created_at", ""),
+                }
+                for item in items
+            ],
+            "count": len(items),
+        })
+    except Exception as exc:
+        logger.error("List learnings failed: %s", exc, exc_info=True)
+        return _error(500, f"Failed to list learnings: {exc}")
+
+
+def _route_delete_learning(event: Dict[str, Any]) -> Dict[str, Any]:
+    """DELETE /learnings — remove a specific phrase→device binding."""
+    body = _parse_body(event)
+    if body is None:
+        return _error(400, "Request body is not valid JSON.")
+
+    device_id = (body.get("device_id") or "").strip()
+    phrase = (body.get("phrase") or "").strip()
+    if not device_id:
+        return _error(400, "Missing 'device_id' field.")
+    if not phrase:
+        return _error(400, "Missing 'phrase' field.")
+
+    table_name = os.environ.get("LEARNING_TABLE_NAME", "")
+    if not table_name:
+        return _error(503, "Learning store not configured.")
+
+    try:
+        import boto3
+        table = boto3.resource("dynamodb").Table(table_name)
+        table.delete_item(Key={"device_id": device_id, "phrase": phrase})
+        invalidate_learned_phrases_cache()
+    except Exception as exc:
+        logger.error("Delete learning failed: %s", exc, exc_info=True)
+        return _error(500, f"Failed to delete learning: {exc}")
+
+    return _ok({"device_id": device_id, "phrase": phrase, "deleted": True})
+
+
+def _route_get_presence() -> Dict[str, Any]:
+    """GET /presence — current home-occupancy state."""
+    table_name = os.environ.get("PRESENCE_TABLE_NAME", "")
+    if not table_name:
+        return _error(503, "Presence store not configured.")
+
+    try:
+        import boto3
+        table = boto3.resource("dynamodb").Table(table_name)
+        resp = table.get_item(Key={"pk": "home_state"})
+        item = resp.get("Item")
+        if item is None:
+            return _ok({"is_home": True, "updated_at": None})
+        return _ok({"is_home": item.get("is_home", True), "updated_at": item.get("updated_at")})
+    except Exception as exc:
+        logger.error("Get presence failed: %s", exc, exc_info=True)
+        return _error(500, f"Failed to get presence state: {exc}")
 
 
 def _route_execute(event: Dict[str, Any]) -> Dict[str, Any]:
