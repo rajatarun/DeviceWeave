@@ -154,6 +154,16 @@ class KasaAdapter(BaseDeviceProvider):
 
         raise ValueError(f"Unknown action '{action}'.")
 
+    async def rename_device(self, device_id: str, new_name: str) -> None:
+        """Push a name change to the Kasa cloud (set_alias passthrough)."""
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            token = await _get_token(session)
+            await _passthrough(session, token, device_id, {
+                "system": {"set_alias": {"alias": new_name}}
+            })
+        logger.info("Kasa device %s renamed to '%s'.", device_id, new_name)
+
 
 def _on_cmd(device_type: str) -> Dict:
     if device_type == "SmartBulb":
