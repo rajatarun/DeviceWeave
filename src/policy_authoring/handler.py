@@ -42,6 +42,7 @@ Pipeline for POST /policies/author
 import json
 import logging
 import os
+from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from policy_authoring.llm_compiler import compile_rule
@@ -63,6 +64,18 @@ logging.getLogger().setLevel(LOG_LEVEL)
 for _noisy in ("botocore", "boto3", "urllib3", "s3transfer"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+def _json_default(value: Any) -> Any:
+    """JSON serializer for values commonly returned by DynamoDB."""
+    if isinstance(value, Decimal):
+        # Preserve integer values as ints while safely emitting fractional values.
+        return int(value) if value % 1 == 0 else float(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _json_dumps(payload: Dict[str, Any]) -> str:
+    return json.dumps(payload, default=_json_default)
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +177,7 @@ def _route_author(event: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "statusCode": 201,
         "headers": {"Content-Type": "application/json"},
-        "body": json.dumps(_policy_view(stored)),
+        "body": _json_dumps(_policy_view(stored)),
     }
 
 
@@ -244,7 +257,7 @@ def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "statusCode": 200,
         "headers": {"Content-Type": "application/json"},
-        "body": json.dumps(payload),
+        "body": _json_dumps(payload),
     }
 
 
@@ -259,5 +272,5 @@ def _error(
     return {
         "statusCode": status,
         "headers": {"Content-Type": "application/json"},
-        "body": json.dumps(body),
+        "body": _json_dumps(body),
     }
