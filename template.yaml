@@ -18,6 +18,9 @@ Globals:
         LEARNING_CONFIDENCE_THRESHOLD: "0.85"
         CONFIDENCE_THRESHOLD: "0.4"
         DEVICE_REGISTRY_TABLE: !Ref DeviceRegistryTable
+        POLICY_TABLE_NAME: !Ref PolicyTable
+        POLICY_CONFIDENCE_THRESHOLD: "0.85"
+        PRESENCE_TABLE_NAME: !Ref PresenceTable
         KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
         SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
         GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
@@ -121,6 +124,7 @@ Resources:
         AllowMethods:
           - POST
           - GET
+          - DELETE
         AllowHeaders:
           - Content-Type
           - Authorization
@@ -145,6 +149,10 @@ Resources:
             TableName: !Ref LearningTable
         - DynamoDBReadPolicy:
             TableName: !Ref DeviceRegistryTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref PolicyTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PresenceTable
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
@@ -201,6 +209,12 @@ Resources:
             ApiId: !Ref DeviceWeaveApi
             Path: /scenes
             Method: GET
+        UpdatePresence:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence
+            Method: POST
 
   DeviceWeaveFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -290,6 +304,69 @@ Resources:
       RetentionInDays: 14
 
   # -------------------------------------------------------------------
+  # Policy Authoring Lambda
+  # Converts natural language rules → Policy DSL via Claude Sonnet,
+  # validates the output, and persists valid rules to PolicyTable.
+  # -------------------------------------------------------------------
+  PolicyAuthoringFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "deviceweave-policy-authoring-${StageName}"
+      CodeUri: src/
+      Handler: policy_authoring.handler.handler
+      Description: >
+        DeviceWeave policy authoring engine — natural language → LLM compiler
+        → strict Policy DSL validation → DynamoDB persistence.
+      Policies:
+        - CloudWatchLogsFullAccess
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PolicyTable
+        - Statement:
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-5-20251001-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-sonnet-4-5-20251001-v1:0"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ec2:CreateNetworkInterface
+                - ec2:DescribeNetworkInterfaces
+                - ec2:DeleteNetworkInterface
+              Resource: "*"
+      Events:
+        AuthorPolicy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /policies/author
+            Method: POST
+        ListPolicies:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /policies
+            Method: GET
+        GetPolicy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /policies/{rule_id}
+            Method: GET
+        DeletePolicy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /policies/{rule_id}
+            Method: DELETE
+
+  PolicyAuthoringFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/deviceweave-policy-authoring-${StageName}"
+      RetentionInDays: 14
+
+  # -------------------------------------------------------------------
   # DynamoDB — Phrase Learning Store
   # -------------------------------------------------------------------
   LearningTable:
@@ -340,6 +417,61 @@ Resources:
             - AttributeName: provider
               KeyType: HASH
             - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # -------------------------------------------------------------------
+  # DynamoDB — Presence Store
+  # Single-item table tracking home-occupancy state for the Policy Engine.
+  # Updated via POST /presence; read by context_provider.py on each
+  # /execute call.
+  # -------------------------------------------------------------------
+  PresenceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-presence-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+
+  # -------------------------------------------------------------------
+  # DynamoDB — Policy Store
+  # Stores validated Policy DSL rules with full version history.
+  # -------------------------------------------------------------------
+  PolicyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-policies-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: rule_id
+          AttributeType: S
+        - AttributeName: version
+          AttributeType: N
+        - AttributeName: device_type
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: rule_id
+          KeyType: HASH
+        - AttributeName: version
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: device-type-created-index
+          KeySchema:
+            - AttributeName: device_type
+              KeyType: HASH
+            - AttributeName: created_at
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
@@ -403,3 +535,33 @@ Outputs:
     Value: !GetAtt DeviceWeaveIngestionFunction.Arn
     Export:
       Name: !Sub "DeviceWeaveIngestionFunctionArn-${StageName}"
+
+  PolicyAuthoringFunctionArn:
+    Description: Policy Authoring Lambda ARN
+    Value: !GetAtt PolicyAuthoringFunction.Arn
+    Export:
+      Name: !Sub "DeviceWeavePolicyAuthoringFunctionArn-${StageName}"
+
+  PolicyTableName:
+    Description: DynamoDB policy store table
+    Value: !Ref PolicyTable
+    Export:
+      Name: !Sub "DeviceWeavePolicyTable-${StageName}"
+
+  AuthorPolicyEndpoint:
+    Description: POST /policies/author — compile and store a natural language rule
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/policies/author"
+
+  ListPoliciesEndpoint:
+    Description: GET /policies — list active policies
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/policies"
+
+  PresenceEndpoint:
+    Description: POST /presence — update home-occupancy state for the Policy Engine
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/presence"
+
+  PresenceTableName:
+    Description: DynamoDB presence table (home-occupancy state)
+    Value: !Ref PresenceTable
+    Export:
+      Name: !Sub "DeviceWeavePresenceTable-${StageName}"
