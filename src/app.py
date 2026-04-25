@@ -65,6 +65,7 @@ from scene_catalog import (
 from policy_engine.middleware import enforce as policy_enforce, filter_steps as policy_filter_steps
 from policy_engine.context_provider import get_context as get_policy_context
 from intent_sources import get_intent_from_payload
+from providers import list_providers
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(LOG_LEVEL)
@@ -104,6 +105,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     if method == "GET" and path.endswith("/health"):
         return _route_health()
+    if method == "GET" and path.endswith("/providers"):
+        return _route_providers()
     if method == "GET" and path.endswith("/devices"):
         return _route_devices()
     if method == "POST" and path.endswith("/devices"):
@@ -139,6 +142,11 @@ def _route_health() -> Dict[str, Any]:
         "learning_enabled": is_configured(),
         "graph_enabled": graph_engine.is_available(),
     })
+
+
+def _route_providers() -> Dict[str, Any]:
+    providers = list_providers()
+    return _ok({"providers": providers, "count": len(providers)})
 
 
 def _route_devices() -> Dict[str, Any]:

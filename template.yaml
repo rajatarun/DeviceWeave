@@ -205,6 +205,12 @@ Resources:
             ApiId: !Ref DeviceWeaveApi
             Path: /health
             Method: GET
+        ListProviders:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /providers
+            Method: GET
         ListDevices:
           Type: HttpApi
           Properties:

@@ -7,6 +7,7 @@ Route table
   POST   /execute              → app.handler
   POST   /learn                → app.handler
   GET    /health               → app.handler
+  GET    /providers            → app.handler
   GET    /devices              → app.handler
   GET    /devices/{id}         → app.handler
   PUT    /devices/{id}         → app.handler
