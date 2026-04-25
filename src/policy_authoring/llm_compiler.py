@@ -23,9 +23,9 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger(__name__)
+from llm_provider import get_llm_provider
 
-_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """\
 You are a Policy Compiler for DeviceWeave, an IoT home automation platform.
@@ -141,20 +141,10 @@ def compile_rule(natural_language_rule: str) -> Optional[Dict[str, Any]]:
         f'Return only the raw JSON object — no markdown, no explanation.'
     )
 
-    import boto3
-    client = boto3.client("bedrock-runtime", region_name="us-east-1")
-
-    body = json.dumps({
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 512,
-        "system": _SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_message}],
-    })
-
     try:
-        resp = client.invoke_model(modelId=_MODEL_ID, body=body)
-        payload = json.loads(resp["body"].read())
-        text = payload["content"][0]["text"].strip()
+        llm = get_llm_provider()
+        logger.debug("Policy compiler using provider: %s", llm.model_id)
+        text = llm.invoke(_SYSTEM_PROMPT, user_message, max_tokens=512)
 
         # Defensively strip markdown code fences in case the model ignores
         # the instruction (```json ... ``` or ``` ... ```).

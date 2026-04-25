@@ -20,10 +20,10 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import weather_client
+from llm_provider import get_llm_provider
 
 logger = logging.getLogger(__name__)
 
-_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _CENTRAL_TZ = ZoneInfo("America/Chicago")
 
 _SYSTEM_PROMPT = """\
@@ -105,19 +105,10 @@ def llm_resolve(
     # ~100 fixed overhead for confidence/reasoning/JSON structure.
     max_tokens = max(256, len(devices) * 20 + 100)
 
-    import boto3
-    client = boto3.client("bedrock-runtime", region_name="us-east-1")
-    body = json.dumps({
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": max_tokens,
-        "system": _SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_msg}],
-    })
-
     try:
-        resp = client.invoke_model(modelId=_MODEL_ID, body=body)
-        payload = json.loads(resp["body"].read())
-        text = payload["content"][0]["text"].strip()
+        llm = get_llm_provider()
+        logger.debug("LLM resolver using provider: %s", llm.model_id)
+        text = llm.invoke(_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
 
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
