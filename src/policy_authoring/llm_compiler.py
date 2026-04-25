@@ -168,6 +168,14 @@ def compile_rule(natural_language_rule: str) -> Optional[Dict[str, Any]]:
 
         raw = json.loads(text)
 
+        # Haiku 4.5 quirk: emits params:{} at top level instead of inside action.
+        if "params" in raw and not raw.get("rejected") and isinstance(raw.get("action"), dict):
+            action = raw["action"]
+            if "params" not in action:
+                action["params"] = raw.pop("params")
+            else:
+                raw.pop("params")
+
         logger.info(
             "LLM compiler response: rejected=%s confidence=%s device_type=%s",
             raw.get("rejected", False),
