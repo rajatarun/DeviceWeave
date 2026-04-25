@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
+_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 _SYSTEM_PROMPT = """\
 You are a Policy Compiler for DeviceWeave, an IoT home automation platform.
