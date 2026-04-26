@@ -582,7 +582,7 @@ def _handle_scene(
 ) -> Dict[str, Any]:
     logger.info("Scene matched: %s (conf=%.4f)", scene["id"], confidence)
 
-    steps = plan_scene_execution(scene)
+    steps = plan_scene_execution(scene, _get_active_catalog())
     if not steps:
         return _error(422, f"Scene '{scene['id']}' produced no executable steps.")
 

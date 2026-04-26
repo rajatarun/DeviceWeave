@@ -25,7 +25,7 @@ class BaseDeviceProvider(ABC):
         """
         Return the device_type strings this adapter can handle.
 
-        These must match the 'device_type' field in DEVICE_CATALOG.
+        These must match the 'device_type' field in the device registry.
         Example: ["SmartPlug", "SmartBulb"]
         """
         ...
@@ -41,7 +41,7 @@ class BaseDeviceProvider(ABC):
         Execute an action on a physical device.
 
         Args:
-            device:  Full device dict from DEVICE_CATALOG (contains 'ip',
+            device:  Full device dict from the device registry (contains 'ip',
                      'device_type', 'capabilities', etc.).
             action:  Validated action string — one of the device's
                      declared capabilities.
