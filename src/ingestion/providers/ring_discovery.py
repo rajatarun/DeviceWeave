@@ -170,6 +170,16 @@ class RingDiscovery(AbstractDiscoveryProvider):
             logger.error("No Ring credentials available — aborting discovery.")
             return []
 
+        # Refuse to attempt auth if there is no token at all — raise immediately
+        # so the handler can return setup instructions without hitting Ring's API.
+        has_token = (
+            _injected_refresh_token
+            or (_token_cache or {}).get("refresh_token")
+            or creds.get("refresh_token")
+        )
+        if not has_token:
+            raise RingTwoFactorRequired(creds.get("email", ""))
+
         import aiohttp
 
         logger.info("Authenticating with Ring cloud…")
