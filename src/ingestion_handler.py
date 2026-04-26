@@ -53,18 +53,11 @@ def handler(event: Dict[str, Any], context: Any) -> Any:
     if mode not in _VALID_MODES:
         return _http_error(400, f"Invalid mode '{mode}'. Must be one of: {sorted(_VALID_MODES)}.")
 
-    two_fa_code: str = payload.get("two_fa_code", "").strip()
-
     if provider == "ring":
-        from ingestion.providers.ring_discovery import (
-            inject_refresh_token, inject_two_fa_code, RingTwoFactorRequired,
-        )
+        from ingestion.providers.ring_discovery import inject_refresh_token, RingTwoFactorRequired
         if refresh_token:
             inject_refresh_token(refresh_token)
             logger.info("Ring refresh_token injected from request body.")
-        if two_fa_code:
-            inject_two_fa_code(two_fa_code)
-            logger.info("Ring two_fa_code injected from request body.")
 
     logger.info("Ingestion triggered — provider=%s mode=%s", provider, mode)
 
@@ -75,11 +68,29 @@ def handler(event: Dict[str, Any], context: Any) -> Any:
         return _http_error(400, str(exc))
     except Exception as exc:
         if provider == "ring" and type(exc).__name__ == "RingTwoFactorRequired":
-            phone = getattr(exc, "phone", "")
+            email = getattr(exc, "email", "your_email")
             body = {
                 "status": "2fa_required",
-                "message": f"Ring sent a verification code to {phone or 'your registered phone'}.",
-                "hint": 'Re-call /ingest with {"provider":"ring","mode":"full","two_fa_code":"<code>"}',
+                "message": (
+                    "Ring requires 2FA. Run the following commands locally to obtain "
+                    "your refresh_token, then re-call /ingest with it."
+                ),
+                "instructions": [
+                    f'export RING_EMAIL="{email}"',
+                    'export RING_PASS="your_password"',
+                    (
+                        "python3 -c \""
+                        "import os; from ring_doorbell import Auth; "
+                        "auth=Auth('DeviceWeave/1.0', None, lambda: input('2FA code: ')); "
+                        "auth.fetch_token(os.environ['RING_EMAIL'], os.environ['RING_PASS']); "
+                        "print('refresh_token:', auth.token['refresh_token'])"
+                        "\""
+                    ),
+                ],
+                "next_step": (
+                    'POST /ingest {"provider":"ring","mode":"full",'
+                    '"refresh_token":"<token from above>"}'
+                ),
             }
             if "requestContext" in event:
                 return {
