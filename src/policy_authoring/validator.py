@@ -34,15 +34,18 @@ CONFIDENCE_THRESHOLD: float = 0.85
 
 _ALLOWED_TOP_KEYS = frozenset({"rule_id", "scope", "conditions", "action", "confidence"})
 _ALLOWED_DEVICE_TYPES = frozenset({"fan", "light", "ac", "plug", "heater"})
-_ALLOWED_CONDITION_FIELDS = frozenset({"temperature", "humidity", "time_hour", "is_home"})
+_ALLOWED_CONDITION_FIELDS = frozenset({
+    "temperature", "humidity", "time_hour",
+    "cloud_cover_pct", "is_home", "is_overcast",
+})
 _ALLOWED_OPERATORS = frozenset({">", "<", ">=", "<=", "==", "!="})
 _ALLOWED_ACTION_TYPES = frozenset({"block", "allow", "modify"})
 
 # Fields whose condition value must be numeric (int or float, not bool).
-_NUMERIC_FIELDS = frozenset({"temperature", "humidity", "time_hour"})
+_NUMERIC_FIELDS = frozenset({"temperature", "humidity", "time_hour", "cloud_cover_pct"})
 
 # Fields whose condition value must be a boolean.
-_BOOLEAN_FIELDS = frozenset({"is_home"})
+_BOOLEAN_FIELDS = frozenset({"is_home", "is_overcast"})
 
 
 class ValidationError(Exception):

@@ -41,9 +41,9 @@ Policy DSL JSON object.
   },
   "conditions": [
     {
-      "field": "<EXACTLY ONE OF: temperature | humidity | time_hour | is_home>",
+      "field": "<EXACTLY ONE OF: temperature | humidity | time_hour | cloud_cover_pct | is_home | is_overcast>",
       "operator": "<EXACTLY ONE OF: > | < | >= | <= | == | !=",
-      "value": <number for temperature/humidity/time_hour  |  boolean for is_home>
+      "value": <number for temperature/humidity/time_hour/cloud_cover_pct  |  boolean for is_home/is_overcast>
     }
   ],
   "action": {
@@ -60,13 +60,16 @@ Policy DSL JSON object.
 2.  device_type    : MUST be one of: fan, light, ac, plug, heater.
                      No other device types are accepted.
 3.  conditions     : MUST contain at least 1 item.  Empty list → reject.
-4.  field          : MUST be one of: temperature, humidity, time_hour, is_home.
+4.  field          : MUST be one of: temperature, humidity, time_hour,
+                     cloud_cover_pct, is_home, is_overcast.
 5.  operator       : MUST be one of: >, <, >=, <=, ==, !=
 6.  value types    :
-      temperature  → Fahrenheit float/int  (e.g. 65.0 for "cold", 85 for "hot")
-      humidity     → percentage float/int  (0-100, e.g. 60 for "humid")
-      time_hour    → 24-hour integer       (0-23, e.g. 22 for "10 PM")
-      is_home      → boolean               (true or false, NOT a string)
+      temperature      → Fahrenheit float/int  (e.g. 65.0 for "cold", 85 for "hot")
+      humidity         → percentage float/int  (0-100, e.g. 60 for "humid")
+      time_hour        → 24-hour integer       (0-23, e.g. 22 for "10 PM")
+      cloud_cover_pct  → percentage float/int  (0-100, e.g. 70 for "mostly cloudy")
+      is_home          → boolean               (true or false, NOT a string)
+      is_overcast      → boolean               (true or false, NOT a string)
 7.  action.type    : MUST be one of: block, allow, modify.
 8.  action.reason  : non-empty string explaining the rule's intent.
 9.  params         : always an empty object {} unless you have explicit \
@@ -80,6 +83,10 @@ modification parameters.
   "warm" / "hot" / "too hot" / "summer heat"  → temperature > 85
   "humid" / "stuffy" / "muggy"                → humidity > 60
   "dry"                                        → humidity < 30
+  "overcast" / "cloudy" / "gloomy" / "grey"   → is_overcast == true
+  "clear" / "sunny" / "not cloudy"            → is_overcast == false
+  "partly cloudy" / "some clouds"             → cloud_cover_pct > 30
+  "mostly cloudy" / "heavy cloud"             → cloud_cover_pct > 70
   "after 10 PM" / "late night"                → time_hour >= 22
   "after 9 PM"                                → time_hour >= 21
   "in the morning" / "early morning"          → time_hour <= 9
@@ -103,6 +110,7 @@ Reject when:
   (e.g. "dishwasher", "TV", "thermostat", "doorbell" → reject)
 - The condition cannot be mapped to any allowed field
   (e.g. "when it rains", "if the door is open", "when I'm sleeping" → reject)
+  NOTE: "cloudy", "overcast", "gloomy" → use is_overcast or cloud_cover_pct — do NOT reject
 - Multiple valid interpretations exist with different outcomes
 - The rule is grammatically present but semantically empty
   ("do something with the fan" → reject)
