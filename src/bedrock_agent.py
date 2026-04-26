@@ -395,13 +395,16 @@ def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
 def run_agent(
     user_message: str,
     history: List[Dict[str, Any]],
+    system_prompt_extra: str = "",
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Run the Bedrock Converse API agentic loop.
 
     Args:
-        user_message: The latest message from the user.
-        history:      Prior Converse API messages for the session (may be []).
+        user_message:        The latest message from the user.
+        history:             Prior Converse API messages for the session (may be []).
+        system_prompt_extra: Optional suffix appended to the system prompt —
+                             used by the SMS handler to enforce brevity.
 
     Returns:
         (reply_text, updated_history)
@@ -411,6 +414,7 @@ def run_agent(
     import boto3
 
     client = boto3.client("bedrock-runtime", region_name=_REGION)
+    system_text = _SYSTEM_PROMPT + system_prompt_extra if system_prompt_extra else _SYSTEM_PROMPT
 
     # Append the new user turn
     messages = list(history) + [
@@ -420,7 +424,7 @@ def run_agent(
     for round_idx in range(_MAX_TOOL_ROUNDS):
         resp = client.converse(
             modelId=_MODEL_ID,
-            system=[{"text": _SYSTEM_PROMPT}],
+            system=[{"text": system_text}],
             messages=messages,
             toolConfig={"tools": _TOOLS},
             inferenceConfig={"maxTokens": 1024, "temperature": 0.2},
