@@ -15,13 +15,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from device_resolver import DEVICE_CATALOG
 from providers import ProviderError, get_provider
 
 logger = logging.getLogger(__name__)
-
-# Index for O(1) device lookup by id
-_DEVICE_INDEX: Dict[str, Dict[str, Any]] = {d["id"]: d for d in DEVICE_CATALOG}
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +54,10 @@ def plan_device_execution(
     return [ExecutionStep(device=device, action=action, params=params)]
 
 
-def plan_scene_execution(scene: Dict[str, Any]) -> List[ExecutionStep]:
+def plan_scene_execution(
+    scene: Dict[str, Any],
+    catalog: List[Dict[str, Any]],
+) -> List[ExecutionStep]:
     """
     Convert a scene's action list into ExecutionSteps with full device dicts.
 
@@ -66,9 +65,10 @@ def plan_scene_execution(scene: Dict[str, Any]) -> List[ExecutionStep]:
     device's capabilities are skipped with a warning rather than aborting the
     entire scene — partial execution is better than no execution.
     """
+    device_index: Dict[str, Dict[str, Any]] = {d["id"]: d for d in catalog}
     steps: List[ExecutionStep] = []
     for spec in scene["actions"]:
-        device = _DEVICE_INDEX.get(spec["device_id"])
+        device = device_index.get(spec["device_id"])
         if device is None:
             logger.warning(
                 "Scene '%s': device_id '%s' not found in catalog — skipping.",
