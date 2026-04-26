@@ -155,7 +155,6 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
         if resp.status == 412:
             raise RingTwoFactorRequired(creds.get("email", ""))
         if resp.status == 401:
-            global _token_cache
             _token_cache = None  # discard expired token
             raise RingAuthExpired()
         resp.raise_for_status()
