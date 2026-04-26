@@ -6,7 +6,6 @@ You are working inside an existing Next.js (TypeScript) admin application for
 DeviceWeave, an AI-powered IoT automation system. The app already has:
 
 - A tab-based layout (Home, Devices, Scenes, Learnings, Policies)
-- A shared API client that prepends `NEXT_PUBLIC_API_URL` to every request
 - Existing loading, error, and empty-state patterns — follow them exactly
 - No new dependencies may be added
 
@@ -14,9 +13,6 @@ This document specifies **only** the changes required. Leave everything else unt
 
 ---
 
-## API Reference
-
-All endpoints are relative to `NEXT_PUBLIC_API_URL`.
 
 ### GET /providers
 
@@ -348,6 +344,6 @@ Severity: warning (amber/yellow).
 - [ ] Sync button shows a spinner while pending and a toast on completion
 
 ### General
-- [ ] No hardcoded URLs — all calls use `NEXT_PUBLIC_API_URL`
+- [ ] No hardcoded URLs 
 - [ ] No new npm packages installed
 - [ ] All pre-existing tabs and features work without regression
