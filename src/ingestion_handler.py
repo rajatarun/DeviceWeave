@@ -48,9 +48,15 @@ def handler(event: Dict[str, Any], context: Any) -> Any:
 
     provider: str = payload.get("provider", "kasa").strip().lower()
     mode: str = payload.get("mode", "delta").strip().lower()
+    refresh_token: str = payload.get("refresh_token", "").strip()
 
     if mode not in _VALID_MODES:
         return _http_error(400, f"Invalid mode '{mode}'. Must be one of: {sorted(_VALID_MODES)}.")
+
+    if provider == "ring" and refresh_token:
+        from ingestion.providers.ring_discovery import inject_refresh_token
+        inject_refresh_token(refresh_token)
+        logger.info("Ring refresh_token injected from request body.")
 
     logger.info("Ingestion triggered — provider=%s mode=%s", provider, mode)
 
