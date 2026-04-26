@@ -57,27 +57,15 @@ def handler(event: Dict[str, Any], context: Any) -> Any:
 
     if provider == "ring":
         from ingestion.providers.ring_discovery import (
-            inject_refresh_token, inject_tokens, get_credentials,
+            inject_refresh_token, inject_two_fa_code, get_credentials,
             RingTwoFactorRequired, RingAuthExpired,
         )
         if refresh_token:
             inject_refresh_token(refresh_token)
             logger.info("Ring refresh_token injected from request body.")
-
         if two_fa_code:
-            # Complete 2FA before running the pipeline so it runs exactly once.
-            creds = get_credentials() or {}
-            try:
-                token_data = _ring_complete_2fa(
-                    creds.get("email", ""), creds.get("password", ""), two_fa_code
-                )
-            except Exception as auth_exc:
-                logger.exception("Ring 2FA completion failed")
-                return _http_error(502, f"Ring 2FA completion failed: {auth_exc}")
-            inject_tokens(token_data["access_token"], token_data.get("refresh_token", ""))
-            from ingestion.providers.ring_discovery import _persist_refresh_token
-            _persist_refresh_token(token_data.get("refresh_token", ""), creds)
-            logger.info("Ring 2FA complete — tokens injected and persisted.")
+            inject_two_fa_code(two_fa_code)
+            logger.info("Ring two_fa_code injected — will be submitted with next auth request.")
 
     logger.info("Ingestion triggered — provider=%s mode=%s", provider, mode)
 
@@ -160,15 +148,6 @@ def _ring_trigger_2fa(email: str, password: str) -> None:
         auth.fetch_token(email, password)
     except _SmsSent:
         pass  # SMS sent — stop here, don't complete auth
-
-
-def _ring_complete_2fa(email: str, password: str, two_fa_code: str) -> Dict[str, Any]:
-    """Use ring_doorbell to complete 2FA and return the token dict."""
-    from ring_doorbell import Auth
-
-    auth = Auth("DeviceWeave/1.0", None, lambda: two_fa_code)
-    auth.fetch_token(email, password)
-    return auth.token
 
 
 def _http_error(status: int, message: str) -> Dict[str, Any]:
