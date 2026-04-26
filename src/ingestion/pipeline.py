@@ -113,6 +113,12 @@ try:
 except Exception as _exc:  # pragma: no cover
     logger.warning("Could not register GoveeDiscovery: %s", _exc)
 
+try:
+    from ingestion.providers.ring_discovery import RingDiscovery
+    register_provider(RingDiscovery())
+except Exception as _exc:  # pragma: no cover
+    logger.warning("Could not register RingDiscovery: %s", _exc)
+
 
 # ---------------------------------------------------------------------------
 # Pipeline
