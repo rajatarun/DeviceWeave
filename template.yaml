@@ -77,6 +77,20 @@ Parameters:
     Default: ""
 
   # -----------------------------------------------------------------------
+  # Pinpoint SMS — two-way SMS via a Pinpoint long code.
+  # Phone numbers cannot be provisioned by CloudFormation; lease one in the
+  # Pinpoint console (SMS → Phone numbers → Request) then supply it here.
+  # Leave PinpointOriginationNumber blank to deploy without SMS support.
+  # -----------------------------------------------------------------------
+  PinpointOriginationNumber:
+    Type: String
+    Default: ""
+    Description: >
+      E.164 phone number leased from Pinpoint (e.g. +14155550100).
+      Provision via Pinpoint console → SMS → Phone numbers → Request phone number.
+      After provisioning, enable two-way SMS and point it at SmsInboundTopic.
+
+  # -----------------------------------------------------------------------
   # Weather — Open-Meteo (free, no API key).  Set to your deployment location.
   # -----------------------------------------------------------------------
   WeatherLat:
@@ -432,6 +446,132 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/deviceweave-policy-authoring-${StageName}"
+      RetentionInDays: 14
+
+  # -------------------------------------------------------------------
+  # Pinpoint — SMS inbound / outbound
+  #
+  # Low-cost pattern:
+  #   User SMS → Pinpoint long code (~$1/mo) → SmsInboundTopic → Lambda
+  #   Lambda → Pinpoint SendMessages → reply SMS (~$0.0075 each direction)
+  #
+  # One-time console step (CloudFormation cannot provision phone numbers):
+  #   Pinpoint console → SMS → Phone numbers → Request phone number
+  #   → enable Two-way SMS → set SNS topic to !Ref SmsInboundTopic
+  # -------------------------------------------------------------------
+  PinpointApp:
+    Type: AWS::Pinpoint::App
+    Properties:
+      Name: !Sub "deviceweave-${StageName}"
+
+  SmsInboundTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "deviceweave-sms-inbound-${StageName}"
+
+  SmsInboundTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SmsInboundTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pinpoint.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SmsInboundTopic
+
+  DeviceWeaveSmsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "deviceweave-sms-${StageName}"
+      CodeUri: src/
+      Handler: sms_handler.handler
+      Timeout: 60
+      Description: >
+        DeviceWeave SMS handler — receives Pinpoint inbound SMS via SNS,
+        runs the Bedrock conversational agent, replies via Pinpoint SendMessages.
+        Phone number is used as session_id for persistent per-user conversation.
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          PINPOINT_APP_ID: !Ref PinpointApp
+          PINPOINT_ORIGINATION_NUMBER: !Ref PinpointOriginationNumber
+          CONVERSATION_TABLE_NAME: !Ref ConversationTable
+          DEVICE_REGISTRY_TABLE: !Ref DeviceRegistryTable
+          LEARNING_TABLE_NAME: !Ref LearningTable
+          POLICY_TABLE_NAME: !Ref PolicyTable
+          PRESENCE_TABLE_NAME: !Ref PresenceTable
+          SCENE_TABLE_NAME: !Ref SceneTable
+          LLM_MODEL_ID: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+          MEMGRAPH_PORT: !Ref MemgraphPort
+          MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
+          WEATHER_LAT: !Ref WeatherLat
+          WEATHER_LON: !Ref WeatherLon
+          KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
+          SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
+          GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref LambdaSubnetIds
+      Policies:
+        - CloudWatchLogsFullAccess
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConversationTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LearningTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DeviceRegistryTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref PolicyTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref PresenceTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref SceneTable
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials-*"
+        - !If
+          - HasMemgraphSecret
+          - AWSSecretsManagerGetSecretValuePolicy:
+              SecretArn: !Ref MemgraphSecretArn
+          - !Ref AWS::NoValue
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:Converse
+              Resource:
+                - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        - Statement:
+            - Effect: Allow
+              Action: mobiletargeting:SendMessages
+              Resource: !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${PinpointApp}/messages"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ec2:CreateNetworkInterface
+                - ec2:DescribeNetworkInterfaces
+                - ec2:DeleteNetworkInterface
+                - ec2:DescribeInstances
+              Resource: "*"
+      Events:
+        SmsInbound:
+          Type: SNS
+          Properties:
+            Topic: !Ref SmsInboundTopic
+
+  DeviceWeaveSmsFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/deviceweave-sms-${StageName}"
       RetentionInDays: 14
 
   # -------------------------------------------------------------------
