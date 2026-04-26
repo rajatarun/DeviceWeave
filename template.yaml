@@ -22,6 +22,7 @@ Globals:
         POLICY_CONFIDENCE_THRESHOLD: "0.85"
         PRESENCE_TABLE_NAME: !Ref PresenceTable
         SCENE_TABLE_NAME: !Ref SceneTable
+        CONVERSATION_TABLE_NAME: !Ref ConversationTable
         LLM_PROVIDER: "bedrock"
         LLM_MODEL_ID: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
         OLLAMA_BASE_URL: ""
@@ -161,6 +162,8 @@ Resources:
             TableName: !Ref PresenceTable
         - DynamoDBCrudPolicy:
             TableName: !Ref SceneTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConversationTable
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
@@ -174,7 +177,9 @@ Resources:
           - !Ref AWS::NoValue
         - Statement:
             - Effect: Allow
-              Action: bedrock:InvokeModel
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:Converse
               Resource:
                 - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
@@ -555,6 +560,27 @@ Resources:
           AttributeType: S
       KeySchema:
         - AttributeName: scene_id
+          KeyType: HASH
+
+  # -------------------------------------------------------------------
+  # DynamoDB — Conversation Store
+  # Stores Bedrock Converse API message history per session_id.
+  # Items expire automatically via DynamoDB TTL (24 h).
+  # -------------------------------------------------------------------
+  ConversationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-conversations-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
           KeyType: HASH
 
 Conditions:

@@ -95,6 +95,7 @@ services:
       POLICY_TABLE_NAME:        deviceweave-policies-dev
       PRESENCE_TABLE_NAME:      deviceweave-presence-dev
       SCENE_TABLE_NAME:         deviceweave-scenes-dev
+      CONVERSATION_TABLE_NAME:  deviceweave-conversations-dev
     restart: "no"
 
   # --------------------------------------------------------------------------
@@ -165,11 +166,12 @@ services:
       AWS_DEFAULT_REGION:        us-east-1
 
       # ── Table names ───────────────────────────────────────────────────────
-      LEARNING_TABLE_NAME:   deviceweave-phrases-dev
-      DEVICE_REGISTRY_TABLE: deviceweave-registry-dev
-      POLICY_TABLE_NAME:     deviceweave-policies-dev
-      PRESENCE_TABLE_NAME:   deviceweave-presence-dev
-      SCENE_TABLE_NAME:      deviceweave-scenes-dev
+      LEARNING_TABLE_NAME:      deviceweave-phrases-dev
+      DEVICE_REGISTRY_TABLE:    deviceweave-registry-dev
+      POLICY_TABLE_NAME:        deviceweave-policies-dev
+      PRESENCE_TABLE_NAME:      deviceweave-presence-dev
+      SCENE_TABLE_NAME:         deviceweave-scenes-dev
+      CONVERSATION_TABLE_NAME:  deviceweave-conversations-dev
 
       # ── Memgraph ──────────────────────────────────────────────────────────
       MEMGRAPH_HOST:       memgraph
