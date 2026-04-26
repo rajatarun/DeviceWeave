@@ -53,8 +53,13 @@ def handler(event: Dict[str, Any], context: Any) -> Any:
     if mode not in _VALID_MODES:
         return _http_error(400, f"Invalid mode '{mode}'. Must be one of: {sorted(_VALID_MODES)}.")
 
+    two_fa_code: str = payload.get("two_fa_code", "").strip()
+
     if provider == "ring":
-        from ingestion.providers.ring_discovery import inject_refresh_token, RingTwoFactorRequired
+        from ingestion.providers.ring_discovery import (
+            inject_refresh_token, inject_tokens,
+            get_credentials, RingTwoFactorRequired, RingAuthExpired,
+        )
         if refresh_token:
             inject_refresh_token(refresh_token)
             logger.info("Ring refresh_token injected from request body.")
@@ -67,31 +72,78 @@ def handler(event: Dict[str, Any], context: Any) -> Any:
     except ValueError as exc:
         return _http_error(400, str(exc))
     except Exception as exc:
-        if provider == "ring" and type(exc).__name__ == "RingTwoFactorRequired":
-            email = getattr(exc, "email", "your_email")
-            body = {
-                "status": "2fa_required",
-                "message": (
-                    "Ring requires 2FA. Run the following commands locally to obtain "
-                    "your refresh_token, then re-call /ingest with it."
-                ),
-                "instructions": [
-                    f'export RING_EMAIL="{email}"',
-                    'export RING_PASS="your_password"',
-                    (
-                        "python3 -c \""
-                        "import os; from ring_doorbell import Auth; "
-                        "auth=Auth('DeviceWeave/1.0', None, lambda: input('2FA code: ')); "
-                        "auth.fetch_token(os.environ['RING_EMAIL'], os.environ['RING_PASS']); "
-                        "print('refresh_token:', auth.token['refresh_token'])"
-                        "\""
+        exc_type = type(exc).__name__
+
+        if provider == "ring" and exc_type in ("RingTwoFactorRequired", "RingAuthExpired"):
+            creds = get_credentials() or {}
+            email = creds.get("email", "")
+            password = creds.get("password", "")
+
+            if exc_type == "RingTwoFactorRequired":
+                # No refresh_token at all — return local setup instructions.
+                body = {
+                    "status": "2fa_required",
+                    "message": (
+                        "Ring requires 2FA. Run the following commands locally to obtain "
+                        "your refresh_token, then re-call /ingest with it."
                     ),
-                ],
-                "next_step": (
-                    'POST /ingest {"provider":"ring","mode":"full",'
-                    '"refresh_token":"<token from above>"}'
-                ),
-            }
+                    "instructions": [
+                        f'export RING_EMAIL="{email or "your_email"}"',
+                        'export RING_PASS="your_password"',
+                        (
+                            "python3 -c \""
+                            "import os; from ring_doorbell import Auth; "
+                            "auth=Auth('DeviceWeave/1.0', None, lambda: input('2FA code: ')); "
+                            "auth.fetch_token(os.environ['RING_EMAIL'], os.environ['RING_PASS']); "
+                            "print('refresh_token:', auth.token['refresh_token'])"
+                            "\""
+                        ),
+                    ],
+                    "next_step": (
+                        'POST /ingest {"provider":"ring","mode":"full",'
+                        '"refresh_token":"<token from above>"}'
+                    ),
+                }
+            elif two_fa_code:
+                # Expired token + user supplied 2FA code → complete re-auth.
+                try:
+                    token_data = _ring_complete_2fa(email, password, two_fa_code)
+                except Exception as auth_exc:
+                    logger.exception("Ring 2FA completion failed")
+                    return _http_error(502, f"Ring 2FA completion failed: {auth_exc}")
+
+                inject_tokens(token_data["access_token"], token_data.get("refresh_token", ""))
+                from ingestion.providers.ring_discovery import _persist_refresh_token
+                _persist_refresh_token(token_data.get("refresh_token", ""), creds)
+                logger.info("Ring re-auth complete. Re-running ingestion pipeline.")
+                try:
+                    result = asyncio.run(IngestionPipeline(provider, mode).run())
+                except Exception as retry_exc:
+                    logger.exception("Ring pipeline failed after re-auth")
+                    return _http_error(502, f"Pipeline error after re-auth: {retry_exc}")
+                result_dict = result.to_dict()
+                if "requestContext" in event:
+                    return {
+                        "statusCode": 202,
+                        "headers": {"Content-Type": "application/json"},
+                        "body": json.dumps(result_dict),
+                    }
+                return result_dict
+            else:
+                # Expired token, no code yet → trigger SMS via ring_doorbell.
+                try:
+                    _ring_trigger_2fa(email, password)
+                except Exception as sms_exc:
+                    logger.exception("Ring 2FA trigger failed")
+                    return _http_error(502, f"Ring 2FA trigger failed: {sms_exc}")
+                body = {
+                    "status": "2fa_required",
+                    "message": "Ring sent a verification code to your registered phone.",
+                    "next_step": (
+                        'POST /ingest {"provider":"ring","mode":"full","two_fa_code":"<code>"}'
+                    ),
+                }
+
             if "requestContext" in event:
                 return {
                     "statusCode": 200,
@@ -99,6 +151,7 @@ def handler(event: Dict[str, Any], context: Any) -> Any:
                     "body": json.dumps(body),
                 }
             return body
+
         logger.exception("Ingestion pipeline failed")
         return _http_error(502, f"Pipeline error: {exc}")
 
@@ -136,6 +189,32 @@ def _extract_payload(event: Dict[str, Any]) -> Dict[str, Any]:
 
     # EventBridge or direct invocation — payload IS the event.
     return event
+
+
+def _ring_trigger_2fa(email: str, password: str) -> None:
+    """Use ring_doorbell to initiate 2FA — Ring sends an SMS, then we stop."""
+    from ring_doorbell import Auth
+
+    class _SmsSent(Exception):
+        pass
+
+    def _stop():
+        raise _SmsSent()
+
+    auth = Auth("DeviceWeave/1.0", None, _stop)
+    try:
+        auth.fetch_token(email, password)
+    except _SmsSent:
+        pass  # SMS sent — stop here, don't complete auth
+
+
+def _ring_complete_2fa(email: str, password: str, two_fa_code: str) -> Dict[str, Any]:
+    """Use ring_doorbell to complete 2FA and return the token dict."""
+    from ring_doorbell import Auth
+
+    auth = Auth("DeviceWeave/1.0", None, lambda: two_fa_code)
+    auth.fetch_token(email, password)
+    return auth.token
 
 
 def _http_error(status: int, message: str) -> Dict[str, Any]:

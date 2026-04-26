@@ -33,10 +33,26 @@ _injected_refresh_token: Optional[str] = None
 
 
 class RingTwoFactorRequired(Exception):
-    """Raised when Ring returns 412 — caller must obtain a refresh_token externally."""
+    """Raised when there is no refresh_token — caller must run the setup flow."""
     def __init__(self, email: str):
         self.email = email
         super().__init__("Ring 2FA required")
+
+
+class RingAuthExpired(Exception):
+    """Raised when Ring returns 401 on a refresh_token grant — re-auth needed."""
+    pass
+
+
+def inject_tokens(access_token: str, refresh_token: str) -> None:
+    """Inject tokens obtained via an external ring_doorbell auth flow."""
+    global _token_cache
+    _token_cache = {"access_token": access_token, "refresh_token": refresh_token}
+
+
+def get_credentials() -> Optional[Dict[str, str]]:
+    """Return Ring credentials from Secrets Manager (cached)."""
+    return _get_credentials()
 
 
 def inject_refresh_token(token: str) -> None:
@@ -138,6 +154,10 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
     async with session.post(_RING_OAUTH_URL, headers=headers, data=form_data) as resp:
         if resp.status == 412:
             raise RingTwoFactorRequired(creds.get("email", ""))
+        if resp.status == 401:
+            global _token_cache
+            _token_cache = None  # discard expired token
+            raise RingAuthExpired()
         resp.raise_for_status()
         token_data = await resp.json(content_type=None)
 
@@ -198,7 +218,7 @@ class RingDiscovery(AbstractDiscoveryProvider):
                 ) as resp:
                     resp.raise_for_status()
                     raw = await resp.json(content_type=None)
-        except RingTwoFactorRequired:
+        except (RingTwoFactorRequired, RingAuthExpired):
             raise
         except Exception as exc:
             logger.error("Ring API error: %s", exc, exc_info=True)

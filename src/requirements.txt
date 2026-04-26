@@ -7,3 +7,4 @@
 
 aiohttp>=3.9
 neo4j>=5.0
+ring_doorbell>=0.9
