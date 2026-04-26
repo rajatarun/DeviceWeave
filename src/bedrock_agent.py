@@ -38,6 +38,21 @@ Guidelines:
 - If a command is blocked by a policy, explain clearly and do not retry.
 - If you cannot find a matching device or scene, say so and suggest alternatives.
 - Keep all responses short and conversational.
+
+canonical_phrase requirement:
+- ALWAYS populate canonical_phrase in execute_device_command and execute_scene.
+- canonical_phrase must be a short, self-contained English phrase that fully
+  describes the resolved intent using only information from the conversation
+  context — never use pronouns or relative references like "it", "that one",
+  "the same", or "too".
+- Examples of correct canonical_phrase values:
+    user says "kitchen too" after turning on living room light
+      → canonical_phrase: "turn on kitchen island light"
+    user says "dim it a bit"
+      → canonical_phrase: "dim living room ceiling light to 50 percent"
+    user says "run movie mode"
+      → canonical_phrase: "run movie mode scene"
+- This phrase is recorded for future intent matching — accuracy matters.
 """
 
 # ---------------------------------------------------------------------------
@@ -108,8 +123,16 @@ _TOOLS: List[Dict[str, Any]] = [
                                 "set_brightness. Omit or pass {} for actions that take no params."
                             ),
                         },
+                        "canonical_phrase": {
+                            "type": "string",
+                            "description": (
+                                "REQUIRED. A short, self-contained phrase that fully describes "
+                                "the resolved intent using conversation context — no pronouns "
+                                "or relative references. Example: 'turn on kitchen island light'."
+                            ),
+                        },
                     },
-                    "required": ["device_id", "action"],
+                    "required": ["device_id", "action", "canonical_phrase"],
                 }
             },
         }
@@ -129,8 +152,16 @@ _TOOLS: List[Dict[str, Any]] = [
                             "type": "string",
                             "description": "Exact scene ID from list_scenes.",
                         },
+                        "canonical_phrase": {
+                            "type": "string",
+                            "description": (
+                                "REQUIRED. A short, self-contained phrase that fully describes "
+                                "the resolved intent using conversation context — no pronouns "
+                                "or relative references. Example: 'run movie mode scene'."
+                            ),
+                        },
                     },
-                    "required": ["scene_id"],
+                    "required": ["scene_id", "canonical_phrase"],
                 }
             },
         }
@@ -179,12 +210,15 @@ def _tool_list_scenes() -> Dict[str, Any]:
 def _tool_execute_device_command(
     device_id: str,
     action: str,
+    canonical_phrase: str,
     params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from device_resolver import _get_active_catalog, DeviceRegistryError
     from execution_planner import plan_device_execution, execute_steps
     from policy_engine.middleware import enforce as policy_enforce
     from policy_engine.context_provider import get_context as get_policy_context
+    from learning_store import LEARNING_THRESHOLD, is_configured, save_learned_phrase
+    import graph_engine
 
     params = params or {}
 
@@ -235,6 +269,15 @@ def _tool_execute_device_command(
     if not result.success:
         return {"error": result.error, "device_id": device_id}
 
+    # Record behavior and learn the context-resolved canonical phrase.
+    # canonical_phrase is the agent's full intent (e.g. "turn on kitchen island light")
+    # derived from the conversation — safe to learn even for terse follow-ups like "kitchen too".
+    if canonical_phrase:
+        if is_configured():
+            save_learned_phrase(device_id, canonical_phrase, LEARNING_THRESHOLD)
+        graph_engine.record_event(device_id, action, canonical_phrase)
+        logger.info("Learned phrase for %s: %r", device_id, canonical_phrase)
+
     return {
         "success": True,
         "device_id": device_id,
@@ -245,12 +288,14 @@ def _tool_execute_device_command(
     }
 
 
-def _tool_execute_scene(scene_id: str) -> Dict[str, Any]:
+def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
     from scene_catalog import get_active_scenes
     from device_resolver import _get_active_catalog, DeviceRegistryError
     from execution_planner import plan_scene_execution, execute_steps
     from policy_engine.middleware import filter_steps as policy_filter_steps
     from policy_engine.context_provider import get_context as get_policy_context
+    from learning_store import LEARNING_THRESHOLD, is_configured, save_learned_phrase
+    import graph_engine
 
     scenes = {s["id"]: s for s in get_active_scenes()}
     scene = scenes.get(scene_id)
@@ -289,6 +334,15 @@ def _tool_execute_scene(scene_id: str) -> Dict[str, Any]:
     successes = [r for r in results if r.success]
     failures = [r for r in results if not r.success]
 
+    # Learn the canonical phrase for each successfully executed device in the scene.
+    if canonical_phrase and successes:
+        for r in successes:
+            if is_configured():
+                save_learned_phrase(r.device_id, canonical_phrase, LEARNING_THRESHOLD)
+            graph_engine.record_event(r.device_id, r.action, canonical_phrase)
+        logger.info("Learned scene phrase for %s (%d devices): %r",
+                    scene_id, len(successes), canonical_phrase)
+
     return {
         "success": True,
         "scene_id": scene_id,
@@ -323,10 +377,14 @@ def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
         return _tool_execute_device_command(
             device_id=tool_input["device_id"],
             action=tool_input["action"],
+            canonical_phrase=tool_input.get("canonical_phrase", ""),
             params=tool_input.get("params"),
         )
     if name == "execute_scene":
-        return _tool_execute_scene(scene_id=tool_input["scene_id"])
+        return _tool_execute_scene(
+            scene_id=tool_input["scene_id"],
+            canonical_phrase=tool_input.get("canonical_phrase", ""),
+        )
     return {"error": f"Unknown tool: {name}"}
 
 
