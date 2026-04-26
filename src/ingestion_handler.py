@@ -76,17 +76,25 @@ def handler(event: Dict[str, Any], context: Any) -> Any:
         return _http_error(400, str(exc))
     except Exception as exc:
         if provider == "ring" and type(exc).__name__ in ("RingTwoFactorRequired", "RingAuthExpired"):
-            creds = get_credentials() or {}
-            try:
-                _ring_trigger_2fa(creds.get("email", ""), creds.get("password", ""))
-            except Exception as sms_exc:
-                logger.exception("Ring 2FA trigger failed")
-                return _http_error(502, f"Ring 2FA trigger failed: {sms_exc}")
-            body = {
-                "status": "2fa_required",
-                "message": "Ring sent a verification code to your registered phone.",
-                "next_step": 'POST /ingest {"provider":"ring","mode":"full","two_fa_code":"<code>"}',
-            }
+            if two_fa_code:
+                # Code was submitted but Ring rejected it — expired or wrong.
+                body = {
+                    "status": "2fa_code_invalid",
+                    "message": "The 2FA code was invalid or expired.",
+                    "next_step": 'POST /ingest {"provider":"ring","mode":"full"} to receive a new SMS code.',
+                }
+            else:
+                creds = get_credentials() or {}
+                try:
+                    _ring_trigger_2fa(creds.get("email", ""), creds.get("password", ""))
+                except Exception as sms_exc:
+                    logger.exception("Ring 2FA trigger failed")
+                    return _http_error(502, f"Ring 2FA trigger failed: {sms_exc}")
+                body = {
+                    "status": "2fa_required",
+                    "message": "Ring sent a verification code to your registered phone.",
+                    "next_step": 'POST /ingest {"provider":"ring","mode":"full","two_fa_code":"<code>"}',
+                }
             if "requestContext" in event:
                 return {
                     "statusCode": 200,
