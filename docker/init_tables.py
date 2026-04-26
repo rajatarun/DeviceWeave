@@ -84,6 +84,16 @@ TABLES = [
         "BillingMode": "PAY_PER_REQUEST",
     },
     {
+        "TableName": os.environ.get("CONVERSATION_TABLE_NAME", "deviceweave-conversations-dev"),
+        "AttributeDefinitions": [
+            {"AttributeName": "session_id", "AttributeType": "S"},
+        ],
+        "KeySchema": [
+            {"AttributeName": "session_id", "KeyType": "HASH"},
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+    },
+    {
         "TableName": os.environ.get("POLICY_TABLE_NAME", "deviceweave-policies-dev"),
         "AttributeDefinitions": [
             {"AttributeName": "rule_id",     "AttributeType": "S"},

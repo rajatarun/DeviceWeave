@@ -544,6 +544,16 @@ def _route_execute(event: Dict[str, Any]) -> Dict[str, Any]:
     if body is None:
         return _error(400, "Request body is not valid JSON.")
 
+    # ------------------------------------------------------------------
+    # Conversational mode — triggered when session_id is present
+    # ------------------------------------------------------------------
+    session_id = body.get("session_id", "").strip() if isinstance(body, dict) else ""
+    if session_id:
+        return _route_execute_conversational(body, session_id)
+
+    # ------------------------------------------------------------------
+    # One-shot mode (original behaviour)
+    # ------------------------------------------------------------------
     intent = get_intent_from_payload(body)
     if intent is None:
         return _error(
@@ -557,17 +567,41 @@ def _route_execute(event: Dict[str, Any]) -> Dict[str, Any]:
                 intent.source, intent.confidence, intent.raw_text)
     normalized = intent.raw_text.lower()
 
-    # ------------------------------------------------------------------
     # 1. Scene resolution
-    # ------------------------------------------------------------------
     scene, scene_conf = resolve_scene(normalized)
     if scene is not None and scene_conf >= CONFIDENCE_THRESHOLD:
         return _handle_scene(scene, scene_conf, normalized, intent_source=intent.source)
 
-    # ------------------------------------------------------------------
     # 2. Single-device resolution
-    # ------------------------------------------------------------------
     return _handle_device_command(normalized, intent_source=intent.source)
+
+
+def _route_execute_conversational(body: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+    """Bedrock Converse API agentic loop with DynamoDB-persisted session history."""
+    from bedrock_agent import run_agent
+    from conversation_store import load_session, save_session
+
+    command = body.get("command", "").strip()
+    if not command:
+        return _error(400, "Conversational mode requires a non-empty 'command' field.")
+
+    logger.info("Conversational execute: session_id=%s command=%r", session_id, command)
+
+    history = load_session(session_id)
+    try:
+        reply, updated_history = run_agent(command, history)
+    except Exception as exc:
+        logger.exception("Bedrock agent error for session %s", session_id)
+        return _error(502, f"Agent error: {exc}")
+
+    save_session(session_id, updated_history)
+
+    return _ok({
+        "type": "conversational",
+        "session_id": session_id,
+        "response": reply,
+        "messages_in_session": len(updated_history),
+    })
 
 
 # ---------------------------------------------------------------------------
