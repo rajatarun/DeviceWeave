@@ -15,11 +15,12 @@ from providers.base import BaseDeviceProvider, ProviderError
 from providers.kasa_adapter import KasaAdapter
 from providers.switchbot_adapter import SwitchBotAdapter
 from providers.govee_adapter import GoveeAdapter
+from providers.ring_adapter import RingAdapter
 
 # Maps device_type → provider instance.
 _REGISTRY: dict[str, BaseDeviceProvider] = {}
 
-_ADAPTERS = (KasaAdapter(), SwitchBotAdapter(), GoveeAdapter())
+_ADAPTERS = (KasaAdapter(), SwitchBotAdapter(), GoveeAdapter(), RingAdapter())
 for _adapter in _ADAPTERS:
     for _device_type in _adapter.supported_device_types():
         _REGISTRY[_device_type] = _adapter
@@ -39,6 +40,11 @@ _PROVIDER_META = {
     "switchbot": {
         "display_name": "SwitchBot",
         "credential_env": "SWITCHBOT_SECRET_ARN",
+        "supports_rename": False,
+    },
+    "ring": {
+        "display_name": "Ring",
+        "credential_env": "RING_SECRET_ARN",
         "supports_rename": False,
     },
 }

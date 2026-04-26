@@ -30,6 +30,7 @@ Globals:
         KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
         SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
         GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
+        RING_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials"
         MEMGRAPH_PORT: !Ref MemgraphPort
         MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
         WEATHER_LAT: !Ref WeatherLat
@@ -184,6 +185,8 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
         - !If
           - HasMemgraphSecret
           - AWSSecretsManagerGetSecretValuePolicy:
@@ -321,6 +324,7 @@ Resources:
           KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
           SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
           GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
+          RING_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials"
           MEMGRAPH_PORT: !Ref MemgraphPort
           MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
       Policies:
@@ -335,6 +339,8 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
         - !If
           - HasMemgraphSecret
           - AWSSecretsManagerGetSecretValuePolicy:
@@ -510,6 +516,7 @@ Resources:
           KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
           SWITCHBOT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials"
           GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
+          RING_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials"
       VpcConfig:
         SecurityGroupIds:
           - !Ref LambdaSecurityGroup
@@ -534,6 +541,8 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
         - !If
           - HasMemgraphSecret
           - AWSSecretsManagerGetSecretValuePolicy:
