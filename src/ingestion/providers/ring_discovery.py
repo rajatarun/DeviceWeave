@@ -30,6 +30,7 @@ _USER_AGENT = "android:com.ringapp:2.0.67(423)"
 _cred_cache: Optional[Dict[str, str]] = None
 _token_cache: Optional[Dict[str, str]] = None
 _injected_refresh_token: Optional[str] = None
+_pending_two_fa_code: Optional[str] = None
 
 
 class RingTwoFactorRequired(Exception):
@@ -42,6 +43,13 @@ class RingTwoFactorRequired(Exception):
 class RingAuthExpired(Exception):
     """Raised when Ring returns 401 on a refresh_token grant — re-auth needed."""
     pass
+
+
+def inject_two_fa_code(code: str) -> None:
+    """Inject a 2FA code so _ensure_token submits it in the next auth request."""
+    global _pending_two_fa_code, _token_cache
+    _pending_two_fa_code = code
+    _token_cache = None  # force re-auth so the code is actually used
 
 
 def inject_tokens(access_token: str, refresh_token: str) -> None:
@@ -117,7 +125,7 @@ def _hardware_id(creds: Dict[str, str]) -> str:
 
 
 async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
-    global _token_cache, _injected_refresh_token
+    global _token_cache, _injected_refresh_token, _pending_two_fa_code
     if _token_cache and _token_cache.get("access_token"):
         return _token_cache["access_token"]
 
@@ -151,15 +159,23 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
             "scope": "client",
         }
 
+    # If a 2FA code was injected, include it in this request directly.
+    # Ring accepts the code without sending a new SMS when it's present upfront.
+    if _pending_two_fa_code:
+        form_data["2fa_code"] = _pending_two_fa_code
+        headers["2fa-support-token"] = "tok"
+
     async with session.post(_RING_OAUTH_URL, headers=headers, data=form_data) as resp:
         if resp.status == 412:
+            _pending_two_fa_code = None
             raise RingTwoFactorRequired(creds.get("email", ""))
         if resp.status == 401:
-            _token_cache = None  # discard expired token
+            _token_cache = None
             raise RingAuthExpired()
         resp.raise_for_status()
         token_data = await resp.json(content_type=None)
 
+    _pending_two_fa_code = None
     access_token = token_data.get("access_token")
     if not access_token:
         raise RuntimeError(f"Ring auth returned no access_token: {token_data}")
