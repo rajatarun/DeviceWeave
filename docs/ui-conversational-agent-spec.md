@@ -6,10 +6,13 @@ You are working inside an existing Next.js (TypeScript) admin application for
 DeviceWeave, an AI-powered IoT automation system. The app already has:
 
 - A tab-based layout (Home, Devices, Providers, Scenes, Learnings, Policies)
+- A Home tab with a text input box that sends one-shot commands to `POST /execute`
 - Existing loading, error, and empty-state patterns — follow them exactly
 - No new dependencies may be added
 
 This document specifies **only** the changes required. Leave everything else untouched.
+
+**Do not add a new tab.** The change is entirely inside the existing **Home** tab.
 
 ---
 
@@ -17,8 +20,9 @@ This document specifies **only** the changes required. Leave everything else unt
 
 ### POST /execute — conversational mode
 
-Trigger the Bedrock Converse API agent. Include `session_id` to maintain
-conversation history; omit it for one-shot execution (existing behaviour).
+The same endpoint the Home tab already calls. Adding `session_id` to the body
+activates conversational mode — the backend keeps the full message history for
+that session.
 
 **Request:**
 
@@ -80,45 +84,50 @@ export interface ConversationalExecuteResponse {
 
 ---
 
-## Change 1 — Chat Tab
+## Change 1 — Replace the Home Tab Command Box
 
-### 1.1 Tab placement
+### 1.1 What to remove
 
-Add a **Chat** tab to the existing tab bar, placed after the Home tab and
-before the Devices tab.
+Remove the current Home tab command input and its one-shot response display
+entirely. Replace the whole area with the conversational interface described
+below. The tab bar and tab label ("Home") do not change.
 
 ### 1.2 Session ID
 
-- On first render (or after "New conversation"), generate a UUID v4 with
+- On first render of the Home tab, generate a UUID v4 with
   `crypto.randomUUID()` and store it in component state.
-- The same `session_id` is sent with every message in the conversation.
-- Do **not** display the raw UUID to the user.
+- The same `session_id` is sent with every message until the user starts a
+  new conversation.
+- Do **not** display the raw UUID to the user anywhere.
 
 ### 1.3 Layout
 
+The Home tab content area becomes:
+
 ```
 ┌──────────────────────────────────────────────────┐
-│  Chat                                            │
-│                               [New conversation] │
+│  Home                            [New conversation]│
 ├──────────────────────────────────────────────────┤
 │                                                  │
-│   (empty state when no messages)                 │
-│   "Start a conversation to control your devices" │
+│  (empty state when no messages)                  │
+│  "Ask me anything — I can control your devices   │
+│   and run scenes."                               │
 │                                                  │
 │  ┌─────────────────────────────────────────────┐ │
-│  │ User bubble (right-aligned)                 │ │
+│  │                  User bubble (right-aligned) │ │
 │  └─────────────────────────────────────────────┘ │
 │  ┌─────────────────────────────────────────────┐ │
 │  │ Assistant bubble (left-aligned, accent bg)  │ │
 │  └─────────────────────────────────────────────┘ │
 │                                                  │
 ├──────────────────────────────────────────────────┤
-│  [_______ Type a command _______] [Send]         │
+│  [_______ Type a command… _________________][Send]│
 └──────────────────────────────────────────────────┘
 ```
 
-The message list area is scrollable; always scroll to the bottom when a new
-message is added.
+The message list area is scrollable and fills all available vertical space
+between the header and the input bar. Always scroll to the bottom when a new
+message arrives.
 
 ### 1.4 Message bubbles
 
@@ -131,49 +140,52 @@ message is added.
 | Max width | 75 % of container | 75 % of container |
 | Timestamp | Below bubble, small muted text, `HH:mm` format | Below bubble, small muted text, `HH:mm` format |
 
-### 1.5 Input area
+### 1.5 Input bar
 
-- Single-line text input, placeholder "Type a command…"
-- **Send** button to the right; disabled when input is empty or a request is
-  in flight
-- Pressing `Enter` (without Shift) submits the message
+- Single-line text input spanning the full available width minus the Send button
+- Placeholder text: "Type a command…"
+- **Send** button to the right; disabled when the input is empty or a request
+  is in flight
+- Pressing `Enter` (without `Shift`) submits the message
 - On submit:
-  1. Append the user message to the local message list immediately
+  1. Append a user bubble to the message list immediately (optimistic)
   2. Clear the input field
   3. Show a typing indicator (three animated dots) as an assistant placeholder
   4. Call `POST /execute` with `{ session_id, command }`
-  5. Replace the typing indicator with the agent's `response` text
-  6. On error: remove the typing indicator and show an inline error banner
-     below the message list (see 1.6)
+  5. Replace the typing indicator with the assistant bubble containing
+     `response` from the API
+  6. On any non-200 response or network failure: remove the typing indicator
+     and show the inline error banner (see 1.6)
 
 ### 1.6 Inline error banner
 
-Use the existing alert/banner component, severity: error, placed between the
-message list and the input area:
+Use the existing alert/banner component (severity: error) pinned between the
+message list and the input bar:
 
 > ⚠ **Could not send message.**
-> [error message from response body]
+> [error field from the response body, or "Network error" on fetch failure]
 
-The banner appears on any non-200 response and is dismissed automatically
-when the next message is sent successfully.
+The banner appears only when the last send failed. It is dismissed
+automatically when the next message sends successfully.
 
-### 1.7 New conversation
+### 1.7 New conversation button
 
-The **[New conversation]** button in the top-right of the tab:
+Place a **[New conversation]** button in the top-right of the Home tab header,
+aligned with the tab title. On click:
 
-- Generates a new `crypto.randomUUID()` and stores it as the current session ID
-- Clears the local message list
-- Clears any visible error banner
-- Does **not** call any API endpoint
-- Is always visible, including during a pending request (it is never disabled)
+- Call `crypto.randomUUID()` and store it as the new `session_id`
+- Clear the local message list
+- Clear any visible error banner
+- Do **not** call any API endpoint
+- The button is always enabled, including while a request is in flight
 
 ### 1.8 State matrix
 
 | Condition | UI |
 |-----------|-----|
-| No messages yet | Empty state: "Start a conversation to control your devices" |
-| Request in flight | Typing indicator in assistant position; Send button disabled |
-| 200 response | Agent text replaces typing indicator |
+| No messages yet | Empty state copy centred in the message area |
+| Request in flight | Typing indicator in assistant position; Send disabled |
+| 200 response | Typing indicator replaced by assistant bubble |
 | 400 / 502 error | Inline error banner; typing indicator removed |
 | Network failure | Inline error banner; typing indicator removed |
 
@@ -181,29 +193,31 @@ The **[New conversation]** button in the top-right of the tab:
 
 ## Acceptance Criteria
 
-### Chat tab
+### Home tab
 
-- [ ] A Chat tab appears immediately after Home in the tab bar
-- [ ] On first render the message list is empty with the empty-state copy
-- [ ] Typing a command and pressing Send or Enter appends a right-aligned
-      user bubble and shows a typing indicator
-- [ ] The typing indicator is replaced by the agent's response text in a
-      left-aligned bubble
+- [ ] The existing one-shot command input and response area are gone
+- [ ] The Home tab now shows a scrollable message list above a sticky input bar
+- [ ] An empty-state message is shown when no messages exist in the session
+- [ ] Typing a command and pressing Send or Enter appends a right-aligned user
+      bubble immediately and shows a typing indicator
+- [ ] The typing indicator is replaced by a left-aligned assistant bubble
+      containing the agent's response
 - [ ] Timestamps appear below each bubble in `HH:mm` format
 - [ ] The input field clears after each send
 - [ ] The Send button is disabled while a request is in flight
-- [ ] A failed request shows the inline error banner and removes the
-      typing indicator
+- [ ] A failed request shows the inline error banner and removes the typing indicator
 - [ ] The error banner disappears on the next successful send
-- [ ] New conversation clears the message list and error banner without any
-      API call
-- [ ] The same `session_id` is sent for every message in a session
+- [ ] The **[New conversation]** button is visible in the top-right of the tab
+- [ ] Clicking it clears messages and errors and generates a new session ID
+      without calling any endpoint
+- [ ] Every message in a session shares the same `session_id`
 - [ ] A new `session_id` is generated after New conversation
 - [ ] The message list scrolls to the bottom after each new message
 
 ### General
 
+- [ ] No new tab is added to the tab bar
 - [ ] No hardcoded URLs
 - [ ] No new npm packages installed
-- [ ] `crypto.randomUUID()` used for session ID generation (no third-party UUID lib)
-- [ ] All pre-existing tabs and features work without regression
+- [ ] `crypto.randomUUID()` is used for session ID generation (no third-party UUID lib)
+- [ ] All other tabs and features work without regression
