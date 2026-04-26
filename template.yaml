@@ -77,18 +77,18 @@ Parameters:
     Default: ""
 
   # -----------------------------------------------------------------------
-  # Pinpoint SMS — two-way SMS via a Pinpoint long code.
-  # Phone numbers cannot be provisioned by CloudFormation; lease one in the
-  # Pinpoint console (SMS → Phone numbers → Request) then supply it here.
-  # Leave PinpointOriginationNumber blank to deploy without SMS support.
+  # AWS End User Messaging SMS (replaced Amazon Pinpoint SMS).
+  # Phone numbers cannot be provisioned by CloudFormation; request one in
+  # the End User Messaging console then supply the E.164 number here.
+  # Leave EumOriginationNumber blank to deploy without SMS support.
   # -----------------------------------------------------------------------
-  PinpointOriginationNumber:
+  EumOriginationNumber:
     Type: String
     Default: ""
     Description: >
-      E.164 phone number leased from Pinpoint (e.g. +14155550100).
-      Provision via Pinpoint console → SMS → Phone numbers → Request phone number.
-      After provisioning, enable two-way SMS and point it at SmsInboundTopic.
+      E.164 phone number leased from AWS End User Messaging (e.g. +14155550100).
+      Provision via End User Messaging console → Phone numbers → Request.
+      After provisioning, enable two-way SMS and point it at SmsInboundTopic ARN.
 
   # -----------------------------------------------------------------------
   # Weather — Open-Meteo (free, no API key).  Set to your deployment location.
@@ -449,21 +449,18 @@ Resources:
       RetentionInDays: 14
 
   # -------------------------------------------------------------------
-  # Pinpoint — SMS inbound / outbound
+  # AWS End User Messaging — two-way SMS (replaced Amazon Pinpoint SMS)
   #
   # Low-cost pattern:
-  #   User SMS → Pinpoint long code (~$1/mo) → SmsInboundTopic → Lambda
-  #   Lambda → Pinpoint SendMessages → reply SMS (~$0.0075 each direction)
+  #   User SMS → EUM long code (~$1/mo) → SmsInboundTopic → Lambda
+  #   Lambda → send_text_message (pinpoint-sms-voice-v2) → reply SMS
+  #   (~$0.0075 per message each direction)
   #
   # One-time console step (CloudFormation cannot provision phone numbers):
-  #   Pinpoint console → SMS → Phone numbers → Request phone number
-  #   → enable Two-way SMS → set SNS topic to !Ref SmsInboundTopic
+  #   End User Messaging console → Phone numbers → Request phone number
+  #   → enable Two-way SMS → set SNS topic to SmsInboundTopic ARN
+  #   → set EumOriginationNumber parameter to the provisioned E.164 number
   # -------------------------------------------------------------------
-  PinpointApp:
-    Type: AWS::Pinpoint::App
-    Properties:
-      Name: !Sub "deviceweave-${StageName}"
-
   SmsInboundTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -479,7 +476,7 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: pinpoint.amazonaws.com
+              Service: sms-voice.amazonaws.com
             Action: sns:Publish
             Resource: !Ref SmsInboundTopic
 
@@ -491,14 +488,14 @@ Resources:
       Handler: sms_handler.handler
       Timeout: 60
       Description: >
-        DeviceWeave SMS handler — receives Pinpoint inbound SMS via SNS,
-        runs the Bedrock conversational agent, replies via Pinpoint SendMessages.
-        Phone number is used as session_id for persistent per-user conversation.
+        DeviceWeave SMS handler — receives End User Messaging inbound SMS via
+        SNS, runs the Bedrock conversational agent, replies via
+        pinpoint-sms-voice-v2 send_text_message. Phone number is used as
+        session_id for persistent per-user conversation.
       Environment:
         Variables:
           LOG_LEVEL: INFO
-          PINPOINT_APP_ID: !Ref PinpointApp
-          PINPOINT_ORIGINATION_NUMBER: !Ref PinpointOriginationNumber
+          EUM_ORIGINATION_NUMBER: !Ref EumOriginationNumber
           CONVERSATION_TABLE_NAME: !Ref ConversationTable
           DEVICE_REGISTRY_TABLE: !Ref DeviceRegistryTable
           LEARNING_TABLE_NAME: !Ref LearningTable
@@ -552,8 +549,8 @@ Resources:
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
         - Statement:
             - Effect: Allow
-              Action: mobiletargeting:SendMessages
-              Resource: !Sub "arn:aws:mobiletargeting:${AWS::Region}:${AWS::AccountId}:apps/${PinpointApp}/messages"
+              Action: sms-voice:SendTextMessage
+              Resource: "*"
         - Statement:
             - Effect: Allow
               Action:

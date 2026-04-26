@@ -1,48 +1,47 @@
 """
-AWS Pinpoint two-way SMS handler.
+AWS End User Messaging two-way SMS handler.
 
 Flow
 ----
-  User SMS  →  Pinpoint long code  →  SNS topic  →  this Lambda
-  this Lambda  →  bedrock_agent.run_agent()  →  Pinpoint SendMessages  →  User SMS
+  User SMS  →  End User Messaging phone number  →  SNS topic  →  this Lambda
+  this Lambda  →  bedrock_agent.run_agent()  →  send_text_message  →  User SMS
+
+AWS End User Messaging replaced Amazon Pinpoint SMS.
+boto3 client: pinpoint-sms-voice-v2  (NOT the legacy "pinpoint" client)
 
 Conversation pattern
 --------------------
 The sender's E.164 phone number is used as the session_id (prefixed "sms:")
-so every user gets a persistent conversation context stored in
-ConversationTable (same DynamoDB table as the HTTP conversational path).
-Each new SMS continues the conversation from where it left off — no explicit
-"new session" gesture is needed from the user.
+so every user gets a persistent conversation context in ConversationTable —
+the same DynamoDB table used by the HTTP conversational path.
+Each new SMS continues the conversation from where it left off.
 
-Users can text "reset" or "new" at any time to start a fresh conversation.
+Users can text "reset", "new", or "clear" to start a fresh conversation.
 
 Low-cost design
 ---------------
-- Pinpoint long code:  ~$1/month per number (us-east-1)
-- Inbound SMS:         ~$0.0075 per message
-- Outbound SMS:        ~$0.0075 per message
-- Lambda + DynamoDB:   negligible at household scale
-- No new tables:       reuses ConversationTable from the HTTP path
+- End User Messaging long code:  ~$1/month per number (us-east-1)
+- Inbound SMS:                   ~$0.0075 per message
+- Outbound SMS:                  ~$0.0075 per message
+- Lambda + DynamoDB:             negligible at household scale
+- No new tables:                 reuses ConversationTable from the HTTP path
 
 Response length
 ---------------
-SMS parts are 160 chars each (GSM-7) or 153 chars (UCS-2 for emoji/unicode).
-The system prompt instructs the agent to reply in ≤ 160 chars so a single
-part is the norm.  Responses are hard-capped at 1600 chars (10 parts) to
-prevent runaway multi-part chains for unusual edge cases.
+Replies are constrained to ≤160 chars (one SMS part) by the system prompt.
+A hard cap of 1600 chars (10 parts) guards against edge-case runaway replies.
 
 Environment variables (set by template.yaml)
 --------------------------------------------
-  PINPOINT_APP_ID              — Pinpoint application ID
-  PINPOINT_ORIGINATION_NUMBER  — E.164 number registered in Pinpoint
-  CONVERSATION_TABLE_NAME      — DynamoDB table (shared with HTTP path)
-  DEVICE_REGISTRY_TABLE        — required by device_resolver inside run_agent
-  LEARNING_TABLE_NAME          — required by learning_store inside run_agent
-  POLICY_TABLE_NAME            — required by policy_engine inside run_agent
-  PRESENCE_TABLE_NAME          — required by context_provider inside run_agent
-  SCENE_TABLE_NAME             — required by scene_catalog inside run_agent
-  LLM_MODEL_ID                 — Bedrock model (default Haiku 4.5)
-  AWS_REGION                   — AWS region
+  EUM_ORIGINATION_NUMBER  — E.164 number registered in End User Messaging
+  CONVERSATION_TABLE_NAME — DynamoDB table (shared with HTTP path)
+  DEVICE_REGISTRY_TABLE   — required by device_resolver inside run_agent
+  LEARNING_TABLE_NAME     — required by learning_store inside run_agent
+  POLICY_TABLE_NAME       — required by policy_engine inside run_agent
+  PRESENCE_TABLE_NAME     — required by context_provider inside run_agent
+  SCENE_TABLE_NAME        — required by scene_catalog inside run_agent
+  LLM_MODEL_ID            — Bedrock model (default Haiku 4.5)
+  AWS_REGION              — AWS region
 """
 
 import json
@@ -57,23 +56,22 @@ logging.getLogger().setLevel(LOG_LEVEL)
 for _lib in ("botocore", "boto3", "urllib3"):
     logging.getLogger(_lib).setLevel(logging.WARNING)
 
-_PINPOINT_APP_ID: str = os.environ.get("PINPOINT_APP_ID", "")
-_ORIGINATION_NUMBER: str = os.environ.get("PINPOINT_ORIGINATION_NUMBER", "")
+_ORIGINATION_NUMBER: str = os.environ.get("EUM_ORIGINATION_NUMBER", "")
 _REGION: str = os.environ.get("AWS_REGION", "us-east-1")
-_MAX_REPLY_CHARS: int = 1600  # hard cap — 10 SMS parts
+_MAX_REPLY_CHARS: int = 1600  # hard cap — 10 SMS parts at 160 chars each
 
-# Appended to the base system prompt to enforce SMS-friendly output
+# Appended to the base system prompt to enforce SMS-friendly brevity
 _SMS_PROMPT_SUFFIX = """
 
 SMS mode: You are replying via SMS text message.
 - Keep every reply under 160 characters when possible — one SMS part is ideal.
 - Never use markdown, bullet points, headers, or emoji.
 - Use plain, conversational English only.
-- If the action succeeded say so in one short sentence.
+- If the action succeeded, say so in one short sentence.
 - If something failed or is unclear, say so plainly and ask one short question.
 """
 
-# Keywords that reset the conversation (case-insensitive, exact match)
+# Keywords that reset the conversation without invoking the agent
 _RESET_KEYWORDS = {"reset", "new", "start over", "clear", "restart"}
 
 
@@ -83,7 +81,7 @@ def handler(event: Dict[str, Any], context: Any) -> None:
 
 
 def _handle_record(record: Dict[str, Any]) -> None:
-    # SNS wraps the Pinpoint event as a JSON string in Sns.Message
+    # SNS wraps the End User Messaging event as a JSON string in Sns.Message
     try:
         body = json.loads(record["Sns"]["Message"])
     except (KeyError, json.JSONDecodeError) as exc:
@@ -104,7 +102,7 @@ def _handle_record(record: Dict[str, Any]) -> None:
     from conversation_store import load_session, save_session
     from bedrock_agent import run_agent
 
-    # Handle reset keywords — clear session without calling the agent
+    # Reset keywords clear the session without touching the agent
     if text.lower() in _RESET_KEYWORDS:
         save_session(session_id, [])
         _send_sms(sender, "Conversation cleared. What would you like to do?")
@@ -122,7 +120,7 @@ def _handle_record(record: Dict[str, Any]) -> None:
     except Exception as exc:
         logger.exception("Agent error for SMS session %s", session_id)
         _send_sms(sender, "Sorry, something went wrong. Please try again.")
-        return  # don't save a broken history
+        return  # don't persist a broken history
 
     save_session(session_id, updated_history)
 
@@ -133,37 +131,25 @@ def _handle_record(record: Dict[str, Any]) -> None:
 
 
 def _send_sms(destination: str, message: str) -> None:
-    if not _PINPOINT_APP_ID or not _ORIGINATION_NUMBER:
-        logger.error(
-            "PINPOINT_APP_ID or PINPOINT_ORIGINATION_NUMBER not configured — SMS not sent"
-        )
+    """Send an SMS reply via AWS End User Messaging (pinpoint-sms-voice-v2)."""
+    if not _ORIGINATION_NUMBER:
+        logger.error("EUM_ORIGINATION_NUMBER not configured — SMS not sent")
         return
 
     import boto3
-    client = boto3.client("pinpoint", region_name=_REGION)
+    client = boto3.client("pinpoint-sms-voice-v2", region_name=_REGION)
 
     try:
-        resp = client.send_messages(
-            ApplicationId=_PINPOINT_APP_ID,
-            MessageRequest={
-                "Addresses": {
-                    destination: {"ChannelType": "SMS"}
-                },
-                "MessageConfiguration": {
-                    "SMSMessage": {
-                        "Body": message,
-                        "MessageType": "TRANSACTIONAL",
-                        "OriginationNumber": _ORIGINATION_NUMBER,
-                    }
-                },
-            },
+        resp = client.send_text_message(
+            DestinationPhoneNumber=destination,
+            OriginationIdentity=_ORIGINATION_NUMBER,
+            MessageBody=message,
+            MessageType="TRANSACTIONAL",
         )
-        status = (
-            resp.get("MessageResponse", {})
-                .get("Result", {})
-                .get(destination, {})
-                .get("DeliveryStatus", "UNKNOWN")
+        logger.info(
+            "SMS sent to %s — messageId=%s",
+            destination,
+            resp.get("MessageId", "unknown"),
         )
-        logger.info("SMS sent to %s — status=%s", destination, status)
     except Exception as exc:
         logger.exception("Failed to send SMS to %s", destination)
