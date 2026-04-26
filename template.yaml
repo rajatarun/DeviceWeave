@@ -341,6 +341,10 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:UpdateSecret
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
         - !If
           - HasMemgraphSecret
           - AWSSecretsManagerGetSecretValuePolicy:

@@ -29,6 +29,52 @@ _USER_AGENT = "android:com.ringapp:2.0.67(423)"
 
 _cred_cache: Optional[Dict[str, str]] = None
 _token_cache: Optional[Dict[str, str]] = None
+_injected_refresh_token: Optional[str] = None
+_pending_two_fa_code: Optional[str] = None
+
+
+class RingTwoFactorRequired(Exception):
+    """Raised when Ring requires a 2FA code to complete authentication."""
+    def __init__(self, phone: str):
+        self.phone = phone
+        super().__init__(f"Ring 2FA required — code sent to {phone or 'your registered phone'}")
+
+
+def inject_two_fa_code(code: str) -> None:
+    """Inject a 2FA code to complete a pending Ring authentication challenge."""
+    global _pending_two_fa_code
+    _pending_two_fa_code = code
+
+
+def inject_refresh_token(token: str) -> None:
+    """Inject a refresh_token from the ingest request, bypassing the cached secret.
+
+    Called by the ingestion handler when the caller passes a fresh token in
+    the request body.  Clears the access_token cache so re-auth runs
+    immediately, and marks the token for persistence back to Secrets Manager
+    after successful auth.
+    """
+    global _injected_refresh_token, _token_cache
+    _injected_refresh_token = token
+    _token_cache = None  # force re-auth with the new token
+
+
+def _persist_refresh_token(new_token: str, creds: Dict[str, str]) -> None:
+    """Write an updated refresh_token back to Secrets Manager."""
+    global _cred_cache
+    if not _RING_SECRET_ARN or not new_token:
+        return
+    try:
+        import boto3
+        updated = {**creds, "refresh_token": new_token}
+        boto3.client("secretsmanager").update_secret(
+            SecretId=_RING_SECRET_ARN,
+            SecretString=json.dumps(updated),
+        )
+        _cred_cache = updated
+        logger.info("Ring refresh_token persisted to Secrets Manager.")
+    except Exception as exc:
+        logger.warning("Failed to persist Ring refresh_token: %s", exc)
 
 # 'other'-category device kinds that are bridges/hubs, not controllable lights.
 _SKIP_OTHER_KINDS = frozenset({
@@ -61,15 +107,20 @@ def _hardware_id(creds: Dict[str, str]) -> str:
     return str(_uuid_mod.uuid5(_uuid_mod.NAMESPACE_DNS, creds.get("email", "ring")))
 
 
-async def _ensure_token(session: Any, creds: Dict[str, str]) -> Optional[str]:
-    global _token_cache
+async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
+    global _token_cache, _injected_refresh_token, _pending_two_fa_code
     if _token_cache and _token_cache.get("access_token"):
         return _token_cache["access_token"]
 
     hw_id = _hardware_id(creds)
-    refresh_tok = (_token_cache or {}).get("refresh_token") or creds.get("refresh_token")
+    using_injected = bool(_injected_refresh_token)
+    refresh_tok = (
+        _injected_refresh_token
+        or (_token_cache or {}).get("refresh_token")
+        or creds.get("refresh_token")
+    )
 
-    headers = {
+    headers: Dict[str, str] = {
         "User-Agent": _USER_AGENT,
         "hardware_id": hw_id,
         "Content-Type": "application/x-www-form-urlencoded",
@@ -91,28 +142,29 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> Optional[str]:
             "scope": "client",
         }
 
-    try:
-        async with session.post(_RING_OAUTH_URL, headers=headers, data=form_data) as resp:
-            if resp.status == 412:
-                logger.error(
-                    "Ring requires 2FA. Pre-authenticate and store 'refresh_token' in secret."
-                )
-                return None
-            resp.raise_for_status()
-            token_data = await resp.json(content_type=None)
-    except Exception as exc:
-        logger.error("Ring authentication failed: %s", exc, exc_info=True)
-        return None
+    if _pending_two_fa_code:
+        form_data["2fa_code"] = _pending_two_fa_code
+        headers["2fa-support-token"] = "tok"
+
+    async with session.post(_RING_OAUTH_URL, headers=headers, data=form_data) as resp:
+        if resp.status == 412:
+            body = await resp.json(content_type=None)
+            raise RingTwoFactorRequired(body.get("phone", ""))
+        resp.raise_for_status()
+        token_data = await resp.json(content_type=None)
 
     access_token = token_data.get("access_token")
     if not access_token:
-        logger.error("Ring auth returned no access_token: %s", token_data)
-        return None
+        raise RuntimeError(f"Ring auth returned no access_token: {token_data}")
 
-    _token_cache = {
-        "access_token": access_token,
-        "refresh_token": token_data.get("refresh_token") or refresh_tok or "",
-    }
+    new_refresh = token_data.get("refresh_token") or refresh_tok or ""
+    _token_cache = {"access_token": access_token, "refresh_token": new_refresh}
+    _pending_two_fa_code = None
+
+    if using_injected or new_refresh != creds.get("refresh_token", ""):
+        _injected_refresh_token = None
+        _persist_refresh_token(new_refresh, creds)
+
     logger.debug("Ring access token acquired (prefix=%s…).", access_token[:8])
     return access_token
 
@@ -137,9 +189,6 @@ class RingDiscovery(AbstractDiscoveryProvider):
         try:
             async with aiohttp.ClientSession() as session:
                 token = await _ensure_token(session, creds)
-                if not token:
-                    return []
-
                 hw_id = _hardware_id(creds)
                 headers = {
                     "Authorization": f"Bearer {token}",
@@ -152,6 +201,8 @@ class RingDiscovery(AbstractDiscoveryProvider):
                 ) as resp:
                     resp.raise_for_status()
                     raw = await resp.json(content_type=None)
+        except RingTwoFactorRequired:
+            raise
         except Exception as exc:
             logger.error("Ring API error: %s", exc, exc_info=True)
             return []
