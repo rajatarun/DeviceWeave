@@ -30,20 +30,29 @@ _USER_AGENT = "android:com.ringapp:2.0.67(423)"
 _cred_cache: Optional[Dict[str, str]] = None
 _token_cache: Optional[Dict[str, str]] = None
 _injected_refresh_token: Optional[str] = None
-_pending_two_fa_code: Optional[str] = None
 
 
 class RingTwoFactorRequired(Exception):
-    """Raised when Ring requires a 2FA code to complete authentication."""
-    def __init__(self, phone: str):
-        self.phone = phone
-        super().__init__(f"Ring 2FA required — code sent to {phone or 'your registered phone'}")
+    """Raised when there is no refresh_token — caller must run the setup flow."""
+    def __init__(self, email: str):
+        self.email = email
+        super().__init__("Ring 2FA required")
 
 
-def inject_two_fa_code(code: str) -> None:
-    """Inject a 2FA code to complete a pending Ring authentication challenge."""
-    global _pending_two_fa_code
-    _pending_two_fa_code = code
+class RingAuthExpired(Exception):
+    """Raised when Ring returns 401 on a refresh_token grant — re-auth needed."""
+    pass
+
+
+def inject_tokens(access_token: str, refresh_token: str) -> None:
+    """Inject tokens obtained via an external ring_doorbell auth flow."""
+    global _token_cache
+    _token_cache = {"access_token": access_token, "refresh_token": refresh_token}
+
+
+def get_credentials() -> Optional[Dict[str, str]]:
+    """Return Ring credentials from Secrets Manager (cached)."""
+    return _get_credentials()
 
 
 def inject_refresh_token(token: str) -> None:
@@ -108,7 +117,7 @@ def _hardware_id(creds: Dict[str, str]) -> str:
 
 
 async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
-    global _token_cache, _injected_refresh_token, _pending_two_fa_code
+    global _token_cache, _injected_refresh_token
     if _token_cache and _token_cache.get("access_token"):
         return _token_cache["access_token"]
 
@@ -142,14 +151,13 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
             "scope": "client",
         }
 
-    if _pending_two_fa_code:
-        form_data["2fa_code"] = _pending_two_fa_code
-        headers["2fa-support-token"] = "tok"
-
     async with session.post(_RING_OAUTH_URL, headers=headers, data=form_data) as resp:
         if resp.status == 412:
-            body = await resp.json(content_type=None)
-            raise RingTwoFactorRequired(body.get("phone", ""))
+            raise RingTwoFactorRequired(creds.get("email", ""))
+        if resp.status == 401:
+            global _token_cache
+            _token_cache = None  # discard expired token
+            raise RingAuthExpired()
         resp.raise_for_status()
         token_data = await resp.json(content_type=None)
 
@@ -159,7 +167,6 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
 
     new_refresh = token_data.get("refresh_token") or refresh_tok or ""
     _token_cache = {"access_token": access_token, "refresh_token": new_refresh}
-    _pending_two_fa_code = None
 
     if using_injected or new_refresh != creds.get("refresh_token", ""):
         _injected_refresh_token = None
@@ -183,6 +190,16 @@ class RingDiscovery(AbstractDiscoveryProvider):
             logger.error("No Ring credentials available — aborting discovery.")
             return []
 
+        # Refuse to attempt auth if there is no token at all — raise immediately
+        # so the handler can return setup instructions without hitting Ring's API.
+        has_token = (
+            _injected_refresh_token
+            or (_token_cache or {}).get("refresh_token")
+            or creds.get("refresh_token")
+        )
+        if not has_token:
+            raise RingTwoFactorRequired(creds.get("email", ""))
+
         import aiohttp
 
         logger.info("Authenticating with Ring cloud…")
@@ -201,7 +218,7 @@ class RingDiscovery(AbstractDiscoveryProvider):
                 ) as resp:
                     resp.raise_for_status()
                     raw = await resp.json(content_type=None)
-        except RingTwoFactorRequired:
+        except (RingTwoFactorRequired, RingAuthExpired):
             raise
         except Exception as exc:
             logger.error("Ring API error: %s", exc, exc_info=True)
