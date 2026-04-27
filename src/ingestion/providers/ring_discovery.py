@@ -123,12 +123,11 @@ def _hardware_id(creds: Dict[str, str]) -> str:
     return str(_uuid_mod.uuid5(_uuid_mod.NAMESPACE_DNS, creds.get("email", "ring")))
 
 
-async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
-    """Return a valid Ring access token.
+async def _ensure_token(creds: Dict[str, str]) -> str:
+    """Return a valid Ring access token via ring_doorbell Auth.
 
-    Delegates to ring_doorbell Auth for correct header handling, but passes
-    our own aiohttp ClientSession so the VPC-routed connection is used
-    instead of ring_doorbell's internally-created one (which times out).
+    ring_doorbell manages its own aiohttp session for OAuth — kept separate
+    from our device-API session so there is no shared-session lifecycle conflict.
     """
     global _token_cache, _injected_refresh_token, _pending_two_fa_code
 
@@ -157,7 +156,6 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
             token={"refresh_token": refresh_tok},
             token_updater=_token_updater,
             hardware_id=hw_id,
-            http_client_session=session,
         )
         try:
             new_token = await auth.async_refresh_tokens()
@@ -170,7 +168,7 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
             _token_cache = None
             raise RingAuthExpired()
 
-    # No refresh token — password auth; Ring sends 412 + SMS if 2FA is enabled.
+    # No refresh token — password auth; Ring sends SMS + 412 if 2FA required.
     otp = _pending_two_fa_code
     _pending_two_fa_code = None
 
@@ -179,7 +177,6 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
         token=None,
         token_updater=_token_updater,
         hardware_id=hw_id,
-        http_client_session=session,
     )
     try:
         new_token = await auth.async_fetch_token(
@@ -210,24 +207,30 @@ class RingDiscovery(AbstractDiscoveryProvider):
 
         import aiohttp
 
+        # Auth uses ring_doorbell's own session; device API uses ours.
         logger.info("Authenticating with Ring cloud…")
         try:
+            token = await _ensure_token(creds)
+        except (RingTwoFactorRequired, RingAuthExpired):
+            raise
+        except Exception as exc:
+            logger.error("Ring auth error: %s", exc, exc_info=True)
+            return []
+
+        hw_id = _hardware_id(creds)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "User-Agent": _USER_AGENT,
+            "hardware_id": hw_id,
+        }
+        logger.info("Fetching Ring device list…")
+        try:
             async with aiohttp.ClientSession() as session:
-                token = await _ensure_token(session, creds)
-                hw_id = _hardware_id(creds)
-                auth_headers = {
-                    "Authorization": f"Bearer {token}",
-                    "User-Agent": _USER_AGENT,
-                    "hardware_id": hw_id,
-                }
-                logger.info("Fetching Ring device list…")
                 async with session.get(
-                    f"{_RING_API_URL}/ring_devices", headers=auth_headers
+                    f"{_RING_API_URL}/ring_devices", headers=headers
                 ) as resp:
                     resp.raise_for_status()
                     raw = await resp.json(content_type=None)
-        except (RingTwoFactorRequired, RingAuthExpired):
-            raise
         except Exception as exc:
             logger.error("Ring API error: %s", exc, exc_info=True)
             return []
