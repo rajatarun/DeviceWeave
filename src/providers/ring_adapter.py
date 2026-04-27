@@ -4,11 +4,12 @@ Ring protocol adapter — cloud passthrough via Ring REST API.
 Credentials loaded from Secrets Manager (RING_SECRET_ARN):
     {"email": "user@example.com", "password": "secret", "hardware_id": "<uuid>"}
 
-For 2FA-enabled accounts (Ring enforces 2FA), also include a pre-obtained
-refresh_token to skip the interactive challenge:
+For 2FA-enabled accounts (Ring enforces 2FA), include a refresh_token obtained
+via the ingestion /ingest 2FA flow:
     {"email": "...", "password": "...", "hardware_id": "...", "refresh_token": "..."}
 
-Access tokens are cached per Lambda container and refreshed on expiry.
+Access tokens are cached per Lambda container.  On expiry ring_doorbell Auth
+exchanges the refresh_token automatically — no interactive 2FA needed again.
 """
 
 import json
@@ -22,12 +23,11 @@ from providers.base import BaseDeviceProvider, ProviderError
 logger = logging.getLogger(__name__)
 
 _RING_SECRET_ARN: str = os.environ.get("RING_SECRET_ARN", "")
-_RING_OAUTH_URL = "https://oauth.ring.com/oauth/token"
 _RING_API_URL = "https://api.ring.com/clients_api"
 _USER_AGENT = "android:com.ringapp:2.0.67(423)"
 
 _cred_cache: Optional[Dict[str, str]] = None
-_token_cache: Optional[Dict[str, str]] = None
+_token_cache: Optional[Dict[str, Any]] = None
 
 
 def _get_credentials() -> Dict[str, str]:
@@ -48,57 +48,71 @@ def _hardware_id(creds: Dict[str, str]) -> str:
     return str(_uuid_mod.uuid5(_uuid_mod.NAMESPACE_DNS, creds.get("email", "ring")))
 
 
-async def _oauth_post(session: Any, hardware_id: str, form_data: Dict) -> Dict[str, Any]:
-    headers = {
-        "User-Agent": _USER_AGENT,
-        "hardware_id": hardware_id,
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    async with session.post(_RING_OAUTH_URL, headers=headers, data=form_data) as resp:
-        if resp.status == 412:
-            raise ProviderError(
-                "ring",
-                "Ring requires 2FA verification. Pre-authenticate externally and "
-                "store the refresh_token in RING_SECRET_ARN.",
-            )
-        resp.raise_for_status()
-        return await resp.json(content_type=None)
+def _persist_refresh_token(new_token: str, creds: Dict[str, str]) -> None:
+    global _cred_cache
+    if not _RING_SECRET_ARN or not new_token:
+        return
+    try:
+        import boto3
+        updated = {**creds, "refresh_token": new_token}
+        boto3.client("secretsmanager").update_secret(
+            SecretId=_RING_SECRET_ARN,
+            SecretString=json.dumps(updated),
+        )
+        _cred_cache = updated
+        logger.info("Ring refresh_token persisted to Secrets Manager.")
+    except Exception as exc:
+        logger.warning("Failed to persist Ring refresh_token: %s", exc)
 
 
-async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
+async def _ensure_token(creds: Dict[str, str]) -> str:
+    """Return a valid Ring access token via ring_doorbell Auth.
+
+    Uses the stored refresh_token to exchange for an access_token silently —
+    no 2FA interaction required after the initial ingestion setup.
+    """
     global _token_cache
     if _token_cache and _token_cache.get("access_token"):
         return _token_cache["access_token"]
 
+    from ring_doorbell import Auth
+    from ring_doorbell.exceptions import AuthenticationError, Requires2FAError
+
     hw_id = _hardware_id(creds)
     refresh_tok = (_token_cache or {}).get("refresh_token") or creds.get("refresh_token")
 
-    if refresh_tok:
-        token_data = await _oauth_post(session, hw_id, {
-            "client_id": "ring_official_android",
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_tok,
-            "scope": "client",
-        })
-    else:
-        token_data = await _oauth_post(session, hw_id, {
-            "client_id": "ring_official_android",
-            "grant_type": "password",
-            "username": creds["email"],
-            "password": creds["password"],
-            "scope": "client",
-        })
+    def _token_updater(new_token: Dict[str, Any]) -> None:
+        global _token_cache
+        _token_cache = new_token
+        _persist_refresh_token(new_token.get("refresh_token", ""), creds)
 
-    access_token = token_data.get("access_token")
-    if not access_token:
-        raise ProviderError("ring", f"Ring auth returned no access_token: {token_data}")
+    if not refresh_tok:
+        raise ProviderError(
+            "ring",
+            "No Ring refresh_token available. Run POST /ingest with provider=ring "
+            "to complete the 2FA setup and store a token.",
+        )
 
-    _token_cache = {
-        "access_token": access_token,
-        "refresh_token": token_data.get("refresh_token") or refresh_tok or "",
-    }
-    logger.debug("Ring access token acquired (prefix=%s…).", access_token[:8])
-    return access_token
+    auth = Auth(
+        "DeviceWeave/1.0",
+        token={"refresh_token": refresh_tok},
+        token_updater=_token_updater,
+        hardware_id=hw_id,
+    )
+    try:
+        new_token = await auth.async_refresh_tokens()
+        _token_updater(new_token)
+        logger.debug("Ring access token acquired (prefix=%s…).", new_token.get("access_token", "")[:8])
+        return new_token["access_token"]
+    except (AuthenticationError, Requires2FAError) as exc:
+        raise ProviderError(
+            "ring",
+            "Ring refresh_token expired. Run POST /ingest with provider=ring to re-authenticate.",
+        ) from exc
+    finally:
+        session = getattr(auth, "_session", None)
+        if session is not None and not session.closed:
+            await session.close()
 
 
 def _api_headers(token: str, hardware_id: str) -> Dict[str, str]:
@@ -150,9 +164,9 @@ class RingAdapter(BaseDeviceProvider):
 
         try:
             creds = _get_credentials()
+            token = await _ensure_token(creds)
+            hw_id = _hardware_id(creds)
             async with aiohttp.ClientSession() as session:
-                token = await _ensure_token(session, creds)
-                hw_id = _hardware_id(creds)
                 return await self._dispatch(
                     session, token, hw_id,
                     device_id, ring_id, category, device_type, action, params,
