@@ -76,17 +76,25 @@ def handler(event: Dict[str, Any], context: Any) -> Any:
         return _http_error(400, str(exc))
     except Exception as exc:
         if provider == "ring" and type(exc).__name__ in ("RingTwoFactorRequired", "RingAuthExpired"):
-            creds = get_credentials() or {}
-            try:
-                _ring_trigger_2fa(creds.get("email", ""), creds.get("password", ""))
-            except Exception as sms_exc:
-                logger.exception("Ring 2FA trigger failed")
-                return _http_error(502, f"Ring 2FA trigger failed: {sms_exc}")
-            body = {
-                "status": "2fa_required",
-                "message": "Ring sent a verification code to your registered phone.",
-                "next_step": 'POST /ingest {"provider":"ring","mode":"full","two_fa_code":"<code>"}',
-            }
+            if two_fa_code:
+                # Code was submitted but Ring rejected it — expired or wrong.
+                body = {
+                    "status": "2fa_code_invalid",
+                    "message": "The 2FA code was invalid or expired.",
+                    "next_step": 'POST /ingest {"provider":"ring","mode":"full"} to receive a new SMS code.',
+                }
+            else:
+                creds = get_credentials() or {}
+                try:
+                    _ring_trigger_2fa(creds.get("email", ""), creds.get("password", ""))
+                except Exception as sms_exc:
+                    logger.exception("Ring 2FA trigger failed")
+                    return _http_error(502, f"Ring 2FA trigger failed: {sms_exc}")
+                body = {
+                    "status": "2fa_required",
+                    "message": "Ring sent a verification code to your registered phone.",
+                    "next_step": 'POST /ingest {"provider":"ring","mode":"full","two_fa_code":"<code>"}',
+                }
             if "requestContext" in event:
                 return {
                     "statusCode": 200,
@@ -134,20 +142,19 @@ def _extract_payload(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _ring_trigger_2fa(email: str, password: str) -> None:
-    """Use ring_doorbell to initiate 2FA — Ring sends an SMS, then we stop."""
+    """Use ring_doorbell to initiate 2FA — Ring sends an SMS to the registered phone."""
+    import asyncio
     from ring_doorbell import Auth
+    from ring_doorbell.exceptions import Requires2FAError
 
-    class _SmsSent(Exception):
-        pass
+    async def _trigger() -> None:
+        auth = Auth("DeviceWeave/1.0", token=None)
+        try:
+            await auth.async_fetch_token(email, password)
+        except Requires2FAError:
+            pass  # expected — SMS was sent
 
-    def _stop():
-        raise _SmsSent()
-
-    auth = Auth("DeviceWeave/1.0", None, _stop)
-    try:
-        auth.fetch_token(email, password)
-    except _SmsSent:
-        pass  # SMS sent — stop here, don't complete auth
+    asyncio.run(_trigger())
 
 
 def _http_error(status: int, message: str) -> Dict[str, Any]:
