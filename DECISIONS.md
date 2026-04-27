@@ -270,3 +270,93 @@ Event-driven invalidation (SNS on write → Lambda subscribes → cache cleared)
 Presence state changes at runtime (user leaves, arrives) and must be writable via the API. An environment variable requires a Lambda redeploy on every change — unacceptable. SSM Parameter Store requires a separate IAM permission and `ssm:GetParameter` API call, adding latency. Storing the state as a special item in PolicyTable (e.g. `rule_id=__system_state__`) is a schema violation — the table's PK is a UUID and the sort key is a version number; a synthetic key breaks both the schema and query patterns.
 
 A single-key DynamoDB table (`pk` String only) is the simplest correct solution: one read per `/execute` call at 1 read unit, one write per presence update, and a clear data model that is easy to reason about and extend (e.g. per-room presence in the future).
+
+---
+
+## 26. DynamoDB device registry replaces static DEVICE_CATALOG
+
+**Chosen**: `DEVICE_REGISTRY_TABLE` DynamoDB table, populated by `POST /ingest`
+**Rejected**: static `DEVICE_CATALOG` dict in `src/device_resolver.py`
+
+A static catalog requires a code redeploy whenever a device is added, renamed, or removed. In a household with multiple provider accounts (Kasa, Govee, SwitchBot) devices change frequently enough that a deployment-gated update cycle is unacceptable. Storing the catalog in DynamoDB decouples device management from code releases: `POST /ingest` discovers all provider devices and writes them to the table; the execution path reads the table at runtime.
+
+`DeviceRegistryError` is raised (not silently defaulted) when `DEVICE_REGISTRY_TABLE` is unset or the table is empty. Silent fallback to a static catalog would mask misconfiguration and produce confusing "device not found" errors in production. A hard failure during initialization makes misconfiguration immediately visible.
+
+---
+
+## 27. Scene soft-delete via DynamoDB tombstone
+
+**Chosen**: `DELETE /scenes/{id}` writes a `deleted: true` flag to `SceneTable`; `get_active_scenes()` filters tombstoned scenes at read time
+**Rejected**: hard-delete (remove item from DynamoDB), in-memory-only delete, file-based catalog with Git
+
+Hard-deleting a scene item is simpler but creates a gap: if a `POST /execute` in flight resolved the scene before the delete completed, there is no record that the scene ever existed. The tombstone approach preserves history and makes the delete idempotent — a second `DELETE` on the same scene ID is a no-op rather than a 404.
+
+The tombstone is stored in the same `SceneTable` item as the scene definition (`"deleted": True`), so no additional table or GSI is needed. `get_active_scenes()` applies a client-side filter which is efficient at household scale (< 100 scenes).
+
+---
+
+## 28. cloud_cover_pct and is_overcast added to policy context
+
+**Chosen**: Open-Meteo `cloudcover` field mapped to `cloud_cover_pct` (integer 0–100) and `is_overcast` (bool, threshold > 70 %)
+**Rejected**: omitting cloud cover, using a paid weather API, binary sunny/cloudy from a different source
+
+Cloud cover is the primary environmental signal for lighting automation ("don't dim lights when it's overcast"). Open-Meteo already provided `temperature` and `humidity`; adding `cloudcover` from the same API call incurs zero extra latency and no additional API quota. The raw percentage is exposed as `cloud_cover_pct` for fine-grained rules; `is_overcast` is a pre-computed boolean for the common binary case, keeping policy DSL rules readable (`is_overcast: true`).
+
+The 70 % threshold for `is_overcast` is a meteorological convention for "mostly cloudy" (≥ 7 oktas of 8). Rules that need custom thresholds can use `cloud_cover_pct` directly.
+
+---
+
+## 29. Bedrock Converse API for conversational agent
+
+**Chosen**: `client.converse()` with `toolConfig`, agentic loop capped at 10 rounds, stateless module with caller-managed history
+**Rejected**: `client.invoke_model()` with manual JSON construction, LangChain/LlamaIndex, stateful Lambda (Step Functions)
+
+The Bedrock Converse API provides a unified interface across Claude model versions with native tool-use support (`toolConfig`, `toolResult` message blocks). Using `invoke_model()` would require manual JSON construction for each model family and custom tool-call parsing — significant boilerplate with no benefit.
+
+`bedrock_agent.py` is a pure function (`run_agent(user_message, history, ...) → (reply, updated_history)`). History is loaded and saved by the caller (`conversation_store.py`). This separation means the same agent can be driven by the HTTP path and the SMS handler without any shared state in Lambda memory — each invocation is independent, which is essential for correct behavior under Lambda's concurrent execution model.
+
+The 10-round cap prevents runaway tool-call loops. In practice, two to four rounds suffice for any realistic home-automation command (list → execute → confirm). Exceeding 10 rounds indicates a model confusion loop; hard-stopping and returning an error is safer than retrying indefinitely.
+
+---
+
+## 30. canonical_phrase required for conversational context-aware learning
+
+**Chosen**: `canonical_phrase` required parameter on `execute_device_command` and `execute_scene` tools; the agent derives it from conversation context
+**Rejected**: learning verbatim user text, not learning from conversational executions at all
+
+The learning store (cosine similarity on sample phrases) is only useful if stored phrases are self-contained and unambiguous. Storing verbatim user text like "kitchen too" or "dim it a bit" produces a corpus that will never match future inputs correctly — "kitchen too" has no meaning without the preceding turn.
+
+`canonical_phrase` is defined in the tool schema as "a short, self-contained phrase that fully describes the resolved intent using conversation context — no pronouns or relative references". The agent must populate it on every execution. The system prompt includes concrete examples:
+
+```
+user says "kitchen too" after turning on living room light
+  → canonical_phrase: "turn on kitchen island light"
+user says "dim it a bit"
+  → canonical_phrase: "dim living room ceiling light to 50 percent"
+```
+
+The phrase is passed to both `save_learned_phrase()` and `graph_engine.record_event()`. This ensures that even terse follow-ups produce high-quality learning entries that improve future intent resolution.
+
+---
+
+## 31. AWS End User Messaging over Amazon Pinpoint
+
+**Chosen**: `boto3.client("pinpoint-sms-voice-v2")`, `send_text_message()`, SNS TopicPolicy principal `sms-voice.amazonaws.com`
+**Rejected**: legacy `pinpoint` boto3 client, Twilio, other SMS gateway
+
+Amazon Pinpoint SMS was decommissioned and replaced by AWS End User Messaging. The new service uses the `pinpoint-sms-voice-v2` boto3 client and `send_text_message()` API — the old `pinpoint` client's `send_messages()` API no longer works for SMS. There is no migration shim.
+
+The SNS topic policy principal is `sms-voice.amazonaws.com` (not `sns.amazonaws.com`): End User Messaging publishes inbound SMS events to SNS under its own service principal. Using the wrong principal causes all inbound SMS to be silently dropped. IAM action is `sms-voice:SendTextMessage` (not `mobiletargeting:SendMessages`). Both changes are non-obvious because legacy Pinpoint documentation still surfaces prominently in search results.
+
+---
+
+## 32. Phone number as session_id for SMS conversations
+
+**Chosen**: `session_id = f"sms:{sender}"` where `sender` is the E.164 `originationNumber` from the EUM SNS event
+**Rejected**: per-message ephemeral sessions, a separate SMS session table, user-initiated session tokens
+
+The SMS channel has no concept of a session token — the only persistent identifier available without user enrollment is the sender's phone number. Using it as the session key means every message from the same phone automatically continues the previous conversation, which is the expected UX for any SMS-based assistant.
+
+The `sms:` prefix namespaces SMS sessions separately from HTTP sessions in `ConversationTable` — a collision between a phone number and a UUID is impossible by construction. The same DynamoDB table is reused (no second table) because the data model and TTL semantics are identical: both paths store a list of Converse API message dicts with a 24-hour TTL.
+
+Reset keywords (`reset`, `new`, `clear`, `restart`, `start over`) clear the session without invoking the agent. This is a safety valve: if the conversation history becomes stale or the agent gets confused, the user can recover with a single word.
