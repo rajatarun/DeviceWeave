@@ -142,20 +142,19 @@ def _extract_payload(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _ring_trigger_2fa(email: str, password: str) -> None:
-    """Use ring_doorbell to initiate 2FA — Ring sends an SMS, then we stop."""
+    """Use ring_doorbell to initiate 2FA — Ring sends an SMS to the registered phone."""
+    import asyncio
     from ring_doorbell import Auth
+    from ring_doorbell.exceptions import Requires2FAError
 
-    class _SmsSent(Exception):
-        pass
+    async def _trigger() -> None:
+        auth = Auth("DeviceWeave/1.0", token=None)
+        try:
+            await auth.async_fetch_token(email, password)
+        except Requires2FAError:
+            pass  # expected — SMS was sent
 
-    def _stop():
-        raise _SmsSent()
-
-    auth = Auth("DeviceWeave/1.0", None, _stop)
-    try:
-        auth.fetch_token(email, password)
-    except _SmsSent:
-        pass  # SMS sent — stop here, don't complete auth
+    asyncio.run(_trigger())
 
 
 def _http_error(status: int, message: str) -> Dict[str, Any]:
