@@ -142,29 +142,23 @@ def _extract_payload(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _ring_trigger_2fa(email: str, password: str) -> None:
-    """POST a password grant to Ring OAuth — Ring responds with 412 and sends an SMS."""
+    """Trigger Ring 2FA — Ring sends an SMS to the registered phone.
+
+    Uses our own aiohttp session passed into ring_doorbell Auth so the
+    VPC-routed connection is used (ring_doorbell's internal session times out).
+    """
     import asyncio
     import aiohttp
-
-    _RING_OAUTH_URL = "https://oauth.ring.com/oauth/token"
+    from ring_doorbell import Auth
+    from ring_doorbell.exceptions import Requires2FAError
 
     async def _trigger() -> None:
-        headers = {
-            "User-Agent": "android:com.ringapp:2.0.67(423)",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        form_data = {
-            "client_id": "ring_official_android",
-            "grant_type": "password",
-            "username": email,
-            "password": password,
-            "scope": "client",
-        }
         async with aiohttp.ClientSession() as session:
-            async with session.post(_RING_OAUTH_URL, headers=headers, data=form_data) as resp:
-                if resp.status == 412:
-                    return  # expected — SMS was sent
-                resp.raise_for_status()
+            auth = Auth("DeviceWeave/1.0", token=None, http_client_session=session)
+            try:
+                await auth.async_fetch_token(email, password)
+            except Requires2FAError:
+                pass  # expected — SMS was sent
 
     asyncio.run(_trigger())
 
