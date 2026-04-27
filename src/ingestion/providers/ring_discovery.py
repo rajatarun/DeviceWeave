@@ -23,7 +23,6 @@ from ingestion.providers.base import AbstractDiscoveryProvider
 logger = logging.getLogger(__name__)
 
 _RING_SECRET_ARN: str = os.environ.get("RING_SECRET_ARN", "")
-_RING_OAUTH_URL = "https://oauth.ring.com/oauth/token"
 _RING_API_URL = "https://api.ring.com/clients_api"
 _USER_AGENT = "android:com.ringapp:2.0.67(423)"
 
@@ -125,19 +124,19 @@ def _hardware_id(creds: Dict[str, str]) -> str:
 
 
 async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
-    """Return a valid Ring access token via direct OAuth calls.
+    """Return a valid Ring access token.
 
-    Uses raw aiohttp (not ring_doorbell's internal session) so that the same
-    VPC-routed connection that works for device API calls is used for auth.
-
-    2FA headers follow the ring_doorbell library convention:
-      - 2fa-support: true
-      - 2fa-code: <otp>
+    Delegates to ring_doorbell Auth for correct header handling, but passes
+    our own aiohttp ClientSession so the VPC-routed connection is used
+    instead of ring_doorbell's internally-created one (which times out).
     """
     global _token_cache, _injected_refresh_token, _pending_two_fa_code
 
     if _token_cache and _token_cache.get("access_token"):
         return _token_cache["access_token"]
+
+    from ring_doorbell import Auth
+    from ring_doorbell.exceptions import AuthenticationError, Requires2FAError
 
     hw_id = _hardware_id(creds)
     using_injected = bool(_injected_refresh_token)
@@ -147,57 +146,52 @@ async def _ensure_token(session: Any, creds: Dict[str, str]) -> str:
         or creds.get("refresh_token")
     )
 
-    headers: Dict[str, str] = {
-        "User-Agent": _USER_AGENT,
-        "hardware_id": hw_id,
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    form_data: Dict[str, str]
+    def _token_updater(new_token: Dict[str, Any]) -> None:
+        global _token_cache
+        _token_cache = new_token
+        _persist_refresh_token(new_token.get("refresh_token", ""), creds)
+
     if refresh_tok:
-        form_data = {
-            "client_id": "ring_official_android",
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_tok,
-            "scope": "client",
-        }
-    else:
-        form_data = {
-            "client_id": "ring_official_android",
-            "grant_type": "password",
-            "username": creds["email"],
-            "password": creds["password"],
-            "scope": "client",
-        }
-
-    # ring_doorbell convention: pass OTP in headers, not form body.
-    otp = _pending_two_fa_code
-    _pending_two_fa_code = None
-    if otp:
-        headers["2fa-support"] = "true"
-        headers["2fa-code"] = otp
-
-    async with session.post(_RING_OAUTH_URL, headers=headers, data=form_data) as resp:
-        if resp.status == 412:
-            raise RingTwoFactorRequired(creds.get("email", ""))
-        if resp.status == 401:
+        auth = Auth(
+            "DeviceWeave/1.0",
+            token={"refresh_token": refresh_tok},
+            token_updater=_token_updater,
+            hardware_id=hw_id,
+            http_client_session=session,
+        )
+        try:
+            new_token = await auth.async_refresh_tokens()
+            if using_injected:
+                _injected_refresh_token = None
+            _token_updater(new_token)
+            logger.debug("Ring token refreshed (prefix=%s…).", new_token.get("access_token", "")[:8])
+            return new_token["access_token"]
+        except AuthenticationError:
             _token_cache = None
             raise RingAuthExpired()
-        resp.raise_for_status()
-        token_data = await resp.json(content_type=None)
 
-    access_token = token_data.get("access_token")
-    if not access_token:
-        raise RuntimeError(f"Ring auth returned no access_token: {token_data}")
+    # No refresh token — password auth; Ring sends 412 + SMS if 2FA is enabled.
+    otp = _pending_two_fa_code
+    _pending_two_fa_code = None
 
-    new_refresh = token_data.get("refresh_token") or refresh_tok or ""
-    _token_cache = {"access_token": access_token, "refresh_token": new_refresh}
-
-    if using_injected or new_refresh != creds.get("refresh_token", ""):
-        _injected_refresh_token = None
-        _persist_refresh_token(new_refresh, creds)
-
-    logger.debug("Ring access token acquired (prefix=%s…).", access_token[:8])
-    return access_token
+    auth = Auth(
+        "DeviceWeave/1.0",
+        token=None,
+        token_updater=_token_updater,
+        hardware_id=hw_id,
+        http_client_session=session,
+    )
+    try:
+        new_token = await auth.async_fetch_token(
+            creds["email"],
+            creds["password"],
+            otp_code=otp,
+        )
+        _token_updater(new_token)
+        logger.debug("Ring token acquired (prefix=%s…).", new_token.get("access_token", "")[:8])
+        return new_token["access_token"]
+    except Requires2FAError:
+        raise RingTwoFactorRequired(creds.get("email", ""))
 
 
 class RingDiscovery(AbstractDiscoveryProvider):
