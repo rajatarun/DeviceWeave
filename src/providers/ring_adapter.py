@@ -242,6 +242,7 @@ class RingAdapter(BaseDeviceProvider):
 
         if device_type == "RingDoorbell":
             data = await _api_get(session, token, hw_id, f"doorbots/{ring_id}/health")
+            logger.info("Ring doorbell health raw response: %s", json.dumps(data))
             h = data.get("device_health", {})
             result["state"] = "online" if h.get("network_connection_type") else "offline"
             if h.get("battery_percentage") is not None:
@@ -251,6 +252,7 @@ class RingAdapter(BaseDeviceProvider):
 
         elif device_type == "RingCamera":
             data = await _api_get(session, token, hw_id, f"stickup_cams/{ring_id}/health")
+            logger.info("Ring camera health raw response: %s", json.dumps(data))
             h = data.get("device_health", {})
             result["state"] = "online" if h.get("network_connection_type") else "offline"
             if h.get("battery_percentage") is not None:
@@ -260,6 +262,7 @@ class RingAdapter(BaseDeviceProvider):
 
         else:  # RingLight
             data = await _api_get(session, token, hw_id, f"{category}/{ring_id}")
+            logger.info("Ring light raw response: %s", json.dumps(data))
             desc = data.get("description", data)
             led_status = desc.get("led_status", "")
             is_on = led_status == "on" or bool(desc.get("is_on", False))
