@@ -123,6 +123,13 @@ def _hardware_id(creds: Dict[str, str]) -> str:
     return str(_uuid_mod.uuid5(_uuid_mod.NAMESPACE_DNS, creds.get("email", "ring")))
 
 
+async def _close_auth_session(auth: Any) -> None:
+    """Close the internal aiohttp session that ring_doorbell Auth creates."""
+    session = getattr(auth, "_session", None)
+    if session is not None and not session.closed:
+        await session.close()
+
+
 async def _ensure_token(creds: Dict[str, str]) -> str:
     """Return a valid Ring access token via ring_doorbell Auth.
 
@@ -167,6 +174,8 @@ async def _ensure_token(creds: Dict[str, str]) -> str:
         except AuthenticationError:
             _token_cache = None
             raise RingAuthExpired()
+        finally:
+            await _close_auth_session(auth)
 
     # No refresh token — password auth; Ring sends SMS + 412 if 2FA required.
     otp = _pending_two_fa_code
@@ -189,6 +198,8 @@ async def _ensure_token(creds: Dict[str, str]) -> str:
         return new_token["access_token"]
     except Requires2FAError:
         raise RingTwoFactorRequired(creds.get("email", ""))
+    finally:
+        await _close_auth_session(auth)
 
 
 class RingDiscovery(AbstractDiscoveryProvider):
@@ -292,7 +303,8 @@ class RingDiscovery(AbstractDiscoveryProvider):
         from ingestion.device_registry import DeviceRecord
 
         ring_id = str(device["id"])
-        desc = device.get("description", {})
+        raw_desc = device.get("description")
+        desc: Dict[str, Any] = raw_desc if isinstance(raw_desc, dict) else {}
         name = desc.get("name") or device.get("name") or ring_id
         model = desc.get("type_name") or device.get("kind", "")
         mac = desc.get("mac_address", "")

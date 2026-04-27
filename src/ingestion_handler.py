@@ -153,6 +153,10 @@ def _ring_trigger_2fa(email: str, password: str) -> None:
             await auth.async_fetch_token(email, password)
         except Requires2FAError:
             pass  # expected — SMS was sent
+        finally:
+            session = getattr(auth, "_session", None)
+            if session is not None and not session.closed:
+                await session.close()
 
     asyncio.run(_trigger())
 
