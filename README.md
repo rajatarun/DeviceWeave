@@ -24,27 +24,43 @@ DeviceWeave is not a smart home app or a voice assistant. It is an **AI executio
 ## Architecture
 
 ```
-POST /execute                                POST /policies/author   POST /ingest · EventBridge
-     │                                              │                      │
-     ▼                                              ▼                      ▼
- Scene Resolver ── conf ≥ 0.70 ──►         LLM Policy Compiler     Ingestion Pipeline
-     │ (nearest-neighbour                  (Claude Haiku 4.5)       ├── full sync (daily)
-     │  phrase cosine)                            │                  └── delta sync (6 h)
-     │ below threshold                     Policy Validator                │
-     ▼                                     (schema + conf ≥ 0.85)   Kasa Discovery
- Intent Parser                                    │                  (UDP broadcast)
-     │ (deterministic regex)               DynamoDB PolicyTable            │
-     ▼                                     (versioned rules)         Secrets Manager
- Device Resolver ── conf ≥ 0.70 ──►               │
-     │ (TF cosine +                  ┌────────────────────────────────────────┐
-     │  learned phrases)             │         Policy Engine                  │
-     │ below threshold               │  context_provider (temp·hum·time·home) │
-     ▼                               │  policy_loader    (DynamoDB TTL cache) │
- LLM Resolver ── conf ≥ 0.70 ──►    │  evaluator        (condition matching)  │
-     │ (Claude Haiku 4.5)            │  verdict: BLOCK → 403  no device I/O   │
-     │ below threshold               │           MODIFY → updated params      │
-     ▼                               │           ALLOW  → pass-through        │
-  422 Rejected                       └────────────────────────────────────────┘
+POST /execute (one-shot)    POST /execute + session_id    SMS → End User Messaging
+        │                           │                              │
+        │                           ▼                              ▼
+        │                  Bedrock Converse API          SmsInboundTopic (SNS)
+        │                  agentic loop                           │
+        │                  ├── list_devices                       ▼
+        │                  ├── list_scenes              sms_handler.py Lambda
+        │                  ├── execute_device_command            │
+        │                  └── execute_scene                     │
+        │                           │                            │
+        │                  ConversationTable               run_agent()
+        │                  (DynamoDB 24 h TTL)                   │
+        │                           │                    EUM send_text_message
+        │                           │                    (reply SMS)
+        │◄──────────────────────────┘
+        ▼
+ Scene Resolver ── conf ≥ 0.70 ──►         POST /policies/author   POST /ingest · EventBridge
+     │ (nearest-neighbour                          │                      │
+     │  phrase cosine)                    LLM Policy Compiler     Ingestion Pipeline
+     │ below threshold                    (Claude Haiku 4.5)       ├── full sync (daily)
+     ▼                                           │                  └── delta sync (6 h)
+ Intent Parser                           Policy Validator                │
+     │ (deterministic regex)             (schema + conf ≥ 0.85)   Provider Discovery
+     ▼                                           │                  (Kasa · Govee · SwitchBot)
+ Device Resolver ── conf ≥ 0.70 ──►     DynamoDB PolicyTable            │
+     │ (TF cosine +                      (versioned rules)         DynamoDB DeviceRegistry
+     │  learned phrases)                         │
+     │ below threshold          ┌────────────────────────────────────────────┐
+     ▼                          │              Policy Engine                 │
+ LLM Resolver ── conf ≥ 0.70 ──►│  context_provider  temp · humidity · time  │
+     │ (Claude Haiku 4.5)       │                    cloud_cover · is_home   │
+     │ below threshold          │  policy_loader     (DynamoDB TTL cache)    │
+     ▼                          │  evaluator         (condition matching)    │
+  422 Rejected                  │  verdict: BLOCK → 403  no device I/O      │
+                                │           MODIFY → updated params         │
+                                │           ALLOW  → pass-through           │
+                                └────────────────────────────────────────────┘
                                                    │
                                              Safety Layer
                                              ├── capability check
@@ -55,10 +71,10 @@ POST /execute                                POST /policies/author   POST /inges
                                            ├── SwitchBotAdapter
                                            └── GoveeAdapter
                                                    │
-                                           Device execution (LAN)
+                                           Device execution (LAN / cloud)
                                                    │
                                            DynamoDB learning write
-                                           (conf ≥ 0.85 only)
+                                           (conf ≥ 0.85 · canonical phrase)
 ```
 
 ### Execution request flow
@@ -80,12 +96,21 @@ POST /execute                                POST /policies/author   POST /inges
 
 | Method | Path | Body | Description |
 |--------|------|------|-------------|
-| `POST` | `/execute` | `{"command": "..."}` | Execute a natural language device or scene command |
+| `POST` | `/execute` | `{"command": "..."}` | One-shot natural language device or scene command |
+| `POST` | `/execute` | `{"session_id": "...", "command": "..."}` | Conversational command — history persisted per session |
+| `GET` | `/health` | — | Liveness probe: device/scene counts and learning status |
+| `GET` | `/providers` | — | List registered IoT providers and their configuration status |
+| `GET` | `/devices` | — | List all active devices from the DynamoDB registry |
+| `GET` | `/devices/{id}` | — | Get a single device record |
+| `PUT` | `/devices/{id}` | `{"name": "..."}` | Update device fields; syncs name to provider if supported |
+| `DELETE` | `/devices/{id}` | — | Remove a device from the registry |
+| `GET` | `/scenes` | — | List active scenes (excluding deleted) |
+| `DELETE` | `/scenes/{id}` | — | Soft-delete a scene (persisted in SceneTable) |
 | `POST` | `/learn` | `{"device_id": "...", "phrase": "..."}` | Manually bind a phrase to a device |
+| `GET` | `/learnings` | — | List all learned phrases |
+| `DELETE` | `/learnings` | `{"device_id": "...", "phrase": "..."}` | Remove a learned phrase |
 | `POST` | `/presence` | `{"is_home": true\|false}` | Update home-occupancy state for the Policy Engine |
-| `GET` | `/health` | — | Liveness probe with device/scene counts and learning status |
-| `GET` | `/devices` | — | List registered devices and their capabilities |
-| `GET` | `/scenes` | — | List registered scenes and sample phrases |
+| `GET` | `/presence` | — | Get current home-occupancy state |
 
 ### Policy Authoring API
 
@@ -153,7 +178,29 @@ curl -X POST $API_URL/ingest \
 | `errors` | Devices that responded to broadcast but failed during `update()` probe |
 | `duration_ms` | Total wall time including network discovery |
 
-### Execution example requests
+### Conversational execute
+
+Pass a `session_id` (any UUID) to activate the Bedrock Converse API agentic loop. The agent calls `list_devices`, `list_scenes`, `execute_device_command`, and `execute_scene` as tools, resolves the full conversation context, and persists history in DynamoDB so follow-up messages work without restating intent.
+
+```bash
+SESSION=$(python3 -c "import uuid; print(uuid.uuid4())")
+
+# Turn 1 — full command
+curl -X POST $API_URL/execute -H "Content-Type: application/json" \
+  -d "{\"session_id\": \"$SESSION\", \"command\": \"its dark in living room\"}"
+# → {"type":"conversational","response":"Done! The living room lights are now on.","messages_in_session":6}
+
+# Turn 2 — follow-up with context from Turn 1
+curl -X POST $API_URL/execute -H "Content-Type: application/json" \
+  -d "{\"session_id\": \"$SESSION\", \"command\": \"kitchen too\"}"
+# → {"type":"conversational","response":"Kitchen light is on!","messages_in_session":10}
+```
+
+Each turn saves a `canonical_phrase` (e.g. `"turn on kitchen island light"`) to the learning store — not the raw follow-up text — so even terse messages like `"kitchen too"` contribute useful future-matching data.
+
+Sessions expire automatically after 24 hours via DynamoDB TTL.
+
+### One-shot execute examples
 
 ```bash
 # Single device command
@@ -262,9 +309,9 @@ HTTP 403
   },
   "conditions": [
     {
-      "field": "temperature | humidity | time_hour | is_home",
+      "field": "temperature | humidity | time_hour | cloud_cover_pct | is_home | is_overcast",
       "operator": "> | < | >= | <= | == | !=",
-      "value": "<number for temperature/humidity/time_hour  |  boolean for is_home>"
+      "value": "<number for temperature/humidity/time_hour/cloud_cover_pct  |  boolean for is_home/is_overcast>"
     }
   ],
   "action": {
@@ -279,9 +326,11 @@ HTTP 403
 | Field | Allowed values |
 |-------|---------------|
 | `scope.device_type` | `fan`, `light`, `ac`, `plug`, `heater` |
-| `conditions[].field` | `temperature` (°F), `humidity` (%), `time_hour` (0–23), `is_home` (bool) |
+| `conditions[].field` | `temperature` (°F), `humidity` (%), `time_hour` (0–23), `cloud_cover_pct` (0–100), `is_home` (bool), `is_overcast` (bool) |
 | `conditions[].operator` | `>`, `<`, `>=`, `<=`, `==`, `!=` |
 | `action.type` | `block` — prevent execution · `modify` — override params · `allow` — explicit permit |
+
+Weather context is sourced from Open-Meteo on every `/execute` call. `is_overcast` is `true` when `cloud_cover_pct > 70`. Both fields default to non-triggering values on weather API failure (see decision 22).
 
 ### Authoring pipeline
 
@@ -340,14 +389,20 @@ Defaults to `true` when not set — avoids accidental lockout from "nobody home"
 
 ---
 
-## Built-in devices
+## Devices
 
-| ID | Name | Type | Capabilities |
-|----|------|------|--------------|
-| `office_light` | Office Light | SmartBulb | turn_on, turn_off, toggle, get_status, set_brightness |
-| `office_fan` | Office Fan | SmartPlug | turn_on, turn_off, toggle, get_status |
+Devices are loaded dynamically from the DynamoDB device registry (`DEVICE_REGISTRY_TABLE`). There is no static catalog in code. Run `POST /ingest` after deploying to populate the registry from your provider accounts.
 
-IPs are configured in `src/device_resolver.py → DEVICE_CATALOG`.
+```bash
+# Discover and register all Kasa devices
+curl -X POST $API_URL/ingest -H "Content-Type: application/json" \
+  -d '{"provider": "kasa", "mode": "full"}'
+
+# List registered devices
+curl $API_URL/devices
+```
+
+If the registry is empty or the env var is missing, `/execute` returns a clear `503` error rather than silently falling back to a stale list.
 
 ## Built-in scenes
 
@@ -366,17 +421,28 @@ IPs are configured in `src/device_resolver.py → DEVICE_CATALOG`.
 ```
 DeviceWeave/
 ├── template.yaml                    AWS SAM infrastructure
+├── DECISIONS.md                     Architecture decision records
 ├── .github/
 │   └── workflows/
 │       └── deploy.yml               GitHub Actions CI/CD
+├── docker/
+│   ├── Dockerfile                   Python 3.11 + Apache2 + mod_wsgi image
+│   ├── docker-compose.yml           Local dev stack (DynamoDB Local, Memgraph, Ollama, app)
+│   ├── init_tables.py               One-shot DynamoDB Local table provisioner
+│   └── wsgi_handler.py              mod_wsgi adapter — HTTP request → Lambda event
 ├── docs/
-│   └── oidc-trust-policy.json       IAM trust policy for GitHub OIDC role
+│   ├── oidc-trust-policy.json       IAM trust policy for GitHub OIDC role
+│   ├── ui-update-spec.md            UI implementation spec (devices/scenes/providers)
+│   └── ui-conversational-agent-spec.md  UI spec — Home tab conversational interface
 └── src/
-    ├── app.py                       Execution Lambda handler — routing and dispatch
-    ├── ingestion_handler.py         Ingestion Lambda handler — API GW / EventBridge / direct
+    ├── app.py                       Execution Lambda — routing, dispatch, conversational path
+    ├── bedrock_agent.py             Bedrock Converse API agentic loop + tool implementations
+    ├── conversation_store.py        DynamoDB-backed session store (24 h TTL)
+    ├── sms_handler.py               End User Messaging inbound SMS Lambda handler
+    ├── ingestion_handler.py         Ingestion Lambda — API GW / EventBridge / direct
     ├── intent_parser.py             Deterministic regex intent parser
-    ├── device_resolver.py           TF-cosine device resolver + catalog
-    ├── scene_catalog.py             Scene catalog + nearest-neighbour resolver
+    ├── device_resolver.py           TF-cosine device resolver (DynamoDB registry)
+    ├── scene_catalog.py             Scene catalog + nearest-neighbour resolver + soft-delete
     ├── decision_engine.py           Unified confidence scoring + intent classification
     ├── behavior_engine.py           Context-aware behavior scoring (Memgraph)
     ├── execution_planner.py         Concurrent multi-device execution
@@ -386,6 +452,11 @@ DeviceWeave/
     ├── weather_client.py            Open-Meteo weather client (cached daily)
     ├── kasa_provider.py             Compatibility shim → KasaAdapter
     ├── requirements.txt             Runtime deps: aiohttp, neo4j
+    ├── llm_provider/                LLM backend abstraction
+    │   ├── __init__.py              get_llm_provider() factory
+    │   ├── base.py                  BaseLLMProvider ABC
+    │   ├── bedrock.py               Amazon Bedrock (invoke_model) provider
+    │   └── ollama.py                Ollama local inference provider
     ├── policy_authoring/            Policy Authoring Lambda (POST /policies/*)
     │   ├── __init__.py
     │   ├── handler.py               Lambda handler — author / list / get / delete routes
@@ -394,14 +465,14 @@ DeviceWeave/
     │   └── policy_store.py          DynamoDB PolicyTable CRUD with version history
     ├── policy_engine/               Runtime enforcement layer (injected in app.py)
     │   ├── __init__.py
-    │   ├── context_provider.py      Runtime context: temp (°F), humidity, time, is_home
+    │   ├── context_provider.py      Runtime context: temp · humidity · cloud · time · is_home
     │   ├── evaluator.py             Condition matching + BLOCK/MODIFY/ALLOW verdict
     │   ├── policy_loader.py         DynamoDB policy cache (60 s TTL, paginated scan)
     │   └── middleware.py            enforce() + filter_steps() — called by app.py
     ├── providers/                   Execution protocol adapters
-    │   ├── __init__.py              Protocol registry
+    │   ├── __init__.py              Protocol registry + list_providers()
     │   ├── base.py                  BaseDeviceProvider ABC + ProviderError
-    │   ├── kasa_adapter.py          TP-Link Kasa LAN adapter
+    │   ├── kasa_adapter.py          TP-Link Kasa LAN adapter + rename_device()
     │   ├── switchbot_adapter.py     SwitchBot cloud adapter
     │   └── govee_adapter.py         Govee cloud adapter
     └── ingestion/                   Device discovery and registry sync
@@ -412,7 +483,7 @@ DeviceWeave/
         └── providers/               Discovery provider adapters
             ├── __init__.py
             ├── base.py              AbstractDiscoveryProvider ABC
-            ├── kasa_discovery.py    Kasa UDP broadcast discovery
+            ├── kasa_discovery.py    Kasa cloud discovery
             ├── govee_discovery.py   Govee API discovery
             └── switchbot_discovery.py SwitchBot API discovery
 ```
@@ -642,8 +713,12 @@ sam deploy \
   --capabilities CAPABILITY_IAM \
   --region us-east-1 \
   --resolve-s3 \
-  --parameter-overrides StageName=prod
+  --parameter-overrides \
+      StageName=prod \
+      EumOriginationNumber=+15550001234
 ```
+
+`EumOriginationNumber` is the E.164 phone number provisioned in AWS End User Messaging (see [Two-way SMS setup](#two-way-sms-setup)). If you are not using SMS, omit the parameter — the `DeviceWeaveSmsFunction` will deploy but will log an error and skip sending when invoked.
 
 The `ExecuteEndpoint` URL is in the stack outputs.
 
@@ -657,18 +732,17 @@ Push to `main` or use `workflow_dispatch` (with a `stage` selector). The pipelin
 
 ### Add a device
 
-Append to `DEVICE_CATALOG` in `src/device_resolver.py`:
+Devices are discovered and registered automatically by running `POST /ingest`. There is no static catalog to edit. To register a new physical device:
 
-```python
-{
-    "id": "standing_lamp",
-    "name": "Standing Lamp",
-    "ip": "192.168.1.103",
-    "device_type": "SmartBulb",
-    "capabilities": ["turn_on", "turn_off", "get_status", "toggle", "set_brightness"],
-    "sample_phrases": ["standing lamp", "floor lamp", "corner light"],
-}
+1. Add it to your provider account (Kasa app, Govee Home app, SwitchBot app).
+2. Trigger a sync:
+
+```bash
+curl -X POST $API_URL/ingest -H "Content-Type: application/json" \
+  -d '{"provider": "kasa", "mode": "full"}'
 ```
+
+The ingestion pipeline discovers the device, writes its record to DynamoDB, and generates sample phrases via Bedrock so it is immediately resolvable by the execution engine.
 
 ### Add a scene
 
@@ -734,7 +808,72 @@ Every successful execution with confidence ≥ 0.85 writes the normalized comman
 
 ---
 
+## Two-way SMS setup
+
+DeviceWeave supports two-way SMS conversations via **AWS End User Messaging** (`pinpoint-sms-voice-v2`). Each inbound SMS continues the same persistent conversation — the sender's phone number is the session key.
+
+Estimated cost at household scale: ~$1/month for the long code + ~$0.0075 per message sent or received.
+
+### Step 1 — Request a long-code number (one-time, AWS console)
+
+1. Open **AWS End User Messaging** → **Phone numbers** → **Request phone number**.
+2. Choose **Long code**, country **United States**, capability **SMS**.
+3. Complete the registration flow (A2P 10DLC campaign registration is required for US numbers sending to US recipients — this takes 1–3 business days).
+4. Note the E.164 number once provisioned (e.g. `+15550001234`).
+
+### Step 2 — Enable two-way SMS on the number
+
+1. In End User Messaging → **Phone numbers** → select your number → **Two-way SMS**.
+2. Enable two-way messaging.
+3. Set **Incoming message destination** to **SNS topic** and select the `SmsInboundTopic` SNS topic created by the SAM stack.
+
+### Step 3 — Deploy with the origination number
+
+Pass the provisioned E.164 number as a SAM parameter:
+
+```bash
+sam deploy \
+  --stack-name deviceweave-prod \
+  --capabilities CAPABILITY_IAM \
+  --region us-east-1 \
+  --resolve-s3 \
+  --parameter-overrides \
+      StageName=prod \
+      EumOriginationNumber=+15550001234
+```
+
+### Conversation behaviour
+
+- Each sender phone number gets its own persistent conversation (backed by `ConversationTable`).
+- The conversation history is kept for 24 hours; after that a new message starts fresh.
+- Text **reset**, **new**, **clear**, or **restart** to wipe the history without triggering the agent.
+- Replies are capped at 160 characters (one SMS part) by the system prompt; a hard ceiling of 1 600 characters (10 parts) guards against edge cases.
+
+---
+
 ## Local development
+
+### Full stack with docker-compose
+
+The `docker/` directory contains a Compose stack that runs the app alongside DynamoDB Local, Memgraph, and Ollama — no AWS credentials required for the core execution path.
+
+```bash
+cd docker
+docker compose up --build
+```
+
+Services started:
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| `app` | 8080 | DeviceWeave HTTP API |
+| `dynamodb-local` | 8000 | DynamoDB tables (conversations, devices, policies, etc.) |
+| `memgraph` | 7687 | Graph engine (Bolt) |
+| `ollama` | 11434 | Local LLM (optional; Bedrock used when `LLM_MODEL_ID` points to AWS) |
+
+Tables are created automatically by `docker/init_tables.py` on first start. The `CONVERSATION_TABLE_NAME` env var is pre-set to `deviceweave-conversations-dev` so the conversational path works out of the box.
+
+### Unit smoke test (no Docker, no AWS)
 
 ```bash
 # Install runtime and dev dependencies
@@ -750,8 +889,11 @@ print(parse_intent('turn on the office light'))
 print(resolve_scene('starting work'))
 print(resolve_device('turn on the office light'))
 "
+```
 
-# Local Lambda invocation via SAM
+### SAM local invocation
+
+```bash
 sam build
 sam local invoke DeviceWeaveFunction \
   --event '{"requestContext":{"http":{"method":"POST","path":"/execute"}},"body":"{\"command\":\"starting work\"}"}'
