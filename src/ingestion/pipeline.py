@@ -125,6 +125,12 @@ try:
 except Exception as _exc:  # pragma: no cover
     logger.warning("Could not register MyQDiscovery: %s", _exc)
 
+try:
+    from ingestion.providers.wyze_discovery import WyzeDiscovery
+    register_provider(WyzeDiscovery())
+except Exception as _exc:  # pragma: no cover
+    logger.warning("Could not register WyzeDiscovery: %s", _exc)
+
 
 # ---------------------------------------------------------------------------
 # Pipeline

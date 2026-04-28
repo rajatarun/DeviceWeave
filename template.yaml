@@ -32,6 +32,7 @@ Globals:
         GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
         RING_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials"
         MYQ_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials"
+        WYZE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials"
         MEMGRAPH_PORT: !Ref MemgraphPort
         MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
         WEATHER_LAT: !Ref WeatherLat
@@ -190,6 +191,8 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
         - Statement:
             - Effect: Allow
               Action: secretsmanager:UpdateSecret
@@ -325,7 +328,7 @@ Resources:
       Timeout: 120
       Description: >
         DeviceWeave ingestion engine — cloud provider discovery (Kasa, SwitchBot,
-        Govee, Ring, MyQ), registry sync, phrase generation, behavior graph seeding.
+        Govee, Ring, MyQ, Wyze), registry sync, phrase generation, behavior graph seeding.
       Environment:
         Variables:
           KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
@@ -333,6 +336,7 @@ Resources:
           GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
           RING_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials"
           MYQ_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials"
+          WYZE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials"
           MEMGRAPH_PORT: !Ref MemgraphPort
           MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
       Policies:
@@ -351,6 +355,8 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
         - Statement:
             - Effect: Allow
               Action: secretsmanager:UpdateSecret
@@ -532,6 +538,7 @@ Resources:
           GOVEE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials"
           RING_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials"
           MYQ_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials"
+          WYZE_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials"
       VpcConfig:
         SecurityGroupIds:
           - !Ref LambdaSecurityGroup
@@ -560,6 +567,8 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
         - !If
           - HasMemgraphSecret
           - AWSSecretsManagerGetSecretValuePolicy:
