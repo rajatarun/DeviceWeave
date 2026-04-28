@@ -24,6 +24,29 @@ from providers.base import BaseDeviceProvider, ProviderError
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# SSL alignment — see wyze_discovery.py for rationale
+# ---------------------------------------------------------------------------
+
+def _configure_ssl() -> None:
+    if os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE"):
+        return
+    for path in (
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/certs/ca-bundle.crt",
+        "/etc/ssl/certs/ca-certificates.crt",
+    ):
+        if os.path.exists(path):
+            os.environ["REQUESTS_CA_BUNDLE"] = path
+            return
+    try:
+        import certifi
+        os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+    except ImportError:
+        pass
+
+_configure_ssl()
+
 _WYZE_SECRET_ARN: str = os.environ.get("WYZE_SECRET_ARN", "")
 
 _cred_cache: Optional[Dict[str, str]] = None

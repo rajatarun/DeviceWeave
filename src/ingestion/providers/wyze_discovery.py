@@ -26,6 +26,36 @@ from ingestion.providers.base import AbstractDiscoveryProvider
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# SSL alignment
+# ---------------------------------------------------------------------------
+# wyze-sdk uses `requests`, which defaults to certifi's CA bundle.
+# Lambda VPCs with TLS inspection inject a custom CA into the OS store that
+# aiohttp (ssl.create_default_context) trusts automatically — but certifi
+# does not.  Point requests at the system CA bundle so both HTTP stacks
+# behave consistently.  Explicit env-var overrides are respected.
+
+def _configure_ssl() -> None:
+    if os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE"):
+        return
+    for path in (
+        "/etc/pki/tls/certs/ca-bundle.crt",  # Amazon Linux 2
+        "/etc/ssl/certs/ca-bundle.crt",       # Amazon Linux 2 alt path
+        "/etc/ssl/certs/ca-certificates.crt", # Debian/Ubuntu
+    ):
+        if os.path.exists(path):
+            os.environ["REQUESTS_CA_BUNDLE"] = path
+            logger.debug("REQUESTS_CA_BUNDLE → %s", path)
+            return
+    try:
+        import certifi
+        os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+        logger.debug("REQUESTS_CA_BUNDLE → certifi %s", os.environ["REQUESTS_CA_BUNDLE"])
+    except ImportError:
+        pass
+
+_configure_ssl()
+
 _WYZE_SECRET_ARN: str = os.environ.get("WYZE_SECRET_ARN", "")
 
 _cred_cache: Optional[Dict[str, str]] = None
