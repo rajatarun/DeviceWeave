@@ -337,10 +337,22 @@ class WyzeDiscovery(AbstractDiscoveryProvider):
         mac: str = device.mac
         name: str = getattr(device, "nickname", None) or mac
         model: str = str(getattr(device, "product_model", "") or "")
-        # product_type may be a str-enum (DeviceTypes) or a plain str.
-        # Log the raw value so any mapping gaps are immediately visible in CloudWatch.
+
+        # product_type may be a str-enum, a plain str, or None/empty.
+        # DeviceParser always creates a typed SDK object (Lock, Plug, Camera, …)
+        # regardless of what the API returns in product_type, so fall back to
+        # the Python class name when the field is missing or uninformative.
         raw_type = getattr(device, "product_type", "") or ""
         product_type: str = str(raw_type)
+        if not product_type or product_type in ("None", "Device"):
+            sdk_class = type(device).__name__   # e.g. "Lock", "Plug", "Camera"
+            if sdk_class not in ("Device", "object"):
+                product_type = sdk_class
+                logger.info(
+                    "Wyze product_type missing for mac=%r — using SDK class name %r",
+                    mac, sdk_class,
+                )
+
         is_online: bool = bool(getattr(device, "is_online", True))
 
         logger.info(
