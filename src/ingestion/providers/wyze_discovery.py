@@ -130,7 +130,9 @@ def _clear_client_cache() -> None:
 # Device type and capability mappings
 # ---------------------------------------------------------------------------
 
-# Maps wyze product_type strings → DeviceWeave device_type strings.
+from typing import Tuple
+
+# Tier-1: exact case-sensitive match on product_type.
 _PRODUCT_TYPE_MAP: Dict[str, str] = {
     "MeshLight":     "WyzeBulb",
     "Bulb":          "WyzeBulb",
@@ -154,6 +156,30 @@ _PRODUCT_TYPE_MAP: Dict[str, str] = {
     "Scale":         "WyzeScale",
 }
 
+# Tier-2: case-insensitive keyword scan applied to product_type then product_model.
+# Checked in order — put more specific keywords before broader ones.
+_KEYWORD_TYPE_MAP: List[Tuple[str, str]] = [
+    ("lock",       "WyzeLock"),
+    ("meshlight",  "WyzeBulb"),
+    ("bulb",       "WyzeBulb"),
+    ("lightstrip", "WyzeBulb"),
+    ("strip",      "WyzeBulb"),
+    ("light",      "WyzeBulb"),
+    ("plug",       "WyzePlug"),
+    ("switch",     "WyzeSwitch"),
+    ("doorbell",   "WyzeCamera"),
+    ("door_bell",  "WyzeCamera"),
+    ("camera",     "WyzeCamera"),
+    ("cam",        "WyzeCamera"),
+    ("thermostat", "WyzeThermostat"),
+    ("motion",     "WyzeMotionSensor"),
+    ("contact",    "WyzeContactSensor"),
+    ("sensor",     "WyzeContactSensor"),
+    ("vacuum",     "WyzeVacuum"),
+    ("robot",      "WyzeVacuum"),
+    ("scale",      "WyzeScale"),
+]
+
 _CAPABILITIES_MAP: Dict[str, List[str]] = {
     "WyzeBulb":          ["turn_on", "turn_off", "toggle", "get_status",
                           "set_brightness", "set_color_temp"],
@@ -168,19 +194,65 @@ _CAPABILITIES_MAP: Dict[str, List[str]] = {
     "WyzeScale":         ["get_status"],
 }
 
-# Bulb product_types that also support RGB color control.
+# product_type values whose bulbs also support RGB color.
 _COLOR_BULB_TYPES = frozenset({"MeshLight", "BulbColor", "LightStrip", "LightStripPro"})
 
 
-def _device_type(product_type: str) -> str:
-    return _PRODUCT_TYPE_MAP.get(product_type, "WyzeDevice")
+def _classify(product_type: str, product_model: str) -> str:
+    """
+    Map a Wyze product_type (with model fallback) to a DeviceWeave device_type.
+
+    Three-tier lookup:
+      1. Exact match in _PRODUCT_TYPE_MAP  (handles known SDK strings)
+      2. Keyword scan on product_type       (handles casing/variant differences)
+      3. Keyword scan on product_model      (last resort for unknown type codes)
+
+    Always logs the raw values so mismatches are easy to diagnose.
+    """
+    logger.debug(
+        "Wyze classify: product_type=%r product_model=%r", product_type, product_model
+    )
+
+    # Tier 1 — exact match
+    if product_type in _PRODUCT_TYPE_MAP:
+        return _PRODUCT_TYPE_MAP[product_type]
+
+    # Tier 2 — keyword scan on type string
+    lower_type = product_type.lower().replace(" ", "").replace("_", "")
+    for keyword, dw_type in _KEYWORD_TYPE_MAP:
+        if keyword in lower_type:
+            logger.info(
+                "Wyze product_type=%r not in exact map; matched keyword %r → %s",
+                product_type, keyword, dw_type,
+            )
+            return dw_type
+
+    # Tier 3 — keyword scan on model string
+    lower_model = product_model.lower().replace(" ", "").replace("_", "")
+    for keyword, dw_type in _KEYWORD_TYPE_MAP:
+        if keyword in lower_model:
+            logger.info(
+                "Wyze product_model=%r matched keyword %r → %s",
+                product_model, keyword, dw_type,
+            )
+            return dw_type
+
+    logger.warning(
+        "Unknown Wyze device: product_type=%r product_model=%r — "
+        "mapped to WyzeDevice.  Add an entry to _PRODUCT_TYPE_MAP to silence this.",
+        product_type, product_model,
+    )
+    return "WyzeDevice"
 
 
-def _capabilities(product_type: str) -> List[str]:
-    dw_type = _device_type(product_type)
+def _capabilities(product_type: str, product_model: str) -> List[str]:
+    dw_type = _classify(product_type, product_model)
     caps = list(_CAPABILITIES_MAP.get(dw_type, ["get_status"]))
-    if product_type in _COLOR_BULB_TYPES and "set_color" not in caps:
-        caps.append("set_color")
+    # RGB color support: exact type match OR keyword heuristic
+    lower_type = product_type.lower()
+    if product_type in _COLOR_BULB_TYPES or "color" in lower_type or "strip" in lower_type:
+        if "set_color" not in caps:
+            caps.append("set_color")
     return caps
 
 
@@ -265,13 +337,19 @@ class WyzeDiscovery(AbstractDiscoveryProvider):
         mac: str = device.mac
         name: str = getattr(device, "nickname", None) or mac
         model: str = str(getattr(device, "product_model", "") or "")
-        # product_type may be a str-enum (DeviceTypes) or a plain str
+        # product_type may be a str-enum (DeviceTypes) or a plain str.
+        # Log the raw value so any mapping gaps are immediately visible in CloudWatch.
         raw_type = getattr(device, "product_type", "") or ""
         product_type: str = str(raw_type)
         is_online: bool = bool(getattr(device, "is_online", True))
 
-        dw_type = _device_type(product_type)
-        caps = _capabilities(product_type)
+        logger.info(
+            "Wyze raw device: mac=%r name=%r product_type=%r product_model=%r is_online=%r",
+            mac, name, product_type, model, is_online,
+        )
+
+        dw_type = _classify(product_type, model)
+        caps = _capabilities(product_type, model)
         device_id = f"wyze_{mac}"
 
         return DeviceRecord(
