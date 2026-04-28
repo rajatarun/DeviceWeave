@@ -41,15 +41,39 @@ def _get_credentials() -> Optional[Dict[str, str]]:
         logger.warning("MYQ_SECRET_ARN not set — cannot authenticate with MyQ.")
         return None
     import boto3
+    from botocore.exceptions import ClientError
     try:
         resp = boto3.client("secretsmanager").get_secret_value(SecretId=_MYQ_SECRET_ARN)
         secret = json.loads(resp["SecretString"])
         _cred_cache = {"email": secret["email"], "password": secret["password"]}
         logger.info("MyQ credentials loaded from Secrets Manager (user=%s).", secret["email"])
         return _cred_cache
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+            logger.warning(
+                "MyQ secret not found (%s) — create it to enable MyQ discovery.",
+                _MYQ_SECRET_ARN,
+            )
+        else:
+            logger.error(
+                "Failed to load MyQ credentials from Secrets Manager: %s", exc, exc_info=True,
+            )
+        return None
     except Exception as exc:
         logger.error("Failed to load MyQ credentials from Secrets Manager: %s", exc, exc_info=True)
         return None
+
+
+def _log_myq_auth_error(exc: Exception) -> None:
+    msg = str(exc)
+    if "403" in msg or "Forbidden" in msg:
+        logger.warning(
+            "MyQ discovery skipped — Chamberlain Group has blocked third-party API "
+            "access (HTTP 403). The pymyq library no longer works for most accounts. "
+            "No action needed unless you have a workaround configured."
+        )
+    else:
+        logger.warning("MyQ authentication failed — discovery skipped: %s", exc)
 
 
 class MyQDiscovery(AbstractDiscoveryProvider):
@@ -63,7 +87,7 @@ class MyQDiscovery(AbstractDiscoveryProvider):
 
         creds = _get_credentials()
         if not creds:
-            logger.error("No MyQ credentials available — aborting discovery.")
+            logger.warning("No MyQ credentials available — skipping discovery.")
             return []
 
         import aiohttp
@@ -75,6 +99,12 @@ class MyQDiscovery(AbstractDiscoveryProvider):
                 myq = await pymyq.login(creds["email"], creds["password"], websession)
                 await myq.update_device_info()
                 raw_devices = dict(myq.devices)
+        except pymyq.errors.AuthenticationError as exc:
+            _log_myq_auth_error(exc)
+            return []
+        except pymyq.errors.RequestError as exc:
+            _log_myq_auth_error(exc)
+            return []
         except Exception as exc:
             logger.error("MyQ login/discovery error: %s", exc, exc_info=True)
             return []

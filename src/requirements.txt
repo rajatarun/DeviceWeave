@@ -8,4 +8,4 @@
 aiohttp>=3.9
 neo4j>=5.0
 ring-doorbell>=0.9
-pymyq>=3.1
+python-myq>=3.1.13
