@@ -17,6 +17,8 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
+from observatory_wrapper import observe_bedrock_converse
+
 logger = logging.getLogger(__name__)
 
 _MODEL_ID: str = os.environ.get(
@@ -388,6 +390,12 @@ def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
     return {"error": f"Unknown tool: {name}"}
 
 
+@observe_bedrock_converse
+def _call_bedrock_converse(client, **kwargs) -> Dict[str, Any]:
+    """Wrap Bedrock converse call for observatory instrumentation."""
+    return client.converse(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Agentic loop
 # ---------------------------------------------------------------------------
@@ -422,7 +430,8 @@ def run_agent(
     ]
 
     for round_idx in range(_MAX_TOOL_ROUNDS):
-        resp = client.converse(
+        resp = _call_bedrock_converse(
+            client,
             modelId=_MODEL_ID,
             system=[{"text": system_text}],
             messages=messages,
