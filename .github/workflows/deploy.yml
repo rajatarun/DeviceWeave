@@ -124,12 +124,53 @@ jobs:
           echo "Resolved VpcId=$VPC_ID from subnets=$SUBNET_IDS"
 
       # ----------------------------------------------------------------
-      # 6. Resolve Memgraph parameters
+      # 6. Resolve Observatory metrics table parameters from shared stack
+      #
+      #    Stack: tarun-teamweave-shared
+      #    Outputs consumed:
+      #      ObservatoryMetricsTableName  — DynamoDB table name
+      #      ObservatoryMetricsTableArn   — DynamoDB table ARN
+      #
+      #    Failure is non-fatal — observability is optional.
+      # ----------------------------------------------------------------
+      - name: Resolve Observatory metrics table from shared stack
+        id: observatory
+        run: |
+          TABLE_NAME=$(aws cloudformation describe-stacks \
+            --stack-name "$SHARED_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='ObservatoryMetricsTableName'].OutputValue" \
+            --output text 2>/dev/null)
+
+          TABLE_ARN=$(aws cloudformation describe-stacks \
+            --stack-name "$SHARED_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='ObservatoryMetricsTableArn'].OutputValue" \
+            --output text 2>/dev/null)
+
+          if [ -z "$TABLE_NAME" ] || [ "$TABLE_NAME" = "None" ]; then
+            echo "WARNING: ObservatoryMetricsTableName not found in shared stack — observability will be disabled"
+            TABLE_NAME=""
+          fi
+
+          if [ -z "$TABLE_ARN" ] || [ "$TABLE_ARN" = "None" ]; then
+            TABLE_ARN=""
+          fi
+
+          echo "observatory_table_name=$TABLE_NAME" >> "$GITHUB_OUTPUT"
+          echo "observatory_table_arn=$TABLE_ARN"   >> "$GITHUB_OUTPUT"
+
+          if [ -n "$TABLE_NAME" ]; then
+            echo "Resolved ObservatoryMetricsTableName=$TABLE_NAME"
+          fi
+
+      # ----------------------------------------------------------------
+      # 7. Resolve Memgraph parameters
       #
       #    Host IP is no longer needed at deploy time — the Lambda discovers
       #    it at runtime by querying EC2 for tag:memgraph=true.
       #
-      #    Instance ID is still resolved here so step 10 can open the
+      #    Instance ID is still resolved here so step 11 can open the
       #    Bolt ingress rule on the Memgraph security group.
       #
       #    Secret ARN comes from the contextweave stack: MemgraphSecretArn.
@@ -166,13 +207,13 @@ jobs:
           echo "Resolved MemgraphInstanceId=$MEMGRAPH_INSTANCE_ID"
 
       # ----------------------------------------------------------------
-      # 7. Validate SAM template
+      # 8. Validate SAM template
       # ----------------------------------------------------------------
       - name: Validate SAM template
         run: sam validate --region "$AWS_REGION"
 
       # ----------------------------------------------------------------
-      # 8. SAM build
+      # 9. SAM build
       # ----------------------------------------------------------------
       - name: SAM build
         run: |
@@ -181,7 +222,7 @@ jobs:
             --parallel
 
       # ----------------------------------------------------------------
-      # 9. SAM deploy — passes all cross-stack resolved parameters
+      # 10. SAM deploy — passes all cross-stack resolved parameters
       # ----------------------------------------------------------------
       - name: SAM deploy
         run: |
@@ -196,10 +237,11 @@ jobs:
               StageName="$STAGE" \
               VpcId="${{ steps.vpc.outputs.vpc_id }}" \
               "LambdaSubnetIds=${{ steps.vpc.outputs.subnet_ids }}" \
+              ObservatoryMetricsTableName="${{ steps.observatory.outputs.observatory_table_name }}" \
               MemgraphSecretArn="${{ steps.memgraph.outputs.memgraph_secret_arn }}"
 
       # ----------------------------------------------------------------
-      # 10. Open Memgraph Bolt ingress from the new Lambda SG
+      # 11. Open Memgraph Bolt ingress from the new Lambda SG
       #
       #     After deploy, the Lambda SG ID is known. Add it as an ingress
       #     rule on the Memgraph instance's SG so Lambda can reach port 7687.
@@ -243,7 +285,7 @@ jobs:
           echo "Memgraph SG $MEMGRAPH_SG ← Lambda SG $LAMBDA_SG :7687"
 
       # ----------------------------------------------------------------
-      # 11. Print stack outputs
+      # 12. Print stack outputs
       # ----------------------------------------------------------------
       - name: Print stack outputs
         run: |
