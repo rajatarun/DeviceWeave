@@ -138,11 +138,16 @@ class WyzeAdapter(BaseDeviceProvider):
         device_id = device["id"]
         device_type = device.get("device_type", "WyzeDevice")
         meta = device.get("provider_meta", {})
-        device_mac = meta.get("mac") or device.get("mac", "")
+        # MAC resolution order:
+        #   1. provider_meta["mac"]  — set by discovery for all new records
+        #   2. device["mac"]         — top-level field in the registry dict
+        #   3. strip "wyze_" prefix from device_id — always available as last resort
+        device_mac = (
+            meta.get("mac")
+            or device.get("mac", "")
+            or device_id.removeprefix("wyze_")
+        )
         device_model = meta.get("model") or device.get("model", "")
-
-        if not device_mac:
-            raise ProviderError(device_id, "Missing device MAC in provider_meta.")
 
         try:
             creds = _get_credentials()
