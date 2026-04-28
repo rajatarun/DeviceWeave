@@ -16,11 +16,12 @@ from providers.kasa_adapter import KasaAdapter
 from providers.switchbot_adapter import SwitchBotAdapter
 from providers.govee_adapter import GoveeAdapter
 from providers.ring_adapter import RingAdapter
+from providers.myq_adapter import MyQAdapter
 
 # Maps device_type → provider instance.
 _REGISTRY: dict[str, BaseDeviceProvider] = {}
 
-_ADAPTERS = (KasaAdapter(), SwitchBotAdapter(), GoveeAdapter(), RingAdapter())
+_ADAPTERS = (KasaAdapter(), SwitchBotAdapter(), GoveeAdapter(), RingAdapter(), MyQAdapter())
 for _adapter in _ADAPTERS:
     for _device_type in _adapter.supported_device_types():
         _REGISTRY[_device_type] = _adapter
@@ -45,6 +46,11 @@ _PROVIDER_META = {
     "ring": {
         "display_name": "Ring",
         "credential_env": "RING_SECRET_ARN",
+        "supports_rename": False,
+    },
+    "myq": {
+        "display_name": "Chamberlain MyQ",
+        "credential_env": "MYQ_SECRET_ARN",
         "supports_rename": False,
     },
 }
