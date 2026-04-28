@@ -23,6 +23,7 @@ Globals:
         PRESENCE_TABLE_NAME: !Ref PresenceTable
         SCENE_TABLE_NAME: !Ref SceneTable
         CONVERSATION_TABLE_NAME: !Ref ConversationTable
+        OBSERVATORY_METRICS_TABLE: !Ref ObservatoryMetricsTableName
         LLM_PROVIDER: "auto"
         LLM_MODEL_ID: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
         OLLAMA_BASE_URL: ""
@@ -62,6 +63,18 @@ Parameters:
       Comma-separated private subnet IDs for Lambda VPC placement.
       From shared stack output LambdaSubnetIds
       (e.g. subnet-01714c0c1b4590e4e,subnet-0a3a13a3a3b5105cd).
+
+  # -----------------------------------------------------------------------
+  # Observatory — MCP Observatory metrics telemetry (optional)
+  # DynamoDB table name from shared infrastructure stack.
+  # -----------------------------------------------------------------------
+  ObservatoryMetricsTableName:
+    Type: String
+    Description: >
+      DynamoDB table name for MCP Observatory telemetry (optional).
+      From shared stack output ObservatoryMetricsTableName.
+      Leave blank to disable observability instrumentation.
+    Default: ""
 
   # -----------------------------------------------------------------------
   # Memgraph — host is discovered at Lambda runtime via EC2 tag memgraph=true.
@@ -181,6 +194,15 @@ Resources:
             TableName: !Ref SceneTable
         - DynamoDBCrudPolicy:
             TableName: !Ref ConversationTable
+        - !If
+          - HasObservatoryTable
+          - Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ObservatoryMetricsTableName}"
+          - !Ref AWS::NoValue
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
@@ -347,6 +369,15 @@ Resources:
             TableName: !Ref DeviceRegistryTable
         - DynamoDBCrudPolicy:
             TableName: !Ref LearningTable
+        - !If
+          - HasObservatoryTable
+          - Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ObservatoryMetricsTableName}"
+          - !Ref AWS::NoValue
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
@@ -561,6 +592,15 @@ Resources:
             TableName: !Ref PresenceTable
         - DynamoDBReadPolicy:
             TableName: !Ref SceneTable
+        - !If
+          - HasObservatoryTable
+          - Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ObservatoryMetricsTableName}"
+          - !Ref AWS::NoValue
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
@@ -762,6 +802,7 @@ Resources:
           KeyType: HASH
 
 Conditions:
+  HasObservatoryTable: !Not [!Equals [!Ref ObservatoryMetricsTableName, ""]]
   HasMemgraphSecret: !Not [!Equals [!Ref MemgraphSecretArn, ""]]
 
 Outputs:
