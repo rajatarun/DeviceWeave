@@ -23,7 +23,7 @@ from llm_provider.base import BaseLLMProvider
 logger = logging.getLogger(__name__)
 
 _GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-_DEFAULT_MODEL = "gemini-2.0-flash"
+_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 
 _api_key_cache: Optional[str] = None
 
