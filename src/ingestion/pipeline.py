@@ -119,6 +119,12 @@ try:
 except Exception as _exc:  # pragma: no cover
     logger.warning("Could not register RingDiscovery: %s", _exc)
 
+try:
+    from ingestion.providers.myq_discovery import MyQDiscovery
+    register_provider(MyQDiscovery())
+except Exception as _exc:  # pragma: no cover
+    logger.warning("Could not register MyQDiscovery: %s", _exc)
+
 
 # ---------------------------------------------------------------------------
 # Pipeline
