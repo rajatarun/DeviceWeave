@@ -18,11 +18,12 @@ from providers.govee_adapter import GoveeAdapter
 from providers.ring_adapter import RingAdapter
 from providers.myq_adapter import MyQAdapter
 from providers.wyze_adapter import WyzeAdapter
+from providers.smartlock_adapter import SmartLockAdapter
 
 # Maps device_type → provider instance.
 _REGISTRY: dict[str, BaseDeviceProvider] = {}
 
-_ADAPTERS = (KasaAdapter(), SwitchBotAdapter(), GoveeAdapter(), RingAdapter(), MyQAdapter(), WyzeAdapter())
+_ADAPTERS = (KasaAdapter(), SwitchBotAdapter(), GoveeAdapter(), RingAdapter(), MyQAdapter(), WyzeAdapter(), SmartLockAdapter())
 for _adapter in _ADAPTERS:
     for _device_type in _adapter.supported_device_types():
         _REGISTRY[_device_type] = _adapter
@@ -57,6 +58,11 @@ _PROVIDER_META = {
     "wyze": {
         "display_name": "Wyze",
         "credential_env": "WYZE_SECRET_ARN",
+        "supports_rename": False,
+    },
+    "smartlock": {
+        "display_name": "Smart Lock",
+        "credential_env": "",
         "supports_rename": False,
     },
 }
