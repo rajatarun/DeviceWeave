@@ -47,8 +47,11 @@ _nat_running: Optional[bool] = None
 def _is_nat_running() -> bool:
     """Return True if the NatInstance EC2 is in running state.
 
-    Result is cached for _NAT_CHECK_TTL seconds.  On any error (permissions,
-    network) returns False so Gemini is used as the safe fallback.
+    Result is cached for _NAT_CHECK_TTL seconds.  The boto3 client is given
+    a short connect/read timeout so that when NAT is down (no outbound internet
+    path from the Lambda VPC) the call fails within ~8 s rather than hanging
+    until the OS TCP timeout — which would exhaust the Lambda invocation budget
+    before the Gemini fallback could activate.  On any error, returns False.
     """
     global _nat_check_ts, _nat_running
 
@@ -58,7 +61,17 @@ def _is_nat_running() -> bool:
 
     try:
         import boto3
-        resp = boto3.client("ec2").describe_instances(
+        from botocore.config import Config
+
+        ec2 = boto3.client(
+            "ec2",
+            config=Config(
+                connect_timeout=3,
+                read_timeout=5,
+                retries={"max_attempts": 1},
+            ),
+        )
+        resp = ec2.describe_instances(
             Filters=[
                 {
                     "Name": "tag:aws:cloudformation:logical-id",
@@ -82,7 +95,7 @@ def _is_nat_running() -> bool:
         logger.warning(
             "NatInstance check failed (%s) — using Gemini as fallback.", exc
         )
-        # Don't cache failures so the next call retries.
+        # Don't cache failures so the next call retries immediately.
         return False
 
 
