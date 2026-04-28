@@ -64,6 +64,18 @@ def _get_credentials() -> Optional[Dict[str, str]]:
         return None
 
 
+def _log_myq_auth_error(exc: Exception) -> None:
+    msg = str(exc)
+    if "403" in msg or "Forbidden" in msg:
+        logger.warning(
+            "MyQ discovery skipped — Chamberlain Group has blocked third-party API "
+            "access (HTTP 403). The pymyq library no longer works for most accounts. "
+            "No action needed unless you have a workaround configured."
+        )
+    else:
+        logger.warning("MyQ authentication failed — discovery skipped: %s", exc)
+
+
 class MyQDiscovery(AbstractDiscoveryProvider):
 
     @property
@@ -75,7 +87,7 @@ class MyQDiscovery(AbstractDiscoveryProvider):
 
         creds = _get_credentials()
         if not creds:
-            logger.error("No MyQ credentials available — aborting discovery.")
+            logger.warning("No MyQ credentials available — skipping discovery.")
             return []
 
         import aiohttp
@@ -87,6 +99,12 @@ class MyQDiscovery(AbstractDiscoveryProvider):
                 myq = await pymyq.login(creds["email"], creds["password"], websession)
                 await myq.update_device_info()
                 raw_devices = dict(myq.devices)
+        except pymyq.errors.AuthenticationError as exc:
+            _log_myq_auth_error(exc)
+            return []
+        except pymyq.errors.RequestError as exc:
+            _log_myq_auth_error(exc)
+            return []
         except Exception as exc:
             logger.error("MyQ login/discovery error: %s", exc, exc_info=True)
             return []
