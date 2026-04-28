@@ -41,12 +41,24 @@ def _get_credentials() -> Optional[Dict[str, str]]:
         logger.warning("MYQ_SECRET_ARN not set — cannot authenticate with MyQ.")
         return None
     import boto3
+    from botocore.exceptions import ClientError
     try:
         resp = boto3.client("secretsmanager").get_secret_value(SecretId=_MYQ_SECRET_ARN)
         secret = json.loads(resp["SecretString"])
         _cred_cache = {"email": secret["email"], "password": secret["password"]}
         logger.info("MyQ credentials loaded from Secrets Manager (user=%s).", secret["email"])
         return _cred_cache
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+            logger.warning(
+                "MyQ secret not found (%s) — create it to enable MyQ discovery.",
+                _MYQ_SECRET_ARN,
+            )
+        else:
+            logger.error(
+                "Failed to load MyQ credentials from Secrets Manager: %s", exc, exc_info=True,
+            )
+        return None
     except Exception as exc:
         logger.error("Failed to load MyQ credentials from Secrets Manager: %s", exc, exc_info=True)
         return None
