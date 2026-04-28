@@ -23,7 +23,7 @@ Globals:
         PRESENCE_TABLE_NAME: !Ref PresenceTable
         SCENE_TABLE_NAME: !Ref SceneTable
         CONVERSATION_TABLE_NAME: !Ref ConversationTable
-        LLM_PROVIDER: "bedrock"
+        LLM_PROVIDER: "auto"
         LLM_MODEL_ID: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
         OLLAMA_BASE_URL: ""
         OLLAMA_MODEL: "mistral"
@@ -193,6 +193,8 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
         - Statement:
             - Effect: Allow
               Action: secretsmanager:UpdateSecret
@@ -357,6 +359,8 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
         - Statement:
             - Effect: Allow
               Action: secretsmanager:UpdateSecret
@@ -569,6 +573,8 @@ Resources:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
         - !If
           - HasMemgraphSecret
           - AWSSecretsManagerGetSecretValuePolicy:
