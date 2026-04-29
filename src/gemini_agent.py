@@ -408,6 +408,7 @@ async def run_agent(
         raise RuntimeError(f"Failed to load Gemini API key from {secret_name}: {exc}")
 
     client = genai.Client(api_key=api_key)
+    logger.info("Gemini agent invoked: model=%s history_turns=%d", _MODEL_ID, len(history))
     system_text = _SYSTEM_PROMPT + system_prompt_extra if system_prompt_extra else _SYSTEM_PROMPT
 
     # Build messages for Gemini
