@@ -4,6 +4,15 @@ MCP Observatory instrumentation wrapper for Bedrock API calls.
 This module initializes and manages the observatory wrapper for telemetry
 collection. The wrapper is created once per Lambda process and reused for
 all invocations to minimize overhead.
+
+DynamoDB Schema (from TeamWeave reference implementation):
+  Partition Key (pk): OBSERVATORY#{operation}
+    - operation: "invoke_agent" | "invoke_model"
+  Sort Key (sk): {iso_timestamp}#{trace_id}
+    - Example: 2024-01-15T10:30:45.123Z#abc-def-ghi
+  TTL: 90 days (automatic expiration)
+
+See: https://github.com/rajatarun/TeamWeave/blob/main/src/orchestrator/mcp_observatory.py
 """
 
 import logging
