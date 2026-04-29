@@ -28,6 +28,7 @@ Globals:
         LLM_MODEL_ID: !Ref LLMModelId
         GEMINI_MODEL: !Ref GeminiModelId
         GEMINI_SECRET_NAME: !Ref GeminiSecretName
+        AGENT_PROVIDER: !Ref AgentProvider
         OLLAMA_BASE_URL: ""
         OLLAMA_MODEL: "mistral"
         KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
@@ -106,6 +107,20 @@ Parameters:
       Secrets Manager secret name containing Gemini API key.
       Secret must contain a JSON object with key "api_key".
       Only used when LLMProvider includes Gemini (auto, gemini).
+
+  AgentProvider:
+    Type: String
+    Default: "auto"
+    AllowedValues:
+      - "auto"
+      - "bedrock"
+      - "gemini"
+    Description: >
+      Conversational agent provider for SMS and chat interactions.
+      - auto: Bedrock if internet reachable, else Gemini Live API
+      - bedrock: Always use Bedrock Converse API (requires internet)
+      - gemini: Always use Gemini Live API (requires GEMINI_SECRET_NAME)
+      Note: Non-agentic LLM calls (llm_resolver, policy authoring) use LLMProvider.
 
   # -----------------------------------------------------------------------
   # Observatory — MCP Observatory metrics telemetry (optional)
