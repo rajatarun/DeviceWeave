@@ -392,6 +392,7 @@ async def run_agent(
     """
     try:
         from google import genai
+        logger.info("Gemini SDK imported successfully")
     except ImportError:
         raise RuntimeError(
             "google-genai SDK not installed. Install with: pip install google-genai"
@@ -401,10 +402,13 @@ async def run_agent(
     import boto3
     import json
     secret_name = os.environ.get("GEMINI_SECRET_NAME", "gemini/api_key")
+    logger.info("Loading Gemini API key from secret: %s", secret_name)
     try:
         secret_resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
         api_key = json.loads(secret_resp["SecretString"])["key"]
+        logger.info("Gemini API key loaded successfully")
     except Exception as exc:
+        logger.exception("Failed to load Gemini API key from %s", secret_name)
         raise RuntimeError(f"Failed to load Gemini API key from {secret_name}: {exc}")
 
     client = genai.Client(api_key=api_key)
@@ -426,28 +430,35 @@ async def run_agent(
         tools=[genai.types.Tool(function_declarations=_TOOLS)],
     )
 
+    logger.info("Connecting to Gemini Live API: model=%s", _MODEL_ID)
     try:
         # Connect to Live API and run agentic loop
         async with client.aio.live.connect(model=_MODEL_ID, config=config) as session:
+            logger.info("Gemini Live API session established")
+
             # Replay prior history turns so the model has conversation context,
             # matching Bedrock which passes the full messages list on every call.
-            for turn in history:
+            for i, turn in enumerate(history):
                 role = turn.get("role", "user")
                 parts = turn.get("parts", [])
                 text = parts[0].get("text", "") if parts else ""
                 if text:
+                    logger.debug("Replaying history turn %d role=%s", i, role)
                     await session.send(
                         genai.types.Content(
                             role=role,
                             parts=[genai.types.Part(text=text)],
                         )
                     )
+
             # Send the current user message
+            logger.info("Sending user message to Gemini session")
             await session.send(user_message)
 
             final_response = ""
             tool_round = 0
 
+            logger.info("Waiting for Gemini response stream")
             async for server_message in session.response_stream:
                 # Handle tool calls
                 if server_message.tool_calls:
@@ -483,7 +494,14 @@ async def run_agent(
 
                 # Handle text responses
                 if hasattr(server_message, "text") and server_message.text:
+                    logger.debug("Received text chunk: %d chars", len(server_message.text))
                     final_response = server_message.text
+
+            logger.info(
+                "Gemini response stream ended: has_text=%s tool_rounds=%d",
+                bool(final_response),
+                tool_round,
+            )
 
             # Update message history with final response
             messages.append(
