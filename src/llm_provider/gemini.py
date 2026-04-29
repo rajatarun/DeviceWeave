@@ -5,7 +5,7 @@ Fallback backend used when the NatInstance EC2 is not running.
 
 API key loaded once from Secrets Manager:
     secret name: gemini/api_key
-    secret key:  key
+    secret key:  api_key
 
 No extra dependencies — uses stdlib urllib throughout, same as the
 Ollama provider.
@@ -34,7 +34,7 @@ def _load_api_key(secret_name: str) -> str:
         return _api_key_cache
     import boto3
     resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
-    _api_key_cache = json.loads(resp["SecretString"])["key"]
+    _api_key_cache = json.loads(resp["SecretString"])["api_key"]
     logger.info("Gemini API key loaded from Secrets Manager (%s).", secret_name)
     return _api_key_cache
 

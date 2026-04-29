@@ -422,13 +422,26 @@ async def run_agent(
             max_output_tokens=1024,
         ),
         system_instruction=system_text,
-        tools=[_TOOLS],
+        tools=[genai.types.Tool(function_declarations=_TOOLS)],
     )
 
     try:
         # Connect to Live API and run agentic loop
         async with client.aio.live.connect(model=_MODEL_ID, config=config) as session:
-            # Send initial user message
+            # Replay prior history turns so the model has conversation context,
+            # matching Bedrock which passes the full messages list on every call.
+            for turn in history:
+                role = turn.get("role", "user")
+                parts = turn.get("parts", [])
+                text = parts[0].get("text", "") if parts else ""
+                if text:
+                    await session.send(
+                        genai.types.Content(
+                            role=role,
+                            parts=[genai.types.Part(text=text)],
+                        )
+                    )
+            # Send the current user message
             await session.send(user_message)
 
             final_response = ""
