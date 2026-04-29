@@ -28,9 +28,14 @@ pip install -r src/requirements.txt
 ### 1. Create DynamoDB Table
 
 Create a DynamoDB table named `ObservatoryMetrics` with:
-- **Partition Key (pk)**: String
-- **Sort Key (sk)**: String
-- **TTL Attribute**: `ttl` (enables automatic cleanup of old metrics)
+- **Partition Key (pk)**: String — pattern `OBSERVATORY#{operation}` (e.g., `OBSERVATORY#invoke_agent`, `OBSERVATORY#invoke_model`)
+- **Sort Key (sk)**: String — pattern `{iso_timestamp}#{trace_id}` (e.g., `2024-01-15T10:30:45.123Z#abc-def-ghi`)
+- **TTL Attribute**: `ttl` (90-day automatic expiration)
+
+**Schema rationale:**
+- Partition key enables querying spans by operation type (agent invocations vs. model invocations)
+- Sort key combines ISO 8601 timestamp with trace ID for chronological ordering and unique identity
+- TTL automatically removes old metrics after 90 days to manage storage costs
 
 AWS CLI example:
 ```bash
@@ -49,7 +54,32 @@ aws dynamodb update-time-to-live \
   --time-to-live-specification "AttributeName=ttl,Enabled=true"
 ```
 
-### 2. Set Environment Variable
+### 2. Understand the Item Schema
+
+Each invocation is recorded as a DynamoDB item with attributes including:
+
+**Key Attributes:**
+- `pk` (Partition Key): `OBSERVATORY#{operation}` — operation is "invoke_agent" or "invoke_model"
+- `sk` (Sort Key): `{iso_timestamp}#{trace_id}` — ISO 8601 timestamp + UUID for uniqueness
+- `ttl` (Number): Epoch timestamp set 90 days in future (auto-deletes via TTL)
+
+**Telemetry Attributes:**
+- `prompt_tokens`, `completion_tokens` — token usage from Bedrock response
+- `cost_usd` — estimated cost of the invocation
+- `model_id` — which model was invoked (e.g., `us.anthropic.claude-haiku-4-5-20251001-v1:0`)
+- `operation_type` — "invoke_agent" or "invoke_model"
+- `trace_id` — unique identifier linking all spans for a request
+- `timestamp` — ISO 8601 invocation time
+- `duration_ms` — invocation latency in milliseconds
+
+**Optional Risk/Policy Attributes (when enabled):**
+- `hallucination_risk_score`, `composite_risk_score` — risk assessments
+- `policy_decision`, `policy_reasoning` — policy enforcement details
+- `shadow_comparison_result` — dual-invoke comparison data
+
+For the complete schema definition, see [TeamWeave MCP Observatory Implementation](https://github.com/rajatarun/TeamWeave/blob/main/src/orchestrator/mcp_observatory.py).
+
+### 3. Set Environment Variable
 
 Configure the Lambda environment variable:
 ```
@@ -116,6 +146,27 @@ This decorator:
 
 Query the DynamoDB table to verify telemetry is being recorded:
 
+**List all agent invocations (most recent first):**
+```bash
+aws dynamodb query \
+  --table-name ObservatoryMetrics \
+  --key-condition-expression "pk = :pk" \
+  --expression-attribute-values "{\":pk\":{\"S\":\"OBSERVATORY#invoke_agent\"}}" \
+  --scan-index-forward false \
+  --limit 10
+```
+
+**List all model invocations:**
+```bash
+aws dynamodb query \
+  --table-name ObservatoryMetrics \
+  --key-condition-expression "pk = :pk" \
+  --expression-attribute-values "{\":pk\":{\"S\":\"OBSERVATORY#invoke_model\"}}" \
+  --scan-index-forward false \
+  --limit 10
+```
+
+**Scan entire table (for exploration):**
 ```bash
 aws dynamodb scan --table-name ObservatoryMetrics --limit 10
 ```
@@ -161,6 +212,8 @@ Failures are logged but do not propagate to callers, ensuring observability does
 
 ## References
 
-- [MCP Observatory Documentation](https://github.com/rajatarun/TeamWeave/blob/main/docs/MCP_OBSERVATORY_IMPLEMENTATION.md)
+- [TeamWeave MCP Observatory Implementation](https://github.com/rajatarun/TeamWeave/blob/main/src/orchestrator/mcp_observatory.py) — Reference implementation and schema definition
+- [MCP Observatory Documentation](https://github.com/rajatarun/TeamWeave/blob/main/docs/MCP_OBSERVATORY_IMPLEMENTATION.md) — High-level adoption guide
+- [DeviceWeave Observatory Instrumentation](src/../src/observatory_wrapper.py) — Local wrapper implementation
 - [AWS Bedrock API Reference](https://docs.aws.amazon.com/bedrock/latest/userguide/)
-- [DynamoDB Developer Guide](https://docs.aws.amazon.com/dynamodb/)
+- [DynamoDB Query API](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_Query.html)

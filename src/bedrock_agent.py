@@ -390,7 +390,7 @@ def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
     return {"error": f"Unknown tool: {name}"}
 
 
-@observe_bedrock_converse
+@observe_bedrock_converse(model_id=_MODEL_ID)
 def _call_bedrock_converse(client, **kwargs) -> Dict[str, Any]:
     """Wrap Bedrock converse call for observatory instrumentation."""
     return client.converse(**kwargs)
