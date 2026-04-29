@@ -577,8 +577,8 @@ def _route_execute(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _route_execute_conversational(body: Dict[str, Any], session_id: str) -> Dict[str, Any]:
-    """Bedrock Converse API agentic loop with DynamoDB-persisted session history."""
-    from bedrock_agent import run_agent
+    """Agentic loop with DynamoDB-persisted session history."""
+    from agent_factory import run_agent
     from conversation_store import load_session, save_session
 
     command = body.get("command", "").strip()
@@ -589,9 +589,9 @@ def _route_execute_conversational(body: Dict[str, Any], session_id: str) -> Dict
 
     history = load_session(session_id)
     try:
-        reply, updated_history = run_agent(command, history)
+        reply, updated_history = asyncio.run(run_agent(command, history))
     except Exception as exc:
-        logger.exception("Bedrock agent error for session %s", session_id)
+        logger.exception("Agent error for session %s", session_id)
         return _error(502, f"Agent error: {exc}")
 
     save_session(session_id, updated_history)
