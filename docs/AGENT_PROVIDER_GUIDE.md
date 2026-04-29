@@ -43,7 +43,7 @@ GEMINI_MODEL=gemini-2.0-flash-lite      # Agent model (default)
 # or for non-agentic calls:
 GEMINI_MODEL=gemini-2.0-flash           # Better quality, slightly higher cost
 
-GEMINI_SECRET_NAME=gemini/api_key       # Secrets Manager secret
+# API key secret is hardcoded to: gemini/api_key
 # Secret format: {"api_key": "YOUR_API_KEY"}
 ```
 
@@ -129,8 +129,7 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
        ParameterKey=LLMProvider,ParameterValue=gemini \
        ParameterKey=StageName,UsePreviousValue=true \
        ParameterKey=VpcId,UsePreviousValue=true \
-       ParameterKey=LambdaSubnetIds,UsePreviousValue=true \
-       ParameterKey=GeminiSecretName,UsePreviousValue=true
+       ParameterKey=LambdaSubnetIds,UsePreviousValue=true
    ```
    
    **Option C: AWS Console**

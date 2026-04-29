@@ -57,12 +57,13 @@ LLM_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
 ```
 LLM_PROVIDER=gemini
 GEMINI_MODEL=gemini-2.0-flash  # or gemini-1.5-pro
-GEMINI_SECRET_NAME=gemini/api_key
+# GEMINI_SECRET_NAME is hardcoded to: gemini/api_key
 ```
 - Always use Gemini via API
-- **Requires**: Secrets Manager secret with API key
+- **Requires**: Secrets Manager secret `gemini/api_key` with API key
   - Secret format: `{"api_key": "...key..."}`
-  - Retrieve via: `aws secretsmanager get-secret-value --secret-id gemini/api_key`
+  - Create: `aws secretsmanager create-secret --name gemini/api_key --secret-string '{"api_key": "YOUR_KEY"}'`
+  - Retrieve: `aws secretsmanager get-secret-value --secret-id gemini/api_key`
 - **Cost**: More affordable than Bedrock for non-agentic use
 - **Recommended for**: Cost-optimized deployments
 
@@ -95,11 +96,7 @@ Parameters:
     Type: String
     Default: "gemini-2.0-flash"
     # Gemini model (ignored if LLMProvider != gemini|auto)
-
-  GeminiSecretName:
-    Type: String
-    Default: "gemini/api_key"
-    # Secrets Manager secret for Gemini API key
+    # Note: Gemini API key secret is hardcoded to "gemini/api_key"
 ```
 
 ### To change provider after deployment:
@@ -119,8 +116,7 @@ aws cloudformation update-stack \
     ParameterKey=StageName,UsePreviousValue=true \
     ParameterKey=VpcId,UsePreviousValue=true \
     ParameterKey=LambdaSubnetIds,UsePreviousValue=true \
-    ParameterKey=LLMProvider,ParameterValue=gemini \
-    ParameterKey=GeminiSecretName,UsePreviousValue=true
+    ParameterKey=LLMProvider,ParameterValue=gemini
 ```
 
 **Lambda environment variables are immutable during runtime:**

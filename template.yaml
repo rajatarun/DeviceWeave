@@ -27,7 +27,7 @@ Globals:
         LLM_PROVIDER: !Ref LLMProvider
         LLM_MODEL_ID: !Ref LLMModelId
         GEMINI_MODEL: !Ref GeminiModelId
-        GEMINI_SECRET_NAME: !Ref GeminiSecretName
+        GEMINI_SECRET_NAME: "gemini/api_key"
         AGENT_PROVIDER: !Ref AgentProvider
         OLLAMA_BASE_URL: ""
         OLLAMA_MODEL: "mistral"
@@ -98,14 +98,6 @@ Parameters:
     Default: "gemini-2.0-flash"
     Description: >
       Gemini model ID (e.g., gemini-2.0-flash, gemini-1.5-pro).
-      Only used when LLMProvider includes Gemini (auto, gemini).
-
-  GeminiSecretName:
-    Type: String
-    Default: "gemini/api_key"
-    Description: >
-      Secrets Manager secret name containing Gemini API key.
-      Secret must contain a JSON object with key "api_key".
       Only used when LLMProvider includes Gemini (auto, gemini).
 
   AgentProvider:
@@ -274,7 +266,7 @@ Resources:
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GeminiSecretName}-*"
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
         - Statement:
             - Effect: Allow
               Action: secretsmanager:UpdateSecret
@@ -449,7 +441,7 @@ Resources:
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GeminiSecretName}-*"
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
         - Statement:
             - Effect: Allow
               Action: secretsmanager:UpdateSecret
@@ -672,7 +664,7 @@ Resources:
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GeminiSecretName}-*"
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
         - !If
           - HasMemgraphSecret
           - AWSSecretsManagerGetSecretValuePolicy:
