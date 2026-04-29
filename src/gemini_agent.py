@@ -403,7 +403,7 @@ async def run_agent(
     secret_name = os.environ.get("GEMINI_SECRET_NAME", "gemini/api_key")
     try:
         secret_resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
-        api_key = json.loads(secret_resp["SecretString"])["api_key"]
+        api_key = json.loads(secret_resp["SecretString"])["key"]
     except Exception as exc:
         raise RuntimeError(f"Failed to load Gemini API key from {secret_name}: {exc}")
 
