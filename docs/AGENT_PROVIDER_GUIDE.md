@@ -111,16 +111,33 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
    ```
 
 3. **Deploy with Gemini**
-   ```bash
-   # Via GitHub Actions secrets:
-   gh secret set AGENT_PROVIDER --body gemini
-   gh secret set LLM_PROVIDER --body gemini
    
-   # Or local SAM deployment:
+   **Option A: Local SAM deployment**
+   ```bash
    sam deploy --parameter-overrides \
      AgentProvider=gemini \
      LLMProvider=gemini
    ```
+   
+   **Option B: Update existing stack via CloudFormation**
+   ```bash
+   aws cloudformation update-stack \
+     --stack-name deviceweave-prod \
+     --use-previous-template \
+     --parameters \
+       ParameterKey=AgentProvider,ParameterValue=gemini \
+       ParameterKey=LLMProvider,ParameterValue=gemini \
+       ParameterKey=StageName,UsePreviousValue=true \
+       ParameterKey=VpcId,UsePreviousValue=true \
+       ParameterKey=LambdaSubnetIds,UsePreviousValue=true \
+       ParameterKey=GeminiSecretName,UsePreviousValue=true
+   ```
+   
+   **Option C: AWS Console**
+   - Go to CloudFormation → DeviceWeave stack
+   - Update stack → Next
+   - Set AgentProvider=gemini, LLMProvider=gemini
+   - Review and submit
 
 ### For Bedrock Agent (Default)
 

@@ -102,21 +102,31 @@ Parameters:
     # Secrets Manager secret for Gemini API key
 ```
 
-## Deployment via GitHub Actions
+### To change provider after deployment:
 
-GitHub Actions automatically passes these parameters via repository secrets:
+**Via AWS Console:**
+1. Go to CloudFormation → DeviceWeave stack
+2. Update stack → Next
+3. Change LLMProvider parameter
+4. Review and submit
 
-```yaml
-LLM_PROVIDER              # Defaults to "gemini"
-LLM_MODEL_ID             # Defaults to Claude Haiku 4.5
-GEMINI_MODEL_ID          # Defaults to gemini-2.0-flash
-GEMINI_SECRET_NAME       # Defaults to gemini/api_key
+**Via AWS CLI:**
+```bash
+aws cloudformation update-stack \
+  --stack-name deviceweave-prod \
+  --use-previous-template \
+  --parameters \
+    ParameterKey=StageName,UsePreviousValue=true \
+    ParameterKey=VpcId,UsePreviousValue=true \
+    ParameterKey=LambdaSubnetIds,UsePreviousValue=true \
+    ParameterKey=LLMProvider,ParameterValue=gemini \
+    ParameterKey=GeminiSecretName,UsePreviousValue=true
 ```
 
-**To override**, add repository secrets in GitHub:
-1. Go to repository Settings → Secrets and variables → Actions
-2. Add secret (e.g., `LLM_PROVIDER=bedrock`)
-3. Re-run deployment workflow
+**Lambda environment variables are immutable during runtime:**
+- Changes require stack update (applies after Lambda warm-start)
+- Current invocations continue with old config until container restarts
+- Next deployment picks up new config immediately
 
 ## Recommended Configuration
 
