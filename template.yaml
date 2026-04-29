@@ -24,8 +24,10 @@ Globals:
         SCENE_TABLE_NAME: !Ref SceneTable
         CONVERSATION_TABLE_NAME: !Ref ConversationTable
         OBSERVATORY_METRICS_TABLE: !Ref ObservatoryMetricsTableName
-        LLM_PROVIDER: "auto"
-        LLM_MODEL_ID: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        LLM_PROVIDER: !Ref LLMProvider
+        LLM_MODEL_ID: !Ref LLMModelId
+        GEMINI_MODEL: !Ref GeminiModelId
+        GEMINI_SECRET_NAME: !Ref GeminiSecretName
         OLLAMA_BASE_URL: ""
         OLLAMA_MODEL: "mistral"
         KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
@@ -63,6 +65,47 @@ Parameters:
       Comma-separated private subnet IDs for Lambda VPC placement.
       From shared stack output LambdaSubnetIds
       (e.g. subnet-01714c0c1b4590e4e,subnet-0a3a13a3a3b5105cd).
+
+  # -----------------------------------------------------------------------
+  # LLM Provider Configuration
+  # -----------------------------------------------------------------------
+  LLMProvider:
+    Type: String
+    Default: "gemini"
+    AllowedValues:
+      - "auto"
+      - "bedrock"
+      - "gemini"
+      - "ollama"
+    Description: >
+      LLM provider for non-agentic calls (llm_resolver, policy authoring, etc).
+      - auto: Bedrock if internet reachable, else Gemini
+      - bedrock: Always use Bedrock (requires internet for cross-region inference)
+      - gemini: Always use Gemini (requires GEMINI_SECRET_NAME set in Secrets Manager)
+      - ollama: Local Ollama instance (dev/offline use)
+      Note: bedrock_agent.py always uses Bedrock Converse API for native tool support.
+
+  LLMModelId:
+    Type: String
+    Default: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    Description: >
+      Bedrock cross-region inference profile for Claude Haiku.
+      Only used when LLMProvider includes Bedrock (auto, bedrock).
+
+  GeminiModelId:
+    Type: String
+    Default: "gemini-2.0-flash"
+    Description: >
+      Gemini model ID (e.g., gemini-2.0-flash, gemini-1.5-pro).
+      Only used when LLMProvider includes Gemini (auto, gemini).
+
+  GeminiSecretName:
+    Type: String
+    Default: "gemini/api_key"
+    Description: >
+      Secrets Manager secret name containing Gemini API key.
+      Secret must contain a JSON object with key "api_key".
+      Only used when LLMProvider includes Gemini (auto, gemini).
 
   # -----------------------------------------------------------------------
   # Observatory — MCP Observatory metrics telemetry (optional)
@@ -216,7 +259,7 @@ Resources:
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GeminiSecretName}-*"
         - Statement:
             - Effect: Allow
               Action: secretsmanager:UpdateSecret
@@ -391,7 +434,7 @@ Resources:
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GeminiSecretName}-*"
         - Statement:
             - Effect: Allow
               Action: secretsmanager:UpdateSecret
@@ -614,7 +657,7 @@ Resources:
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GeminiSecretName}-*"
         - !If
           - HasMemgraphSecret
           - AWSSecretsManagerGetSecretValuePolicy:

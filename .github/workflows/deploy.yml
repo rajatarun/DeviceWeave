@@ -237,6 +237,10 @@ jobs:
               StageName="$STAGE" \
               VpcId="${{ steps.vpc.outputs.vpc_id }}" \
               "LambdaSubnetIds=${{ steps.vpc.outputs.subnet_ids }}" \
+              LLMProvider="${{ secrets.LLM_PROVIDER || 'gemini' }}" \
+              LLMModelId="${{ secrets.LLM_MODEL_ID || 'us.anthropic.claude-haiku-4-5-20251001-v1:0' }}" \
+              GeminiModelId="${{ secrets.GEMINI_MODEL_ID || 'gemini-2.0-flash' }}" \
+              GeminiSecretName="${{ secrets.GEMINI_SECRET_NAME || 'gemini/api_key' }}" \
               ObservatoryMetricsTableName="${{ steps.observatory.outputs.observatory_table_name }}" \
               MemgraphSecretArn="${{ steps.memgraph.outputs.memgraph_secret_arn }}"
 
