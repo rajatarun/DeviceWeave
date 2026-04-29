@@ -4,7 +4,13 @@ AWS End User Messaging two-way SMS handler.
 Flow
 ----
   User SMS  →  End User Messaging phone number  →  SNS topic  →  this Lambda
-  this Lambda  →  bedrock_agent.run_agent()  →  send_text_message  →  User SMS
+  this Lambda  →  agent_factory.run_agent()  →  send_text_message  →  User SMS
+
+Supports both Bedrock Converse API and Google Gemini Live API agents.
+Provider selection via AGENT_PROVIDER env var (default: "auto").
+  - auto:    Bedrock if internet reachable, else Gemini
+  - bedrock: Always Bedrock Converse API
+  - gemini:  Always Gemini Live API
 
 AWS End User Messaging replaced Amazon Pinpoint SMS.
 boto3 client: pinpoint-sms-voice-v2  (NOT the legacy "pinpoint" client)
@@ -41,6 +47,9 @@ Environment variables (set by template.yaml)
   PRESENCE_TABLE_NAME     — required by context_provider inside run_agent
   SCENE_TABLE_NAME        — required by scene_catalog inside run_agent
   LLM_MODEL_ID            — Bedrock model (default Haiku 4.5)
+  GEMINI_MODEL            — Gemini model (default: gemini-2.0-flash-lite)
+  GEMINI_SECRET_NAME      — Secrets Manager secret for Gemini API key
+  AGENT_PROVIDER          — Agent provider: auto, bedrock, or gemini
   AWS_REGION              — AWS region
 """
 
@@ -100,7 +109,7 @@ def _handle_record(record: Dict[str, Any]) -> None:
     session_id = f"sms:{sender}"
 
     from conversation_store import load_session, save_session
-    from bedrock_agent import run_agent
+    from agent_factory import run_agent
 
     # Reset keywords clear the session without touching the agent
     if text.lower() in _RESET_KEYWORDS:
@@ -112,11 +121,12 @@ def _handle_record(record: Dict[str, Any]) -> None:
     history = load_session(session_id)
 
     try:
-        reply, updated_history = run_agent(
+        import asyncio
+        reply, updated_history = asyncio.run(run_agent(
             text,
             history,
             system_prompt_extra=_SMS_PROMPT_SUFFIX,
-        )
+        ))
     except Exception as exc:
         logger.exception("Agent error for SMS session %s", session_id)
         _send_sms(sender, "Sorry, something went wrong. Please try again.")
