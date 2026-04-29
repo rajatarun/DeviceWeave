@@ -22,6 +22,41 @@ logger = logging.getLogger(__name__)
 
 _MODEL_ID: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-lite")
 _MAX_TOOL_ROUNDS: int = 10
+_RESPONSE_TIMEOUT_SECS: int = int(os.environ.get("GEMINI_TIMEOUT_SECS", "25"))
+
+# Cached on first call; reused on warm Lambda starts to avoid repeating
+# the Secrets Manager round-trip and SDK client construction.
+_genai_client = None
+
+
+def _get_genai_client():
+    """Return a cached genai.Client, initialising it on the first call."""
+    global _genai_client
+    if _genai_client is not None:
+        return _genai_client
+
+    try:
+        from google import genai
+        logger.info("Gemini SDK imported successfully")
+    except ImportError:
+        raise RuntimeError(
+            "google-genai SDK not installed. Install with: pip install google-genai"
+        )
+
+    import boto3
+    secret_name = os.environ.get("GEMINI_SECRET_NAME", "gemini/api_key")
+    logger.info("Loading Gemini API key from secret: %s", secret_name)
+    try:
+        secret_resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
+        api_key = json.loads(secret_resp["SecretString"])["key"]
+        logger.info("Gemini API key loaded successfully")
+    except Exception as exc:
+        logger.exception("Failed to load Gemini API key from %s", secret_name)
+        raise RuntimeError(f"Failed to load Gemini API key from {secret_name}: {exc}")
+
+    _genai_client = genai.Client(api_key=api_key)
+    logger.info("Gemini client initialised and cached")
+    return _genai_client
 
 _SYSTEM_PROMPT = """\
 You are DeviceWeave, a friendly and concise IoT home automation assistant.
@@ -390,28 +425,8 @@ async def run_agent(
         reply_text      — the agent's final text response.
         updated_history — the full updated message list to persist.
     """
-    try:
-        from google import genai
-        logger.info("Gemini SDK imported successfully")
-    except ImportError:
-        raise RuntimeError(
-            "google-genai SDK not installed. Install with: pip install google-genai"
-        )
-
-    # Load API key from Secrets Manager
-    import boto3
-    import json
-    secret_name = os.environ.get("GEMINI_SECRET_NAME", "gemini/api_key")
-    logger.info("Loading Gemini API key from secret: %s", secret_name)
-    try:
-        secret_resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
-        api_key = json.loads(secret_resp["SecretString"])["key"]
-        logger.info("Gemini API key loaded successfully")
-    except Exception as exc:
-        logger.exception("Failed to load Gemini API key from %s", secret_name)
-        raise RuntimeError(f"Failed to load Gemini API key from {secret_name}: {exc}")
-
-    client = genai.Client(api_key=api_key)
+    from google import genai  # fast sys.modules lookup after first call
+    client = _get_genai_client()
     logger.info("Gemini agent invoked: model=%s history_turns=%d", _MODEL_ID, len(history))
     system_text = _SYSTEM_PROMPT + system_prompt_extra if system_prompt_extra else _SYSTEM_PROMPT
 
@@ -430,92 +445,97 @@ async def run_agent(
         tools=[genai.types.Tool(function_declarations=_TOOLS)],
     )
 
-    logger.info("Connecting to Gemini Live API: model=%s", _MODEL_ID)
+    logger.info(
+        "Connecting to Gemini Live API: model=%s timeout=%ds", _MODEL_ID, _RESPONSE_TIMEOUT_SECS
+    )
     try:
-        # Connect to Live API and run agentic loop
-        async with client.aio.live.connect(model=_MODEL_ID, config=config) as session:
-            logger.info("Gemini Live API session established")
+        async with asyncio.timeout(_RESPONSE_TIMEOUT_SECS):
+            async with client.aio.live.connect(model=_MODEL_ID, config=config) as session:
+                logger.info("Gemini Live API session established")
 
-            # Replay prior history turns so the model has conversation context,
-            # matching Bedrock which passes the full messages list on every call.
-            for i, turn in enumerate(history):
-                role = turn.get("role", "user")
-                parts = turn.get("parts", [])
-                text = parts[0].get("text", "") if parts else ""
-                if text:
-                    logger.debug("Replaying history turn %d role=%s", i, role)
-                    await session.send(
-                        genai.types.Content(
-                            role=role,
-                            parts=[genai.types.Part(text=text)],
-                        )
-                    )
-
-            # Send the current user message
-            logger.info("Sending user message to Gemini session")
-            await session.send(user_message)
-
-            final_response = ""
-            tool_round = 0
-
-            logger.info("Waiting for Gemini response stream")
-            async for server_message in session.response_stream:
-                # Handle tool calls
-                if server_message.tool_calls:
-                    for tool_call in server_message.tool_calls:
-                        tool_name = tool_call.function_name
-                        tool_input = tool_call.args
-
-                        logger.info("Agent calling tool: %s(%s)", tool_name, json.dumps(tool_input))
-                        result = _dispatch_tool(tool_name, tool_input)
-                        logger.info("Tool %s result: %s", tool_name, json.dumps(result, default=str))
-
-                        # Send tool result back to the model
+                # Replay prior history turns so the model has conversation context,
+                # matching Bedrock which passes the full messages list on every call.
+                for i, turn in enumerate(history):
+                    role = turn.get("role", "user")
+                    parts = turn.get("parts", [])
+                    text = parts[0].get("text", "") if parts else ""
+                    if text:
+                        logger.debug("Replaying history turn %d role=%s", i, role)
                         await session.send(
                             genai.types.Content(
-                                role="user",
-                                parts=[
-                                    genai.types.Part(
-                                        function_response=genai.types.FunctionResponse(
-                                            name=tool_name,
-                                            response=result,
-                                        )
-                                    )
-                                ],
+                                role=role,
+                                parts=[genai.types.Part(text=text)],
                             )
                         )
 
-                        tool_round += 1
-                        if tool_round >= _MAX_TOOL_ROUNDS:
-                            logger.error(
-                                "Agent exceeded %d tool rounds — aborting", _MAX_TOOL_ROUNDS
+                # Send the current user message
+                logger.info("Sending user message to Gemini session")
+                await session.send(user_message)
+
+                final_response = ""
+                tool_round = 0
+
+                logger.info("Waiting for Gemini response stream")
+                async for server_message in session.response_stream:
+                    # Handle tool calls
+                    if server_message.tool_calls:
+                        for tool_call in server_message.tool_calls:
+                            tool_name = tool_call.function_name
+                            tool_input = tool_call.args
+
+                            logger.info("Agent calling tool: %s(%s)", tool_name, json.dumps(tool_input))
+                            result = _dispatch_tool(tool_name, tool_input)
+                            logger.info("Tool %s result: %s", tool_name, json.dumps(result, default=str))
+
+                            # Send tool result back to the model
+                            await session.send(
+                                genai.types.Content(
+                                    role="user",
+                                    parts=[
+                                        genai.types.Part(
+                                            function_response=genai.types.FunctionResponse(
+                                                name=tool_name,
+                                                response=result,
+                                            )
+                                        )
+                                    ],
+                                )
                             )
-                            return "I was unable to complete the request within the allowed steps.", messages
 
-                # Handle text responses
-                if hasattr(server_message, "text") and server_message.text:
-                    logger.debug("Received text chunk: %d chars", len(server_message.text))
-                    final_response = server_message.text
+                            tool_round += 1
+                            if tool_round >= _MAX_TOOL_ROUNDS:
+                                logger.error(
+                                    "Agent exceeded %d tool rounds — aborting", _MAX_TOOL_ROUNDS
+                                )
+                                return "I was unable to complete the request within the allowed steps.", messages
 
-            logger.info(
-                "Gemini response stream ended: has_text=%s tool_rounds=%d",
-                bool(final_response),
-                tool_round,
-            )
+                    # Handle text responses
+                    if hasattr(server_message, "text") and server_message.text:
+                        logger.debug("Received text chunk: %d chars", len(server_message.text))
+                        final_response = server_message.text
 
-            # Update message history with final response
-            messages.append(
-                {"role": "model", "parts": [{"text": final_response}]}
-            )
+                logger.info(
+                    "Gemini response stream ended: has_text=%s tool_rounds=%d",
+                    bool(final_response),
+                    tool_round,
+                )
 
-            logger.info(
-                "Agent finished: rounds=%d session_messages=%d",
-                tool_round + 1,
-                len(messages),
-            )
+                # Update message history with final response
+                messages.append(
+                    {"role": "model", "parts": [{"text": final_response}]}
+                )
 
-            return final_response or "(no response)", messages
+                logger.info(
+                    "Agent finished: rounds=%d session_messages=%d",
+                    tool_round + 1,
+                    len(messages),
+                )
 
+                return final_response or "(no response)", messages
+
+    except TimeoutError:
+        logger.error("Gemini Live API timed out after %ds", _RESPONSE_TIMEOUT_SECS)
+        raise RuntimeError(f"Gemini Live API timed out after {_RESPONSE_TIMEOUT_SECS}s")
     except Exception as exc:
         logger.exception("Gemini Live API error")
         raise RuntimeError(f"Gemini Live API failed: {exc}") from exc

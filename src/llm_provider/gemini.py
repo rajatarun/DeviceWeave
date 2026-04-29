@@ -74,7 +74,7 @@ class GeminiLLMProvider(BaseLLMProvider):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=25) as resp:
                 payload = json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             body_bytes = exc.read()
