@@ -33,7 +33,18 @@ def _load_api_key(secret_name: str) -> str:
     if _api_key_cache:
         return _api_key_cache
     import boto3
-    resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
+    from botocore.config import Config as BotocoreConfig
+
+    sm_client = boto3.client(
+        "secretsmanager",
+        config=BotocoreConfig(
+            connect_timeout=5,
+            read_timeout=5,
+            retries={"max_attempts": 1},
+            use_dualstack_endpoint=True,
+        ),
+    )
+    resp = sm_client.get_secret_value(SecretId=secret_name)
     _api_key_cache = json.loads(resp["SecretString"])["key"]
     logger.info("Gemini API key loaded from Secrets Manager (%s).", secret_name)
     return _api_key_cache
