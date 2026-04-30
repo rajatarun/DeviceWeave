@@ -228,6 +228,7 @@ Resources:
       CodeUri: src/
       Handler: app.handler
       Timeout: 120
+      MemorySize: 1024
       Description: >
         DeviceWeave execution engine — intent parsing, scene resolution,
         semantic device matching, behavior scoring, provider execution.
@@ -599,6 +600,7 @@ Resources:
       CodeUri: src/
       Handler: sms_handler.handler
       Timeout: 120
+      MemorySize: 1024
       Description: >
         DeviceWeave SMS handler — receives End User Messaging inbound SMS via
         SNS, runs the conversational agent, replies via
