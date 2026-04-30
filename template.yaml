@@ -227,6 +227,7 @@ Resources:
       FunctionName: !Sub "deviceweave-handler-${StageName}"
       CodeUri: src/
       Handler: app.handler
+      Timeout: 120
       Description: >
         DeviceWeave execution engine — intent parsing, scene resolution,
         semantic device matching, behavior scoring, provider execution.
@@ -597,10 +598,10 @@ Resources:
       FunctionName: !Sub "deviceweave-sms-${StageName}"
       CodeUri: src/
       Handler: sms_handler.handler
-      Timeout: 60
+      Timeout: 120
       Description: >
         DeviceWeave SMS handler — receives End User Messaging inbound SMS via
-        SNS, runs the Bedrock conversational agent, replies via
+        SNS, runs the conversational agent, replies via
         pinpoint-sms-voice-v2 send_text_message. Phone number is used as
         session_id for persistent per-user conversation.
       Environment:
