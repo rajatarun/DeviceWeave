@@ -96,9 +96,9 @@ Parameters:
 
   GeminiModelId:
     Type: String
-    Default: "gemini-2.0-flash"
+    Default: "gemini-2.5-flash"
     Description: >
-      Gemini model ID (e.g., gemini-2.0-flash, gemini-1.5-pro).
+      Gemini model ID (e.g., gemini-2.5-flash, gemini-2.0-flash).
       Only used when LLMProvider includes Gemini (auto, gemini).
 
   AgentProvider:
