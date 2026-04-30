@@ -44,10 +44,19 @@ def _get_genai_client():
         )
 
     import boto3
+    from botocore.config import Config as BotocoreConfig
     secret_name = os.environ.get("GEMINI_SECRET_NAME", "gemini/api_key")
     logger.info("Loading Gemini API key from secret: %s", secret_name)
     try:
-        secret_resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
+        sm_client = boto3.client(
+            "secretsmanager",
+            config=BotocoreConfig(
+                connect_timeout=5,
+                read_timeout=5,
+                retries={"max_attempts": 1},
+            ),
+        )
+        secret_resp = sm_client.get_secret_value(SecretId=secret_name)
         api_key = json.loads(secret_resp["SecretString"])["key"]
         logger.info("Gemini API key loaded successfully")
     except Exception as exc:
