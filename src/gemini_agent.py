@@ -78,10 +78,15 @@ def _resolve_live_model_id(client) -> str:
       2) First available model that supports bidiGenerateContent.
     """
     global _resolved_live_model_id
+    preferred = _MODEL_ID
     if _resolved_live_model_id:
+        logger.info(
+            "Gemini Live model selected from cache: %s (configured: %s)",
+            _resolved_live_model_id,
+            preferred,
+        )
         return _resolved_live_model_id
 
-    preferred = _MODEL_ID
     bidi_models: List[str] = []
 
     try:
@@ -99,6 +104,8 @@ def _resolve_live_model_id(client) -> str:
         logger.exception("Failed to list Gemini models; using configured model: %s", preferred)
         _resolved_live_model_id = preferred
         return _resolved_live_model_id
+
+    logger.info("Gemini Live-compatible models: %s", bidi_models)
 
     if not bidi_models:
         logger.warning(
@@ -118,6 +125,12 @@ def _resolve_live_model_id(client) -> str:
             preferred,
             _resolved_live_model_id,
         )
+
+    logger.info(
+        "Gemini Live model selected: %s (configured: %s)",
+        _resolved_live_model_id,
+        preferred,
+    )
 
     return _resolved_live_model_id
 
