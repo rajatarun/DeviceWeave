@@ -47,7 +47,7 @@ Environment variables (set by template.yaml)
   PRESENCE_TABLE_NAME     — required by context_provider inside run_agent
   SCENE_TABLE_NAME        — required by scene_catalog inside run_agent
   LLM_MODEL_ID            — Bedrock model (default Haiku 4.5)
-  GEMINI_MODEL            — Gemini model (default: gemini-2.0-flash-lite)
+  GEMINI_MODEL            — Gemini model (default: gemini-2.5-flash)
   GEMINI_SECRET_NAME      — Secrets Manager secret for Gemini API key
   AGENT_PROVIDER          — Agent provider: auto, bedrock, or gemini
   AWS_REGION              — AWS region
