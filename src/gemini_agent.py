@@ -54,6 +54,7 @@ def _get_genai_client():
                 connect_timeout=5,
                 read_timeout=5,
                 retries={"max_attempts": 1},
+                use_dualstack_endpoint=True,
             ),
         )
         secret_resp = sm_client.get_secret_value(SecretId=secret_name)

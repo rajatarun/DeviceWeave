@@ -11,6 +11,7 @@ Globals:
       SecurityGroupIds:
         - !Ref LambdaSecurityGroup
       SubnetIds: !Ref LambdaSubnetIds
+      Ipv6AllowedForDualStack: true
     Environment:
       Variables:
         LOG_LEVEL: INFO
