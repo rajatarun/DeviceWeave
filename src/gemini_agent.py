@@ -134,6 +134,46 @@ def _resolve_live_model_id(client) -> str:
 
     return _resolved_live_model_id
 
+class SessionManager:
+    """Guard Live API realtime sends while tool calls are being fulfilled."""
+
+    def __init__(self, session, genai_types):
+        self.session = session
+        self.genai_types = genai_types
+        self._tool_call_pending = False
+
+    async def handle_tool_call(self, tool_call, dispatch_tool):
+        self._tool_call_pending = True
+        try:
+            tool_name = tool_call.function_name
+            tool_input = tool_call.args
+            logger.info("Agent calling tool: %s(%s)", tool_name, json.dumps(tool_input))
+            result = dispatch_tool(tool_name, tool_input)
+            logger.info("Tool %s result: %s", tool_name, json.dumps(result, default=str))
+
+            await self.session.send(
+                self.genai_types.Content(
+                    role="user",
+                    parts=[
+                        self.genai_types.Part(
+                            function_response=self.genai_types.FunctionResponse(
+                                id=getattr(tool_call, "id", None),
+                                name=tool_name,
+                                response=result,
+                            )
+                        )
+                    ],
+                )
+            )
+        finally:
+            self._tool_call_pending = False
+
+    async def send_content(self, content):
+        if self._tool_call_pending:
+            logger.debug("Skipping realtime send while tool call is pending")
+            return
+        await self.session.send(content)
+
 _SYSTEM_PROMPT = """\
 You are DeviceWeave, a friendly and concise IoT home automation assistant.
 You control smart home devices by calling the tools available to you.
@@ -547,7 +587,9 @@ async def run_agent(
 
                 # Send the current user message
                 logger.info("Sending user message to Gemini session")
-                await session.send(user_message)
+                session_manager = SessionManager(session, genai.types)
+
+                await session_manager.send_content(user_message)
 
                 final_response = ""
                 tool_round = 0
@@ -557,27 +599,7 @@ async def run_agent(
                     # Handle tool calls
                     if server_message.tool_calls:
                         for tool_call in server_message.tool_calls:
-                            tool_name = tool_call.function_name
-                            tool_input = tool_call.args
-
-                            logger.info("Agent calling tool: %s(%s)", tool_name, json.dumps(tool_input))
-                            result = _dispatch_tool(tool_name, tool_input)
-                            logger.info("Tool %s result: %s", tool_name, json.dumps(result, default=str))
-
-                            # Send tool result back to the model
-                            await session.send(
-                                genai.types.Content(
-                                    role="user",
-                                    parts=[
-                                        genai.types.Part(
-                                            function_response=genai.types.FunctionResponse(
-                                                name=tool_name,
-                                                response=result,
-                                            )
-                                        )
-                                    ],
-                                )
-                            )
+                            await session_manager.handle_tool_call(tool_call, _dispatch_tool)
 
                             tool_round += 1
                             if tool_round >= _MAX_TOOL_ROUNDS:
