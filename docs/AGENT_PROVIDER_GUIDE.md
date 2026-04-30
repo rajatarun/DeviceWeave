@@ -39,9 +39,9 @@ AWS_REGION=us-east-1                                      # Region
 
 #### Gemini Configuration (if using Gemini agent or LLM)
 ```bash
-GEMINI_MODEL=gemini-2.5-flash      # Agent model (default)
-# or for non-agentic calls:
-GEMINI_MODEL=gemini-2.5-flash           # Better quality, slightly higher cost
+GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview  # Agent model (default)
+# for non-agentic calls:
+GEMINI_MODEL=gemini-2.5-flash                           # generateContent model
 
 # API key secret is hardcoded to: gemini/api_key
 # Secret format: {"api_key": "YOUR_API_KEY"}

@@ -28,6 +28,7 @@ Globals:
         LLM_PROVIDER: !Ref LLMProvider
         LLM_MODEL_ID: !Ref LLMModelId
         GEMINI_MODEL: !Ref GeminiModelId
+        GEMINI_LIVE_MODEL: !Ref GeminiLiveModelId
         GEMINI_SECRET_NAME: "gemini/api_key"
         AGENT_PROVIDER: !Ref AgentProvider
         OLLAMA_BASE_URL: ""
@@ -98,8 +99,16 @@ Parameters:
     Type: String
     Default: "gemini-2.5-flash"
     Description: >
-      Gemini model ID (e.g., gemini-2.5-flash, gemini-2.0-flash).
+      Gemini model ID for non-live generateContent calls
+      (e.g., gemini-2.5-flash, gemini-2.0-flash).
       Only used when LLMProvider includes Gemini (auto, gemini).
+
+  GeminiLiveModelId:
+    Type: String
+    Default: "gemini-3.1-flash-live-preview"
+    Description: >
+      Gemini Live API model ID for conversational agent sessions.
+      Must support bidiGenerateContent (e.g., gemini-3.1-flash-live-preview).
 
   AgentProvider:
     Type: String
