@@ -27,6 +27,7 @@ _RESPONSE_TIMEOUT_SECS: int = int(os.environ.get("GEMINI_TIMEOUT_SECS", "25"))
 # Cached on first call; reused on warm Lambda starts to avoid repeating
 # the Secrets Manager round-trip and SDK client construction.
 _genai_client = None
+_resolved_live_model_id: Optional[str] = None
 
 
 def _get_genai_client():
@@ -67,6 +68,58 @@ def _get_genai_client():
     _genai_client = genai.Client(api_key=api_key)
     logger.info("Gemini client initialised and cached")
     return _genai_client
+
+
+def _resolve_live_model_id(client) -> str:
+    """Return a Gemini model ID that supports the Live API bidi method.
+
+    Preference order:
+      1) Configured GEMINI_MODEL if it supports bidiGenerateContent.
+      2) First available model that supports bidiGenerateContent.
+    """
+    global _resolved_live_model_id
+    if _resolved_live_model_id:
+        return _resolved_live_model_id
+
+    preferred = _MODEL_ID
+    bidi_models: List[str] = []
+
+    try:
+        for model in client.models.list():
+            methods = getattr(model, "supported_actions", None) or getattr(
+                model, "supported_generation_methods", []
+            )
+            if "bidiGenerateContent" in methods:
+                name = getattr(model, "name", "")
+                # SDK can return names like "models/gemini-2.0-flash".
+                model_id = name.split("/", 1)[1] if name.startswith("models/") else name
+                if model_id:
+                    bidi_models.append(model_id)
+    except Exception:
+        logger.exception("Failed to list Gemini models; using configured model: %s", preferred)
+        _resolved_live_model_id = preferred
+        return _resolved_live_model_id
+
+    if not bidi_models:
+        logger.warning(
+            "No Gemini models reported bidiGenerateContent support; using configured model: %s",
+            preferred,
+        )
+        _resolved_live_model_id = preferred
+        return _resolved_live_model_id
+
+    if preferred in bidi_models:
+        _resolved_live_model_id = preferred
+    else:
+        _resolved_live_model_id = bidi_models[0]
+        logger.warning(
+            "Configured GEMINI_MODEL=%s does not support Live API bidiGenerateContent; "
+            "falling back to %s",
+            preferred,
+            _resolved_live_model_id,
+        )
+
+    return _resolved_live_model_id
 
 _SYSTEM_PROMPT = """\
 You are DeviceWeave, a friendly and concise IoT home automation assistant.
@@ -437,7 +490,8 @@ async def run_agent(
     """
     from google import genai  # fast sys.modules lookup after first call
     client = _get_genai_client()
-    logger.info("Gemini agent invoked: model=%s history_turns=%d", _MODEL_ID, len(history))
+    model_id = _resolve_live_model_id(client)
+    logger.info("Gemini agent invoked: model=%s history_turns=%d", model_id, len(history))
     system_text = _SYSTEM_PROMPT + system_prompt_extra if system_prompt_extra else _SYSTEM_PROMPT
 
     # Build messages for Gemini
@@ -456,11 +510,11 @@ async def run_agent(
     )
 
     logger.info(
-        "Connecting to Gemini Live API: model=%s timeout=%ds", _MODEL_ID, _RESPONSE_TIMEOUT_SECS
+        "Connecting to Gemini Live API: model=%s timeout=%ds", model_id, _RESPONSE_TIMEOUT_SECS
     )
     try:
         async with asyncio.timeout(_RESPONSE_TIMEOUT_SECS):
-            async with client.aio.live.connect(model=_MODEL_ID, config=config) as session:
+            async with client.aio.live.connect(model=model_id, config=config) as session:
                 logger.info("Gemini Live API session established")
 
                 # Replay prior history turns so the model has conversation context,
