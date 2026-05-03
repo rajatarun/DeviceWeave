@@ -66,10 +66,11 @@ Parameters:
   LambdaPublicSubnetIds:
     Type: CommaDelimitedList
     Description: >
-      OPTIONAL: Comma-separated public subnet IDs for Lambda.
-      When provided, Lambda uses public subnets for direct internet access
-      (required for Gemini API calls without NAT Gateway).
-      Leave empty to use private subnets (requires NAT Gateway for outbound).
+      Public subnet IDs for Lambda direct internet access (Gemini API).
+      RECOMMENDED: Use public subnets for Gemini outbound access.
+      Direct path to Gemini API, no NAT Gateway cost.
+      If empty, Lambda uses private subnets (requires NAT Gateway).
+      Example: subnet-12345678,subnet-87654321
     Default: ""
 
   # -----------------------------------------------------------------------

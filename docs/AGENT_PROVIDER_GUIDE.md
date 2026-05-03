@@ -110,38 +110,34 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
      --secret-string '{"api_key": "YOUR_API_KEY"}'
    ```
 
-3. **Configure Network Access to Gemini**
+3. **Configure Network Access to Gemini (Use Public Subnets)**
    
-   Lambda needs outbound internet access. Choose one:
+   Lambda needs outbound internet access via public subnets for Gemini API calls.
    
-   **Option A: Use public subnets (simpler, recommended)**
-   - Lambda placed in public subnet with internet gateway route
-   - Direct outbound access to Gemini API
-   - Set `LambdaPublicSubnetIds` parameter when deploying
+   Find your VPC's public subnets:
+   ```bash
+   # List public subnets in your VPC
+   aws ec2 describe-subnets \
+     --filters "Name=vpc-id,Values=vpc-xxxxx" \
+                "Name=map-public-ip-on-launch,Values=true" \
+     --query 'Subnets[].SubnetId' \
+     --output text
+   ```
    
-   **Option B: Use private subnets + NAT Gateway**
-   - Lambda in private subnet routes through NAT Gateway
-   - Requires NAT Gateway on public subnet ($0.045/hour)
-   - Leave `LambdaPublicSubnetIds` empty (uses `LambdaSubnetIds`)
+   Copy the subnet IDs (you'll need these for deployment in step 4)
 
-4. **Deploy with Gemini**
+4. **Deploy with Gemini (Public Subnets)**
    
-   **Option A: Local SAM deployment with public subnets**
+   **Initial deployment (SAM)**:
    ```bash
    sam deploy --parameter-overrides \
      AgentProvider=gemini \
      LLMProvider=gemini \
      "LambdaPublicSubnetIds=subnet-12345678,subnet-87654321"
    ```
+   Replace `subnet-12345678,subnet-87654321` with your public subnet IDs.
    
-   Or with private subnets + NAT Gateway:
-   ```bash
-   sam deploy --parameter-overrides \
-     AgentProvider=gemini \
-     LLMProvider=gemini
-   ```
-   
-   **Option B: Update existing stack via CloudFormation (with public subnets)**
+   **Update existing stack (CloudFormation CLI)**:
    ```bash
    aws cloudformation update-stack \
      --stack-name deviceweave-prod \
@@ -155,11 +151,15 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
        ParameterKey=LambdaSubnetIds,UsePreviousValue=true
    ```
    
-   **Option C: AWS Console**
-   - Go to CloudFormation → DeviceWeave stack
-   - Update stack → Next
-   - Set AgentProvider=gemini, LLMProvider=gemini
-   - Review and submit
+   **Update via AWS Console**:
+   1. Go to CloudFormation → DeviceWeave stack
+   2. Click "Update"
+   3. Keep template, click "Next"
+   4. Set parameters:
+      - `AgentProvider`: gemini
+      - `LLMProvider`: gemini
+      - `LambdaPublicSubnetIds`: subnet-12345678,subnet-87654321
+   5. Review and submit
 
 ### For Bedrock Agent (Default)
 
@@ -221,73 +221,71 @@ Both agents:
 
 ## Network Configuration
 
-### Outbound Internet Access
+### Recommended: Public Subnets
 
-Lambda needs outbound access to Gemini API (HTTPS port 443).
+Lambda uses public subnets for direct internet access to Gemini API.
 
-#### Option 1: Public Subnets (Recommended)
+**Architecture**:
 ```
-Internet Gateway
+Internet Gateway (IGW)
     ↓
-Public Subnet (with IGW route)
+Public Subnet
     ↓
-Lambda (LambdaPublicSubnetIds)
+Lambda
     ↓
-HTTPS → Gemini API (direct)
+HTTPS Port 443 → Gemini API
 ```
 
-**Advantages**:
-- Direct path, lower latency
-- No NAT Gateway cost ($0.045/hour = ~$32/month)
-- Simple configuration
+**Benefits**:
+- ✅ Direct path, low latency (<50ms)
+- ✅ No NAT Gateway cost ($0/month)
+- ✅ Simple configuration
+- ✅ Works reliably with Gemini API
 
-**Disadvantages**:
-- Lambda has public IP (though still not directly accessible)
-- More security consideration needed
-
-#### Option 2: Private Subnets + NAT Gateway
+**Configuration**:
+```yaml
+LambdaPublicSubnetIds: subnet-12345,subnet-67890
 ```
-Internet Gateway
+
+**Find your public subnets**:
+```bash
+aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=vpc-xxxxx" \
+            "Name=map-public-ip-on-launch,Values=true" \
+  --query 'Subnets[].[SubnetId,Tags[?Key==`Name`].Value|[0]]' \
+  --output table
+```
+
+### Alternative: Private Subnets + NAT Gateway
+
+If you prefer Lambda in private subnets, use NAT Gateway.
+
+**Architecture**:
+```
+Internet Gateway (IGW)
     ↓
 Public Subnet
     ↓
 NAT Gateway
     ↓
-Private Subnet (LambdaSubnetIds)
+Private Subnet
     ↓
 Lambda
     ↓
-HTTPS → Gemini API (via NAT)
+HTTPS Port 443 → Gemini API
 ```
 
-**Advantages**:
-- Lambda in private subnet (no public IP)
-- Better security posture
-- Works with existing private infrastructure
-
-**Disadvantages**:
-- NAT Gateway cost: ~$32/month
-- Slightly higher latency
-- Requires NAT Gateway setup
-
-### Configuration
-
-**Use public subnets:**
-```bash
-# CloudFormation parameter
-LambdaPublicSubnetIds: subnet-12345,subnet-67890
-
-# All Lambdas placed in public subnets
-# Direct outbound to Gemini API
-```
-
-**Use private subnets (NAT Gateway must exist):**
-```bash
-# Leave LambdaPublicSubnetIds empty (default)
-
+**Configuration**:
+```yaml
+LambdaPublicSubnetIds: ""  # Leave empty
 # Lambda uses LambdaSubnetIds (private)
-# Requires NAT Gateway for outbound
+# Requires NAT Gateway to exist
 ```
+
+**Cost/Latency**:
+- NAT Gateway: ~$32/month + $0.045 per GB processed
+- Latency: Slightly higher than direct (via NAT)
+- Security: Better (Lambda in private subnet)
 
 ## Error Handling
 
