@@ -124,6 +124,31 @@ jobs:
           echo "Resolved VpcId=$VPC_ID from subnets=$SUBNET_IDS"
 
       # ----------------------------------------------------------------
+      # 5b. Discover public subnets in VPC for Gemini API access
+      #
+      #     Public subnets have map-public-ip-on-launch=true.
+      #     If no public subnets exist, this will be empty (and SAM will use
+      #     LambdaSubnetIds instead — Lambda stays in private subnets).
+      # ----------------------------------------------------------------
+      - name: Discover public subnets for Gemini API access
+        id: public_subnets
+        run: |
+          PUBLIC_SUBNETS=$(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=${{ steps.vpc.outputs.vpc_id }}" \
+                      "Name=map-public-ip-on-launch,Values=true" \
+            --region "$AWS_REGION" \
+            --query "Subnets[].SubnetId" \
+            --output text | tr '\t' ',')
+
+          echo "public_subnet_ids=$PUBLIC_SUBNETS" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$PUBLIC_SUBNETS" ]; then
+            echo "No public subnets found — Lambda will use private subnets (Gemini API access requires explicit config)"
+          else
+            echo "Discovered public subnets: $PUBLIC_SUBNETS"
+          fi
+
+      # ----------------------------------------------------------------
       # 6. Resolve Observatory metrics table parameters from shared stack
       #
       #    Stack: tarun-teamweave-shared
@@ -237,6 +262,10 @@ jobs:
               StageName="$STAGE" \
               VpcId="${{ steps.vpc.outputs.vpc_id }}" \
               "LambdaSubnetIds=${{ steps.vpc.outputs.subnet_ids }}" \
+              "LambdaPublicSubnetIds=${{ steps.public_subnets.outputs.public_subnet_ids }}" \
+              AgentProvider=gemini \
+              LLMProvider=gemini \
+              GeminiModelId=gemini-3-flash-preview \
               ObservatoryMetricsTableName="${{ steps.observatory.outputs.observatory_table_name }}" \
               MemgraphSecretArn="${{ steps.memgraph.outputs.memgraph_secret_arn }}"
 
