@@ -23,9 +23,12 @@ logger = logging.getLogger(__name__)
 _MODEL_ID: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 _MAX_TOOL_ROUNDS: int = 10
 _RESPONSE_TIMEOUT_SECS: int = int(os.environ.get("GEMINI_TIMEOUT_SECS", "25"))
+_INIT_CACHE_TTL_SECS: int = 3600  # 1 hour
+_INIT_CACHE_KEY: str = "__gemini_init__"
 
-# Cached on first call; reused on warm Lambda starts to avoid repeating
-# the Secrets Manager round-trip and SDK client construction.
+# L1 in-memory cache — survives warm Lambda restarts within the same container.
+# _genai_client cannot be serialized; it is always rebuilt from Secrets Manager
+# on a cold start. _resolved_model_id is also backed by DynamoDB (see below).
 _genai_client = None
 _resolved_model_id: Optional[str] = None
 
@@ -70,19 +73,64 @@ def _get_genai_client():
     return _genai_client
 
 
-def _resolve_model_id(client) -> str:
-    """Return the configured Gemini model ID, verifying generateContent support.
+def _load_cached_model_id() -> Optional[str]:
+    """Read the resolved model ID from DynamoDB (L2 cache). Returns None on miss or error."""
+    table_name = os.environ.get("CONVERSATION_TABLE_NAME", "")
+    if not table_name:
+        return None
+    try:
+        import boto3
+        resp = boto3.resource("dynamodb").Table(table_name).get_item(
+            Key={"session_id": _INIT_CACHE_KEY}
+        )
+        item = resp.get("Item")
+        return item.get("model_id") if item else None
+    except Exception:
+        logger.warning("DynamoDB model-ID cache read failed; will resolve from API")
+        return None
 
-    Falls back to the configured model ID if listing fails or the model is not
-    found in the list (it may still work; we don't hard-block on discovery).
+
+def _write_cached_model_id(model_id: str) -> None:
+    """Persist the resolved model ID to DynamoDB with a 1-hour TTL."""
+    import time
+    table_name = os.environ.get("CONVERSATION_TABLE_NAME", "")
+    if not table_name:
+        return
+    try:
+        import boto3
+        boto3.resource("dynamodb").Table(table_name).put_item(Item={
+            "session_id": _INIT_CACHE_KEY,
+            "model_id": model_id,
+            "ttl": int(time.time()) + _INIT_CACHE_TTL_SECS,
+        })
+        logger.info("Gemini model ID written to DynamoDB cache (1h TTL): %s", model_id)
+    except Exception:
+        logger.warning("DynamoDB model-ID cache write failed; continuing without caching")
+
+
+def _resolve_model_id(client) -> str:
+    """Return the Gemini model ID to use, with a two-tier cache.
+
+    L1 — module-level global: survives warm Lambda restarts in the same container.
+    L2 — DynamoDB item with 1h TTL: survives cold starts and is shared across
+         all container instances so only one instance pays the models.list() cost.
     """
     global _resolved_model_id
     preferred = _MODEL_ID
 
+    # L1: in-memory (warm start)
     if _resolved_model_id:
-        logger.info("Gemini model from cache: %s", _resolved_model_id)
+        logger.info("Gemini model from memory cache: %s", _resolved_model_id)
         return _resolved_model_id
 
+    # L2: DynamoDB (cold start, cross-container)
+    cached = _load_cached_model_id()
+    if cached:
+        logger.info("Gemini model from DynamoDB cache: %s", cached)
+        _resolved_model_id = cached
+        return _resolved_model_id
+
+    # L3: Discover via Gemini models.list() then populate both cache tiers
     try:
         for model in client.models.list():
             methods = getattr(model, "supported_actions", None) or getattr(
@@ -93,16 +141,17 @@ def _resolve_model_id(client) -> str:
                 mid = name.split("/", 1)[1] if name.startswith("models/") else name
                 if mid == preferred:
                     _resolved_model_id = preferred
-                    logger.info("Gemini model verified with generateContent: %s", _resolved_model_id)
+                    _write_cached_model_id(_resolved_model_id)
+                    logger.info("Gemini model verified and cached: %s", _resolved_model_id)
                     return _resolved_model_id
         logger.warning(
-            "Model %s not found in generateContent-capable models list; using as configured",
-            preferred,
+            "Model %s not found in generateContent-capable list; using as configured", preferred
         )
     except Exception:
         logger.exception("Failed to list Gemini models; using configured model: %s", preferred)
 
     _resolved_model_id = preferred
+    _write_cached_model_id(_resolved_model_id)
     return _resolved_model_id
 
 
