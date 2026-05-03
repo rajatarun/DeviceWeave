@@ -114,21 +114,30 @@ def _resolve_model_id(client) -> str:
     L1 — module-level global: survives warm Lambda restarts in the same container.
     L2 — DynamoDB item with 1h TTL: survives cold starts and is shared across
          all container instances so only one instance pays the models.list() cost.
+
+    Always validates the environment variable against the cache to detect config changes.
     """
     global _resolved_model_id
     preferred = _MODEL_ID
 
-    # L1: in-memory (warm start)
+    # L1: in-memory (warm start) — but verify it matches current env var
     if _resolved_model_id:
-        logger.info("Gemini model from memory cache: %s", _resolved_model_id)
-        return _resolved_model_id
+        if _resolved_model_id == preferred:
+            logger.info("Gemini model from memory cache: %s", _resolved_model_id)
+            return _resolved_model_id
+        else:
+            logger.info("Model changed in env (was %s, now %s)", _resolved_model_id, preferred)
+            _resolved_model_id = None
 
-    # L2: DynamoDB (cold start, cross-container)
+    # L2: DynamoDB (cold start, cross-container) — but verify it matches current env var
     cached = _load_cached_model_id()
-    if cached:
+    if cached and cached == preferred:
         logger.info("Gemini model from DynamoDB cache: %s", cached)
         _resolved_model_id = cached
         return _resolved_model_id
+    elif cached and cached != preferred:
+        logger.info("Cached model %s differs from env var %s; using env var", cached, preferred)
+        _write_cached_model_id(preferred)
 
     # L3: Discover via Gemini models.list() then populate both cache tiers
     try:
