@@ -56,8 +56,7 @@ LLM_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
 #### gemini (RECOMMENDED)
 ```
 LLM_PROVIDER=gemini
-GEMINI_MODEL=gemini-2.5-flash       # non-live generateContent
-GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview  # Gemini Live agent
+GEMINI_MODEL=gemini-3-flash-preview  # Gemini model for all API calls
 # GEMINI_SECRET_NAME is hardcoded to: gemini/api_key
 ```
 - Always use Gemini via API
@@ -95,13 +94,8 @@ Parameters:
 
   GeminiModelId:
     Type: String
-    Default: "gemini-2.5-flash"
-    # Gemini model for non-live generateContent (ignored if LLMProvider != gemini|auto)
-
-  GeminiLiveModelId:
-    Type: String
-    Default: "gemini-3.1-flash-live-preview"
-    # Gemini Live model for conversational agent sessions
+    Default: "gemini-3-flash-preview"
+    # Gemini model for all API calls (ignored if LLMProvider != gemini|auto)
     # Note: Gemini API key secret is hardcoded to "gemini/api_key"
 ```
 
@@ -135,7 +129,7 @@ aws cloudformation update-stack \
 ### Cost-Optimized (Gemini primary)
 ```
 LLM_PROVIDER=gemini
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3-flash-preview
 ```
 - Agent uses Bedrock Converse API (required)
 - All other calls use Gemini (cheaper)

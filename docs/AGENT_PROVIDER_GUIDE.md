@@ -3,13 +3,13 @@
 DeviceWeave now supports two conversational agents for SMS and chat interactions:
 
 1. **Bedrock Converse API** — AWS-native, cross-region inference
-2. **Google Gemini Live API** — Low-latency streaming, cost-efficient
+2. **Google Gemini API** — Cost-efficient, global availability
 
 ## Architecture Overview
 
 ### Agent Providers (SMS, Chat Conversations)
 - **bedrock_agent.py** — Bedrock Converse API with native tool calling
-- **gemini_agent.py** — Google Gemini Live API with streaming responses
+- **gemini_agent.py** — Google Gemini API with tool calling (generateContent)
 - **agent_factory.py** — Provider selection and unified async interface
 
 ### LLM Providers (Non-agentic: resolution, policy authoring)
@@ -28,7 +28,7 @@ These are **independent**. You can use:
 ```bash
 AGENT_PROVIDER=auto      # Default: Bedrock if online, Gemini if offline
 AGENT_PROVIDER=bedrock   # Always Bedrock Converse API
-AGENT_PROVIDER=gemini    # Always Gemini Live API
+AGENT_PROVIDER=gemini    # Always Gemini API
 ```
 
 #### Bedrock Configuration (if using Bedrock agent)
@@ -39,9 +39,7 @@ AWS_REGION=us-east-1                                      # Region
 
 #### Gemini Configuration (if using Gemini agent or LLM)
 ```bash
-GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview  # Agent model (default)
-# for non-agentic calls:
-GEMINI_MODEL=gemini-2.5-flash                           # generateContent model
+GEMINI_MODEL=gemini-3-flash-preview  # Model for all Gemini API calls (default)
 
 # API key secret is hardcoded to: gemini/api_key
 # Secret format: {"api_key": "YOUR_API_KEY"}
@@ -58,9 +56,9 @@ LLM_PROVIDER=auto        # Adaptive (default)
 
 ### 1. Cost-Optimized (Gemini Primary)
 ```yaml
-AGENT_PROVIDER: gemini        # SMS via Gemini Live API
-LLM_PROVIDER: gemini          # Device resolution via Gemini
-LLM_MODEL_ID: (ignored)       # Not used
+AGENT_PROVIDER: gemini              # SMS via Gemini API
+LLM_PROVIDER: gemini                # Device resolution via Gemini
+GEMINI_MODEL: gemini-3-flash-preview  # Model for all calls
 ```
 **Cost**: ~$0.00075 per SMS (vs ~$0.001 with Bedrock)
 **Latency**: <50ms streaming responses
@@ -257,7 +255,7 @@ aws ec2 describe-subnets \
 
 ### Gemini Agent Fails
 - If AGENT_PROVIDER=gemini: Hard failure, SMS not sent
-- If AGENT_PROVIDER=auto: Falls back to... (none, would hard fail)
+- If AGENT_PROVIDER=auto: Falls back to Bedrock (if offline mode uses Gemini as primary)
 
 **Recommendation**: Use `auto` mode with both agents configured, or explicitly choose one.
 
@@ -270,8 +268,8 @@ aws ec2 describe-subnets \
 aws logs tail /aws/lambda/deviceweave-sms-prod --follow
 
 # Look for:
-# "Using agent provider: bedrock" → Bedrock Converse
-# "Using agent provider: gemini" → Gemini Live API
+# "Using agent provider: bedrock" → Bedrock Converse API
+# "Using agent provider: gemini" → Gemini API
 # "Internet probe ... → reachable" → Auto chose Bedrock
 # "Internet probe ... → unreachable" → Auto chose Gemini
 ```
@@ -375,7 +373,7 @@ To add a third agent provider:
 ## References
 
 - [Bedrock Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html)
-- [Google Gemini Live API](https://ai.google.dev/api/rest/google.ai.generativelanguage.v1alpha/rest/google.ai.generativelanguage.v1alpha.generativelanguage/stream-generate-content)
+- [Google Gemini API](https://ai.google.dev/docs)
 - [google-genai SDK](https://github.com/googleapis/python-genai)
 - [Agent Factory Implementation](src/agent_factory.py)
 - [Bedrock Agent Implementation](src/bedrock_agent.py)
