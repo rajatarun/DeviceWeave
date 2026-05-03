@@ -110,16 +110,38 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
      --secret-string '{"api_key": "YOUR_API_KEY"}'
    ```
 
-3. **Deploy with Gemini**
+3. **Configure Network Access to Gemini**
    
-   **Option A: Local SAM deployment**
+   Lambda needs outbound internet access. Choose one:
+   
+   **Option A: Use public subnets (simpler, recommended)**
+   - Lambda placed in public subnet with internet gateway route
+   - Direct outbound access to Gemini API
+   - Set `LambdaPublicSubnetIds` parameter when deploying
+   
+   **Option B: Use private subnets + NAT Gateway**
+   - Lambda in private subnet routes through NAT Gateway
+   - Requires NAT Gateway on public subnet ($0.045/hour)
+   - Leave `LambdaPublicSubnetIds` empty (uses `LambdaSubnetIds`)
+
+4. **Deploy with Gemini**
+   
+   **Option A: Local SAM deployment with public subnets**
+   ```bash
+   sam deploy --parameter-overrides \
+     AgentProvider=gemini \
+     LLMProvider=gemini \
+     "LambdaPublicSubnetIds=subnet-12345678,subnet-87654321"
+   ```
+   
+   Or with private subnets + NAT Gateway:
    ```bash
    sam deploy --parameter-overrides \
      AgentProvider=gemini \
      LLMProvider=gemini
    ```
    
-   **Option B: Update existing stack via CloudFormation**
+   **Option B: Update existing stack via CloudFormation (with public subnets)**
    ```bash
    aws cloudformation update-stack \
      --stack-name deviceweave-prod \
@@ -127,6 +149,7 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
      --parameters \
        ParameterKey=AgentProvider,ParameterValue=gemini \
        ParameterKey=LLMProvider,ParameterValue=gemini \
+       ParameterKey=LambdaPublicSubnetIds,ParameterValue="subnet-12345678,subnet-87654321" \
        ParameterKey=StageName,UsePreviousValue=true \
        ParameterKey=VpcId,UsePreviousValue=true \
        ParameterKey=LambdaSubnetIds,UsePreviousValue=true
@@ -195,6 +218,76 @@ Both agents:
 - Record learning phrases
 - Graph events for behavior tracking
 - Support up to 10 tool-call rounds
+
+## Network Configuration
+
+### Outbound Internet Access
+
+Lambda needs outbound access to Gemini API (HTTPS port 443).
+
+#### Option 1: Public Subnets (Recommended)
+```
+Internet Gateway
+    ↓
+Public Subnet (with IGW route)
+    ↓
+Lambda (LambdaPublicSubnetIds)
+    ↓
+HTTPS → Gemini API (direct)
+```
+
+**Advantages**:
+- Direct path, lower latency
+- No NAT Gateway cost ($0.045/hour = ~$32/month)
+- Simple configuration
+
+**Disadvantages**:
+- Lambda has public IP (though still not directly accessible)
+- More security consideration needed
+
+#### Option 2: Private Subnets + NAT Gateway
+```
+Internet Gateway
+    ↓
+Public Subnet
+    ↓
+NAT Gateway
+    ↓
+Private Subnet (LambdaSubnetIds)
+    ↓
+Lambda
+    ↓
+HTTPS → Gemini API (via NAT)
+```
+
+**Advantages**:
+- Lambda in private subnet (no public IP)
+- Better security posture
+- Works with existing private infrastructure
+
+**Disadvantages**:
+- NAT Gateway cost: ~$32/month
+- Slightly higher latency
+- Requires NAT Gateway setup
+
+### Configuration
+
+**Use public subnets:**
+```bash
+# CloudFormation parameter
+LambdaPublicSubnetIds: subnet-12345,subnet-67890
+
+# All Lambdas placed in public subnets
+# Direct outbound to Gemini API
+```
+
+**Use private subnets (NAT Gateway must exist):**
+```bash
+# Leave LambdaPublicSubnetIds empty (default)
+
+# Lambda uses LambdaSubnetIds (private)
+# Requires NAT Gateway for outbound
+```
 
 ## Error Handling
 
