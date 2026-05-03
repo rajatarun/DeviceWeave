@@ -182,6 +182,15 @@ canonical_phrase requirement:
     user says "run movie mode"
       → canonical_phrase: "run movie mode scene"
 - This phrase is recorded for future intent matching — accuracy matters.
+
+behavior history requirement:
+- Before executing a command on a device, call get_device_history for that
+  device_id if the user's request involves any preference or ambiguity
+  (e.g. "dim it", "the usual brightness", "like always", "movie mode lights").
+- Use the top_actions list to confirm the intended action is typical for this device.
+- Use action_context.typical_at_this_hour to flag unusual timing to the user if
+  relevant (e.g. "you don't usually turn this on at this hour — shall I proceed?").
+- If the device has no history yet, proceed normally without mentioning it.
 """
 
 # ---------------------------------------------------------------------------
@@ -277,6 +286,34 @@ _TOOLS = [
                 },
             },
             "required": ["scene_id", "canonical_phrase"],
+        },
+    },
+    {
+        "name": "get_device_history",
+        "description": (
+            "Return the historical behavior for a device — most frequent actions and, "
+            "when an action is specified, whether it is typical at the current hour. "
+            "Call this before executing a command when the user's request involves a "
+            "preference or ambiguity (e.g. 'dim it', 'the usual', 'like always'). "
+            "Also useful to understand what a device is normally used for."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Exact device ID from list_devices.",
+                },
+                "action": {
+                    "type": "string",
+                    "description": (
+                        "Optional — the action you intend to execute. When provided, "
+                        "the response includes whether this action is typical at the "
+                        "current time of day."
+                    ),
+                },
+            },
+            "required": ["device_id"],
         },
     },
 ]
@@ -474,6 +511,31 @@ def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
     }
 
 
+def _tool_get_device_history(device_id: str, action: str = "") -> Dict[str, Any]:
+    import graph_engine
+    from datetime import datetime, timezone
+
+    top_actions = graph_engine.query_top_actions(device_id, limit=5)
+    result: Dict[str, Any] = {
+        "device_id": device_id,
+        "top_actions": top_actions,
+        "has_history": len(top_actions) > 0,
+    }
+
+    if action:
+        now = datetime.now(timezone.utc)
+        counts = graph_engine.query_behavior_history(device_id, action, now.hour)
+        result["action_context"] = {
+            "action": action,
+            "current_hour": now.hour,
+            "typical_at_this_hour": counts["matching"] > 0,
+            "matching_events": counts["matching"],
+            "total_events": counts["total"],
+        }
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Tool dispatcher
 # ---------------------------------------------------------------------------
@@ -495,6 +557,11 @@ def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
         return _tool_execute_scene(
             scene_id=tool_input["scene_id"],
             canonical_phrase=tool_input.get("canonical_phrase", ""),
+        )
+    if name == "get_device_history":
+        return _tool_get_device_history(
+            device_id=tool_input["device_id"],
+            action=tool_input.get("action", ""),
         )
     return {"error": f"Unknown tool: {name}"}
 
