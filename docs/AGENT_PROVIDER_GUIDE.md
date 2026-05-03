@@ -221,8 +221,6 @@ Both agents:
 
 ## Network Configuration
 
-### Recommended: Public Subnets
-
 Lambda uses public subnets for direct internet access to Gemini API.
 
 **Architecture**:
@@ -233,19 +231,14 @@ Public Subnet
     ↓
 Lambda
     ↓
-HTTPS Port 443 → Gemini API
+HTTPS Port 443 → Gemini API (direct)
 ```
 
 **Benefits**:
 - ✅ Direct path, low latency (<50ms)
-- ✅ No NAT Gateway cost ($0/month)
+- ✅ No additional costs ($0/month)
 - ✅ Simple configuration
-- ✅ Works reliably with Gemini API
-
-**Configuration**:
-```yaml
-LambdaPublicSubnetIds: subnet-12345,subnet-67890
-```
+- ✅ Reliable Gemini API access
 
 **Find your public subnets**:
 ```bash
@@ -255,37 +248,6 @@ aws ec2 describe-subnets \
   --query 'Subnets[].[SubnetId,Tags[?Key==`Name`].Value|[0]]' \
   --output table
 ```
-
-### Alternative: Private Subnets + NAT Gateway
-
-If you prefer Lambda in private subnets, use NAT Gateway.
-
-**Architecture**:
-```
-Internet Gateway (IGW)
-    ↓
-Public Subnet
-    ↓
-NAT Gateway
-    ↓
-Private Subnet
-    ↓
-Lambda
-    ↓
-HTTPS Port 443 → Gemini API
-```
-
-**Configuration**:
-```yaml
-LambdaPublicSubnetIds: ""  # Leave empty
-# Lambda uses LambdaSubnetIds (private)
-# Requires NAT Gateway to exist
-```
-
-**Cost/Latency**:
-- NAT Gateway: ~$32/month + $0.045 per GB processed
-- Latency: Slightly higher than direct (via NAT)
-- Security: Better (Lambda in private subnet)
 
 ## Error Handling
 
