@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_MODEL_ID: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+_MODEL_ID: str = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 _MAX_TOOL_ROUNDS: int = 10
 _RESPONSE_TIMEOUT_SECS: int = int(os.environ.get("GEMINI_TIMEOUT_SECS", "25"))
 _INIT_CACHE_TTL_SECS: int = 3600  # 1 hour

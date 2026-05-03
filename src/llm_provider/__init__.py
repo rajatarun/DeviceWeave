@@ -16,7 +16,7 @@ LLM_PROVIDER env var controls the backend:
 
 Additional env vars:
     LLM_MODEL_ID      Bedrock cross-region inference profile  default: Claude Haiku 4.5
-    GEMINI_MODEL      Gemini model name                       default: gemini-2.5-flash
+    GEMINI_MODEL      Gemini model name                       default: gemini-3-flash-preview
     OLLAMA_BASE_URL   Ollama server URL                       default: http://localhost:11434
     OLLAMA_MODEL      Ollama model name                       default: mistral
 """
