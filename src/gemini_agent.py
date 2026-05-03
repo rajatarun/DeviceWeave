@@ -528,7 +528,7 @@ def _tool_get_device_history(device_id: str, action: str = "") -> Dict[str, Any]
         result["action_context"] = {
             "action": action,
             "current_hour": now.hour,
-            "typical_at_this_hour": counts["matching"] > 0,
+            "typical_at_this_hour": (counts["matching"] > 0) if counts["total"] > 0 else None,
             "matching_events": counts["matching"],
             "total_events": counts["total"],
         }
