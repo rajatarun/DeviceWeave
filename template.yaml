@@ -7,11 +7,6 @@ Globals:
     Runtime: python3.11
     Timeout: 30
     MemorySize: 256
-    VpcConfig:
-      SecurityGroupIds:
-        - !Ref LambdaSecurityGroup
-      SubnetIds: !Ref LambdaSubnetIds
-      Ipv6AllowedForDualStack: true
     Environment:
       Variables:
         LOG_LEVEL: INFO
@@ -67,6 +62,14 @@ Parameters:
       Comma-separated private subnet IDs for Lambda VPC placement.
       From shared stack output LambdaSubnetIds
       (e.g. subnet-01714c0c1b4590e4e,subnet-0a3a13a3a3b5105cd).
+
+  LambdaPublicSubnetIds:
+    Type: CommaDelimitedList
+    Description: >
+      Public subnet IDs for Lambda direct internet access to Gemini API.
+      Lambda is placed in public subnets with direct IGW route.
+      Example: subnet-12345678,subnet-87654321
+    Default: ""
 
   # -----------------------------------------------------------------------
   # LLM Provider Configuration
@@ -234,6 +237,13 @@ Resources:
       Description: >
         DeviceWeave execution engine — intent parsing, scene resolution,
         semantic device matching, behavior scoring, provider execution.
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !If
+          - HasPublicSubnets
+          - !Ref LambdaPublicSubnetIds
+          - !Ref LambdaSubnetIds
       Policies:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
@@ -407,6 +417,13 @@ Resources:
       Description: >
         DeviceWeave ingestion engine — cloud provider discovery (Kasa, SwitchBot,
         Govee, Ring, MyQ, Wyze), registry sync, phrase generation, behavior graph seeding.
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !If
+          - HasPublicSubnets
+          - !Ref LambdaPublicSubnetIds
+          - !Ref LambdaSubnetIds
       Environment:
         Variables:
           KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
@@ -514,6 +531,13 @@ Resources:
       Description: >
         DeviceWeave policy authoring engine — natural language → LLM compiler
         → strict Policy DSL validation → DynamoDB persistence.
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !If
+          - HasPublicSubnets
+          - !Ref LambdaPublicSubnetIds
+          - !Ref LambdaSubnetIds
       Policies:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
@@ -632,7 +656,10 @@ Resources:
       VpcConfig:
         SecurityGroupIds:
           - !Ref LambdaSecurityGroup
-        SubnetIds: !Ref LambdaSubnetIds
+        SubnetIds: !If
+          - HasPublicSubnets
+          - !Ref LambdaPublicSubnetIds
+          - !Ref LambdaSubnetIds
       Policies:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
@@ -859,6 +886,7 @@ Resources:
 Conditions:
   HasObservatoryTable: !Not [!Equals [!Ref ObservatoryMetricsTableName, ""]]
   HasMemgraphSecret: !Not [!Equals [!Ref MemgraphSecretArn, ""]]
+  HasPublicSubnets: !Not [!Equals [!Join ["", !Ref LambdaPublicSubnetIds], ""]]
 
 Outputs:
   ApiBaseUrl:

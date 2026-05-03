@@ -110,16 +110,34 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
      --secret-string '{"api_key": "YOUR_API_KEY"}'
    ```
 
-3. **Deploy with Gemini**
+3. **Configure Network Access to Gemini (Use Public Subnets)**
    
-   **Option A: Local SAM deployment**
+   Lambda needs outbound internet access via public subnets for Gemini API calls.
+   
+   Find your VPC's public subnets:
+   ```bash
+   # List public subnets in your VPC
+   aws ec2 describe-subnets \
+     --filters "Name=vpc-id,Values=vpc-xxxxx" \
+                "Name=map-public-ip-on-launch,Values=true" \
+     --query 'Subnets[].SubnetId' \
+     --output text
+   ```
+   
+   Copy the subnet IDs (you'll need these for deployment in step 4)
+
+4. **Deploy with Gemini (Public Subnets)**
+   
+   **Initial deployment (SAM)**:
    ```bash
    sam deploy --parameter-overrides \
      AgentProvider=gemini \
-     LLMProvider=gemini
+     LLMProvider=gemini \
+     "LambdaPublicSubnetIds=subnet-12345678,subnet-87654321"
    ```
+   Replace `subnet-12345678,subnet-87654321` with your public subnet IDs.
    
-   **Option B: Update existing stack via CloudFormation**
+   **Update existing stack (CloudFormation CLI)**:
    ```bash
    aws cloudformation update-stack \
      --stack-name deviceweave-prod \
@@ -127,16 +145,21 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
      --parameters \
        ParameterKey=AgentProvider,ParameterValue=gemini \
        ParameterKey=LLMProvider,ParameterValue=gemini \
+       ParameterKey=LambdaPublicSubnetIds,ParameterValue="subnet-12345678,subnet-87654321" \
        ParameterKey=StageName,UsePreviousValue=true \
        ParameterKey=VpcId,UsePreviousValue=true \
        ParameterKey=LambdaSubnetIds,UsePreviousValue=true
    ```
    
-   **Option C: AWS Console**
-   - Go to CloudFormation → DeviceWeave stack
-   - Update stack → Next
-   - Set AgentProvider=gemini, LLMProvider=gemini
-   - Review and submit
+   **Update via AWS Console**:
+   1. Go to CloudFormation → DeviceWeave stack
+   2. Click "Update"
+   3. Keep template, click "Next"
+   4. Set parameters:
+      - `AgentProvider`: gemini
+      - `LLMProvider`: gemini
+      - `LambdaPublicSubnetIds`: subnet-12345678,subnet-87654321
+   5. Review and submit
 
 ### For Bedrock Agent (Default)
 
@@ -195,6 +218,36 @@ Both agents:
 - Record learning phrases
 - Graph events for behavior tracking
 - Support up to 10 tool-call rounds
+
+## Network Configuration
+
+Lambda uses public subnets for direct internet access to Gemini API.
+
+**Architecture**:
+```
+Internet Gateway (IGW)
+    ↓
+Public Subnet
+    ↓
+Lambda
+    ↓
+HTTPS Port 443 → Gemini API (direct)
+```
+
+**Benefits**:
+- ✅ Direct path, low latency (<50ms)
+- ✅ No additional costs ($0/month)
+- ✅ Simple configuration
+- ✅ Reliable Gemini API access
+
+**Find your public subnets**:
+```bash
+aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=vpc-xxxxx" \
+            "Name=map-public-ip-on-launch,Values=true" \
+  --query 'Subnets[].[SubnetId,Tags[?Key==`Name`].Value|[0]]' \
+  --output table
+```
 
 ## Error Handling
 
