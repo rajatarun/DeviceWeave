@@ -28,7 +28,6 @@ Globals:
         LLM_PROVIDER: !Ref LLMProvider
         LLM_MODEL_ID: !Ref LLMModelId
         GEMINI_MODEL: !Ref GeminiModelId
-        GEMINI_LIVE_MODEL: !Ref GeminiLiveModelId
         GEMINI_SECRET_NAME: "gemini/api_key"
         AGENT_PROVIDER: !Ref AgentProvider
         OLLAMA_BASE_URL: ""
@@ -103,13 +102,6 @@ Parameters:
       (e.g., gemini-2.5-flash, gemini-2.0-flash).
       Only used when LLMProvider includes Gemini (auto, gemini).
 
-  GeminiLiveModelId:
-    Type: String
-    Default: "gemini-3.1-flash-live-preview"
-    Description: >
-      Gemini Live API model ID for conversational agent sessions.
-      Must support bidiGenerateContent (e.g., gemini-3.1-flash-live-preview).
-
   AgentProvider:
     Type: String
     Default: "auto"
@@ -119,9 +111,9 @@ Parameters:
       - "gemini"
     Description: >
       Conversational agent provider for SMS and chat interactions.
-      - auto: Bedrock if internet reachable, else Gemini Live API
+      - auto: Bedrock if internet reachable, else Gemini
       - bedrock: Always use Bedrock Converse API (requires internet)
-      - gemini: Always use Gemini Live API (requires GEMINI_SECRET_NAME)
+      - gemini: Always use Gemini generate_content API (requires GEMINI_SECRET_NAME)
       Note: Non-agentic LLM calls (llm_resolver, policy authoring) use LLMProvider.
 
   # -----------------------------------------------------------------------
