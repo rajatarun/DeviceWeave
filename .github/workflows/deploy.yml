@@ -127,6 +127,7 @@ jobs:
       # 5b. Discover public subnets in VPC for Gemini API access
       #
       #     Public subnets have map-public-ip-on-launch=true.
+      #     Filter for dual-stack enabled subnets (IPv6 CIDR blocks assigned).
       #     If no public subnets exist, this will be empty (and SAM will use
       #     LambdaSubnetIds instead — Lambda stays in private subnets).
       # ----------------------------------------------------------------
@@ -137,15 +138,15 @@ jobs:
             --filters "Name=vpc-id,Values=${{ steps.vpc.outputs.vpc_id }}" \
                       "Name=map-public-ip-on-launch,Values=true" \
             --region "$AWS_REGION" \
-            --query "Subnets[].SubnetId" \
+            --query "Subnets[?Ipv6CidrBlockAssociationSet[0]].SubnetId" \
             --output text | tr '\t' ',')
 
           echo "public_subnet_ids=$PUBLIC_SUBNETS" >> "$GITHUB_OUTPUT"
 
           if [ -z "$PUBLIC_SUBNETS" ]; then
-            echo "No public subnets found — Lambda will use private subnets (Gemini API access requires explicit config)"
+            echo "No dual-stack public subnets found — Lambda will use private subnets (Gemini API access requires explicit config)"
           else
-            echo "Discovered public subnets: $PUBLIC_SUBNETS"
+            echo "Discovered dual-stack public subnets: $PUBLIC_SUBNETS"
           fi
 
       # ----------------------------------------------------------------
