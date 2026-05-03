@@ -422,6 +422,7 @@ def run_agent(
     import boto3
 
     client = boto3.client("bedrock-runtime", region_name=_REGION)
+    logger.info("Bedrock agent invoked: model=%s history_turns=%d", _MODEL_ID, len(history))
     system_text = _SYSTEM_PROMPT + system_prompt_extra if system_prompt_extra else _SYSTEM_PROMPT
 
     # Append the new user turn

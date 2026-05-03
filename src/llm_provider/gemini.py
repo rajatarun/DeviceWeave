@@ -23,7 +23,7 @@ from llm_provider.base import BaseLLMProvider
 logger = logging.getLogger(__name__)
 
 _GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+_DEFAULT_MODEL = "gemini-3-flash-preview"
 
 _api_key_cache: Optional[str] = None
 
@@ -33,7 +33,18 @@ def _load_api_key(secret_name: str) -> str:
     if _api_key_cache:
         return _api_key_cache
     import boto3
-    resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
+    from botocore.config import Config as BotocoreConfig
+
+    sm_client = boto3.client(
+        "secretsmanager",
+        config=BotocoreConfig(
+            connect_timeout=5,
+            read_timeout=5,
+            retries={"max_attempts": 1},
+            use_dualstack_endpoint=True,
+        ),
+    )
+    resp = sm_client.get_secret_value(SecretId=secret_name)
     _api_key_cache = json.loads(resp["SecretString"])["key"]
     logger.info("Gemini API key loaded from Secrets Manager (%s).", secret_name)
     return _api_key_cache
@@ -74,7 +85,7 @@ class GeminiLLMProvider(BaseLLMProvider):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=25) as resp:
                 payload = json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             body_bytes = exc.read()

@@ -24,8 +24,6 @@ from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
-_AGENT_PROVIDER = os.environ.get("AGENT_PROVIDER", "auto").lower()
-
 
 async def run_agent(
     user_message: str,
@@ -87,17 +85,19 @@ def _select_provider() -> str:
     bedrock: Always Bedrock
     gemini:  Always Gemini
     """
-    if _AGENT_PROVIDER == "auto":
+    provider = os.environ.get("AGENT_PROVIDER", "auto").lower()
+
+    if provider == "auto":
         # Use network probe to decide
         from llm_provider import _is_nat_running
         return "bedrock" if _is_nat_running() else "gemini"
 
-    if _AGENT_PROVIDER == "bedrock":
+    if provider == "bedrock":
         return "bedrock"
 
-    if _AGENT_PROVIDER == "gemini":
+    if provider == "gemini":
         return "gemini"
 
     raise ValueError(
-        f"Unknown AGENT_PROVIDER={_AGENT_PROVIDER!r}. Supported: auto, bedrock, gemini"
+        f"Unknown AGENT_PROVIDER={provider!r}. Supported: auto, bedrock, gemini"
     )

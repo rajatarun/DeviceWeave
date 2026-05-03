@@ -1,11 +1,11 @@
 """
-Conversational IoT agent using Google Gemini Live API.
+Conversational IoT agent using Google Gemini API (generate_content with tool calling).
 
 Design:
-- The agent drives a live conversation: it calls tools (list_devices, list_scenes,
-  execute_device_command, execute_scene) until it reaches end_turn.
-- Uses Google's Gemini Live API for low-latency, streaming responses with
-  native tool/function calling support.
+- Uses standard generate_content API (not Live/streaming) for text conversations.
+- The agent drives an agentic loop: it calls tools until it produces a final text reply.
+- Tool dispatch runs in a thread executor so that asyncio.run() inside sync tool
+  handlers (execution_planner) does not conflict with the running event loop.
 - Policy enforcement lives inside execute_device_command / execute_scene.
 - The caller is responsible for loading and saving session history
   (conversation_store.py). This module is purely functional.
@@ -20,8 +20,140 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_MODEL_ID: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-lite")
+_MODEL_ID: str = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 _MAX_TOOL_ROUNDS: int = 10
+_RESPONSE_TIMEOUT_SECS: int = int(os.environ.get("GEMINI_TIMEOUT_SECS", "25"))
+_INIT_CACHE_TTL_SECS: int = 3600  # 1 hour
+_INIT_CACHE_KEY: str = "__gemini_init__"
+
+# L1 in-memory cache — survives warm Lambda restarts within the same container.
+# _genai_client cannot be serialized; it is always rebuilt from Secrets Manager
+# on a cold start. _resolved_model_id is also backed by DynamoDB (see below).
+_genai_client = None
+_resolved_model_id: Optional[str] = None
+
+
+def _get_genai_client():
+    """Return a cached genai.Client, initialising it on the first call."""
+    global _genai_client
+    if _genai_client is not None:
+        return _genai_client
+
+    try:
+        from google import genai
+        logger.info("Gemini SDK imported successfully")
+    except ImportError:
+        raise RuntimeError(
+            "google-genai SDK not installed. Install with: pip install google-genai"
+        )
+
+    import boto3
+    from botocore.config import Config as BotocoreConfig
+    secret_name = os.environ.get("GEMINI_SECRET_NAME", "gemini/api_key")
+    logger.info("Loading Gemini API key from secret: %s", secret_name)
+    try:
+        sm_client = boto3.client(
+            "secretsmanager",
+            config=BotocoreConfig(
+                connect_timeout=5,
+                read_timeout=5,
+                retries={"max_attempts": 1},
+                use_dualstack_endpoint=True,
+            ),
+        )
+        secret_resp = sm_client.get_secret_value(SecretId=secret_name)
+        api_key = json.loads(secret_resp["SecretString"])["key"]
+        logger.info("Gemini API key loaded successfully")
+    except Exception as exc:
+        logger.exception("Failed to load Gemini API key from %s", secret_name)
+        raise RuntimeError(f"Failed to load Gemini API key from {secret_name}: {exc}")
+
+    _genai_client = genai.Client(api_key=api_key)
+    logger.info("Gemini client initialised and cached")
+    return _genai_client
+
+
+def _load_cached_model_id() -> Optional[str]:
+    """Read the resolved model ID from DynamoDB (L2 cache). Returns None on miss or error."""
+    table_name = os.environ.get("CONVERSATION_TABLE_NAME", "")
+    if not table_name:
+        return None
+    try:
+        import boto3
+        resp = boto3.resource("dynamodb").Table(table_name).get_item(
+            Key={"session_id": _INIT_CACHE_KEY}
+        )
+        item = resp.get("Item")
+        return item.get("model_id") if item else None
+    except Exception:
+        logger.warning("DynamoDB model-ID cache read failed; will resolve from API")
+        return None
+
+
+def _write_cached_model_id(model_id: str) -> None:
+    """Persist the resolved model ID to DynamoDB with a 1-hour TTL."""
+    import time
+    table_name = os.environ.get("CONVERSATION_TABLE_NAME", "")
+    if not table_name:
+        return
+    try:
+        import boto3
+        boto3.resource("dynamodb").Table(table_name).put_item(Item={
+            "session_id": _INIT_CACHE_KEY,
+            "model_id": model_id,
+            "ttl": int(time.time()) + _INIT_CACHE_TTL_SECS,
+        })
+        logger.info("Gemini model ID written to DynamoDB cache (1h TTL): %s", model_id)
+    except Exception:
+        logger.warning("DynamoDB model-ID cache write failed; continuing without caching")
+
+
+def _resolve_model_id(client) -> str:
+    """Return the Gemini model ID to use, with a two-tier cache.
+
+    L1 — module-level global: survives warm Lambda restarts in the same container.
+    L2 — DynamoDB item with 1h TTL: survives cold starts and is shared across
+         all container instances so only one instance pays the models.list() cost.
+    """
+    global _resolved_model_id
+    preferred = _MODEL_ID
+
+    # L1: in-memory (warm start)
+    if _resolved_model_id:
+        logger.info("Gemini model from memory cache: %s", _resolved_model_id)
+        return _resolved_model_id
+
+    # L2: DynamoDB (cold start, cross-container)
+    cached = _load_cached_model_id()
+    if cached:
+        logger.info("Gemini model from DynamoDB cache: %s", cached)
+        _resolved_model_id = cached
+        return _resolved_model_id
+
+    # L3: Discover via Gemini models.list() then populate both cache tiers
+    try:
+        for model in client.models.list():
+            methods = getattr(model, "supported_actions", None) or getattr(
+                model, "supported_generation_methods", []
+            )
+            if "generateContent" in methods:
+                name = getattr(model, "name", "")
+                mid = name.split("/", 1)[1] if name.startswith("models/") else name
+                if mid == preferred:
+                    _resolved_model_id = preferred
+                    _write_cached_model_id(_resolved_model_id)
+                    logger.info("Gemini model verified and cached: %s", _resolved_model_id)
+                    return _resolved_model_id
+        logger.warning(
+            "Model %s not found in generateContent-capable list; using as configured", preferred
+        )
+    except Exception:
+        logger.exception("Failed to list Gemini models; using configured model: %s", preferred)
+
+    _resolved_model_id = preferred
+    _write_cached_model_id(_resolved_model_id)
+    return _resolved_model_id
+
 
 _SYSTEM_PROMPT = """\
 You are DeviceWeave, a friendly and concise IoT home automation assistant.
@@ -50,6 +182,15 @@ canonical_phrase requirement:
     user says "run movie mode"
       → canonical_phrase: "run movie mode scene"
 - This phrase is recorded for future intent matching — accuracy matters.
+
+behavior history requirement:
+- Before executing a command on a device, call get_device_history for that
+  device_id if the user's request involves any preference or ambiguity
+  (e.g. "dim it", "the usual brightness", "like always", "movie mode lights").
+- Use the top_actions list to confirm the intended action is typical for this device.
+- Use action_context.typical_at_this_hour to flag unusual timing to the user if
+  relevant (e.g. "you don't usually turn this on at this hour — shall I proceed?").
+- If the device has no history yet, proceed normally without mentioning it.
 """
 
 # ---------------------------------------------------------------------------
@@ -145,6 +286,34 @@ _TOOLS = [
                 },
             },
             "required": ["scene_id", "canonical_phrase"],
+        },
+    },
+    {
+        "name": "get_device_history",
+        "description": (
+            "Return the historical behavior for a device — most frequent actions and, "
+            "when an action is specified, whether it is typical at the current hour. "
+            "Call this before executing a command when the user's request involves a "
+            "preference or ambiguity (e.g. 'dim it', 'the usual', 'like always'). "
+            "Also useful to understand what a device is normally used for."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Exact device ID from list_devices.",
+                },
+                "action": {
+                    "type": "string",
+                    "description": (
+                        "Optional — the action you intend to execute. When provided, "
+                        "the response includes whether this action is typical at the "
+                        "current time of day."
+                    ),
+                },
+            },
+            "required": ["device_id"],
         },
     },
 ]
@@ -342,6 +511,31 @@ def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
     }
 
 
+def _tool_get_device_history(device_id: str, action: str = "") -> Dict[str, Any]:
+    import graph_engine
+    from datetime import datetime, timezone
+
+    top_actions = graph_engine.query_top_actions(device_id, limit=5)
+    result: Dict[str, Any] = {
+        "device_id": device_id,
+        "top_actions": top_actions,
+        "has_history": len(top_actions) > 0,
+    }
+
+    if action:
+        now = datetime.now(timezone.utc)
+        counts = graph_engine.query_behavior_history(device_id, action, now.hour)
+        result["action_context"] = {
+            "action": action,
+            "current_hour": now.hour,
+            "typical_at_this_hour": (counts["matching"] > 0) if counts["total"] > 0 else None,
+            "matching_events": counts["matching"],
+            "total_events": counts["total"],
+        }
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Tool dispatcher
 # ---------------------------------------------------------------------------
@@ -364,11 +558,16 @@ def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
             scene_id=tool_input["scene_id"],
             canonical_phrase=tool_input.get("canonical_phrase", ""),
         )
+    if name == "get_device_history":
+        return _tool_get_device_history(
+            device_id=tool_input["device_id"],
+            action=tool_input.get("action", ""),
+        )
     return {"error": f"Unknown tool: {name}"}
 
 
 # ---------------------------------------------------------------------------
-# Live API Agentic Loop
+# Agentic Loop
 # ---------------------------------------------------------------------------
 
 async def run_agent(
@@ -377,7 +576,7 @@ async def run_agent(
     system_prompt_extra: str = "",
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
-    Run the Gemini Live API agentic loop.
+    Run the Gemini agentic loop using generate_content with function calling.
 
     Args:
         user_message:        The latest message from the user.
@@ -390,100 +589,93 @@ async def run_agent(
         reply_text      — the agent's final text response.
         updated_history — the full updated message list to persist.
     """
-    try:
-        from google import genai
-    except ImportError:
-        raise RuntimeError(
-            "google-genai SDK not installed. Install with: pip install google-genai"
-        )
-
-    # Load API key from Secrets Manager
-    import boto3
-    import json
-    secret_name = os.environ.get("GEMINI_SECRET_NAME", "gemini/api_key")
-    try:
-        secret_resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
-        api_key = json.loads(secret_resp["SecretString"])["api_key"]
-    except Exception as exc:
-        raise RuntimeError(f"Failed to load Gemini API key from {secret_name}: {exc}")
-
-    client = genai.Client(api_key=api_key)
+    from google import genai  # fast sys.modules lookup after first call
+    client = _get_genai_client()
+    model_id = _resolve_model_id(client)
+    logger.info("Gemini agent invoked: model=%s history_turns=%d", model_id, len(history))
     system_text = _SYSTEM_PROMPT + system_prompt_extra if system_prompt_extra else _SYSTEM_PROMPT
 
-    # Build messages for Gemini
-    messages = list(history) + [
+    # Build message list: history + current user turn
+    messages: List[Any] = list(history) + [
         {"role": "user", "parts": [{"text": user_message}]}
     ]
 
-    # Configure Live API session with tool definitions
-    config = genai.types.LiveConnectConfig(
-        generation_config=genai.types.GenerationConfig(
-            temperature=0.2,
-            max_output_tokens=1024,
-        ),
+    config = genai.types.GenerateContentConfig(
         system_instruction=system_text,
-        tools=[_TOOLS],
+        tools=[genai.types.Tool(function_declarations=_TOOLS)],
+        temperature=0.2,
+        max_output_tokens=1024,
     )
 
+    tool_round = 0
+    final_response = ""
+    loop = asyncio.get_event_loop()
+
     try:
-        # Connect to Live API and run agentic loop
-        async with client.aio.live.connect(model=_MODEL_ID, config=config) as session:
-            # Send initial user message
-            await session.send(user_message)
+        async with asyncio.timeout(_RESPONSE_TIMEOUT_SECS):
+            while True:
+                logger.info(
+                    "Calling Gemini generate_content: model=%s tool_round=%d", model_id, tool_round
+                )
+                response = await client.aio.models.generate_content(
+                    model=model_id,
+                    contents=messages,
+                    config=config,
+                )
 
-            final_response = ""
-            tool_round = 0
+                # Check for function calls in the response
+                function_calls = getattr(response, "function_calls", None) or []
 
-            async for server_message in session.response_stream:
-                # Handle tool calls
-                if server_message.tool_calls:
-                    for tool_call in server_message.tool_calls:
-                        tool_name = tool_call.function_name
-                        tool_input = tool_call.args
+                if not function_calls:
+                    # No tool calls — this is the final text response
+                    final_response = response.text or ""
+                    messages.append({"role": "model", "parts": [{"text": final_response}]})
+                    logger.info(
+                        "Gemini final response: %d chars tool_rounds=%d",
+                        len(final_response),
+                        tool_round,
+                    )
+                    break
 
-                        logger.info("Agent calling tool: %s(%s)", tool_name, json.dumps(tool_input))
-                        result = _dispatch_tool(tool_name, tool_input)
-                        logger.info("Tool %s result: %s", tool_name, json.dumps(result, default=str))
+                # Append the model's function-call turn to the message history so the
+                # next generate_content call has the full context.
+                messages.append(response.candidates[0].content)
 
-                        # Send tool result back to the model
-                        await session.send(
-                            genai.types.Content(
-                                role="user",
-                                parts=[
-                                    genai.types.Part(
-                                        function_response=genai.types.FunctionResponse(
-                                            name=tool_name,
-                                            response=result,
-                                        )
-                                    )
-                                ],
+                # Execute each tool call in a thread executor so that asyncio.run()
+                # inside the sync tool handlers doesn't conflict with this event loop.
+                tool_response_parts = []
+                for fc in function_calls:
+                    tool_name = fc.name
+                    tool_args = dict(fc.args) if fc.args else {}
+                    logger.info("Agent calling tool: %s(%s)", tool_name, json.dumps(tool_args))
+                    result = await loop.run_in_executor(
+                        None, _dispatch_tool, tool_name, tool_args
+                    )
+                    logger.info("Tool %s result: %s", tool_name, json.dumps(result, default=str))
+                    tool_response_parts.append(
+                        genai.types.Part(
+                            function_response=genai.types.FunctionResponse(
+                                name=tool_name,
+                                response=result,
                             )
                         )
+                    )
 
-                        tool_round += 1
-                        if tool_round >= _MAX_TOOL_ROUNDS:
-                            logger.error(
-                                "Agent exceeded %d tool rounds — aborting", _MAX_TOOL_ROUNDS
-                            )
-                            return "I was unable to complete the request within the allowed steps.", messages
+                messages.append(genai.types.Content(role="user", parts=tool_response_parts))
 
-                # Handle text responses
-                if hasattr(server_message, "text") and server_message.text:
-                    final_response = server_message.text
+                tool_round += 1
+                if tool_round >= _MAX_TOOL_ROUNDS:
+                    logger.error("Agent exceeded %d tool rounds — aborting", _MAX_TOOL_ROUNDS)
+                    return "I was unable to complete the request within the allowed steps.", messages
 
-            # Update message history with final response
-            messages.append(
-                {"role": "model", "parts": [{"text": final_response}]}
-            )
-
-            logger.info(
-                "Agent finished: rounds=%d session_messages=%d",
-                tool_round + 1,
-                len(messages),
-            )
-
-            return final_response or "(no response)", messages
-
+    except TimeoutError:
+        logger.error("Gemini API timed out after %ds", _RESPONSE_TIMEOUT_SECS)
+        raise RuntimeError(f"Gemini API timed out after {_RESPONSE_TIMEOUT_SECS}s")
     except Exception as exc:
-        logger.exception("Gemini Live API error")
-        raise RuntimeError(f"Gemini Live API failed: {exc}") from exc
+        logger.exception("Gemini API error")
+        raise RuntimeError(f"Gemini API failed: {exc}") from exc
+
+    logger.info(
+        "Agent finished: tool_rounds=%d session_messages=%d", tool_round, len(messages)
+    )
+    return final_response or "(no response)", messages

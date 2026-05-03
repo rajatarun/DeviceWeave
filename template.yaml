@@ -99,9 +99,10 @@ Parameters:
 
   GeminiModelId:
     Type: String
-    Default: "gemini-2.0-flash"
+    Default: "gemini-3-flash-preview"
     Description: >
-      Gemini model ID (e.g., gemini-2.0-flash, gemini-1.5-pro).
+      Gemini model ID for non-live generateContent calls
+      (e.g., gemini-3-flash-preview, gemini-2.5-flash).
       Only used when LLMProvider includes Gemini (auto, gemini).
 
   AgentProvider:
@@ -113,9 +114,9 @@ Parameters:
       - "gemini"
     Description: >
       Conversational agent provider for SMS and chat interactions.
-      - auto: Bedrock if internet reachable, else Gemini Live API
+      - auto: Bedrock if internet reachable, else Gemini
       - bedrock: Always use Bedrock Converse API (requires internet)
-      - gemini: Always use Gemini Live API (requires GEMINI_SECRET_NAME)
+      - gemini: Always use Gemini generate_content API (requires GEMINI_SECRET_NAME)
       Note: Non-agentic LLM calls (llm_resolver, policy authoring) use LLMProvider.
 
   # -----------------------------------------------------------------------
@@ -231,6 +232,8 @@ Resources:
       FunctionName: !Sub "deviceweave-handler-${StageName}"
       CodeUri: src/
       Handler: app.handler
+      Timeout: 120
+      MemorySize: 1024
       Description: >
         DeviceWeave execution engine — intent parsing, scene resolution,
         semantic device matching, behavior scoring, provider execution.
@@ -622,10 +625,11 @@ Resources:
       FunctionName: !Sub "deviceweave-sms-${StageName}"
       CodeUri: src/
       Handler: sms_handler.handler
-      Timeout: 60
+      Timeout: 120
+      MemorySize: 1024
       Description: >
         DeviceWeave SMS handler — receives End User Messaging inbound SMS via
-        SNS, runs the Bedrock conversational agent, replies via
+        SNS, runs the conversational agent, replies via
         pinpoint-sms-voice-v2 send_text_message. Phone number is used as
         session_id for persistent per-user conversation.
       Environment:
