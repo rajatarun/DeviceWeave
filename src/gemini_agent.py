@@ -1,54 +1,41 @@
 """
-Conversational IoT agent using Google Gemini API (generate_content with tool calling).
+Conversational IoT agent using Google ADK (Agent Development Kit).
 
-Design:
-- Uses standard generate_content API (not Live/streaming) for text conversations.
-- The agent drives an agentic loop: it calls tools until it produces a final text reply.
-- Tool dispatch runs in a thread executor so that asyncio.run() inside sync tool
-  handlers (execution_planner) does not conflict with the running event loop.
-- Policy enforcement lives inside execute_device_command / execute_scene.
-- The caller is responsible for loading and saving session history
-  (conversation_store.py). This module is purely functional.
-- Maximum 10 tool-call rounds per invocation to prevent runaway loops.
+Refactored from direct google-genai generate_content calls to ADK:
+- Tools are plain Python functions; ADK auto-generates Gemini function declarations
+  from each function's signature and Google-style docstring.
+- Agent created with google.adk.agents.Agent — no manual JSON tool defs needed.
+- Agentic loop (tool calls, responses, retries) managed by google.adk.runners.InMemoryRunner.
+- Session seeded from caller-provided history on each invocation and discarded after;
+  DynamoDB persistence is handled by the caller (conversation_store.py).
+- Async tools (execute_device_command, execute_scene) use `await` directly instead of
+  asyncio.run() inside a thread-pool, since ADK awaits async tools in-place.
 """
 
 import asyncio
 import json
 import logging
 import os
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_MODEL_ID: str = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
-_MAX_TOOL_ROUNDS: int = 10
+_MODEL_ID: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 _RESPONSE_TIMEOUT_SECS: int = int(os.environ.get("GEMINI_TIMEOUT_SECS", "25"))
-_INIT_CACHE_TTL_SECS: int = 3600  # 1 hour
-_INIT_CACHE_KEY: str = "__gemini_init__"
 
-# L1 in-memory cache — survives warm Lambda restarts within the same container.
-# _genai_client cannot be serialized; it is always rebuilt from Secrets Manager
-# on a cold start. _resolved_model_id is also backed by DynamoDB (see below).
-_genai_client = None
-_resolved_model_id: Optional[str] = None
+_APP_NAME = "deviceweave"
+_USER_ID = "default"
+
+# Module-level ADK runner — survives Lambda warm restarts.
+_runner = None
 
 
-def _get_genai_client():
-    """Return a cached genai.Client, initialising it on the first call."""
-    global _genai_client
-    if _genai_client is not None:
-        return _genai_client
-
-    try:
-        from google import genai
-        logger.info("Gemini SDK imported successfully")
-    except ImportError:
-        raise RuntimeError(
-            "google-genai SDK not installed. Install with: pip install google-genai"
-        )
-
+def _load_api_key() -> str:
+    """Load Gemini API key from AWS Secrets Manager."""
     import boto3
     from botocore.config import Config as BotocoreConfig
+
     secret_name = os.environ.get("GEMINI_SECRET_NAME", "gemini/api_key")
     logger.info("Loading Gemini API key from secret: %s", secret_name)
     try:
@@ -64,104 +51,10 @@ def _get_genai_client():
         secret_resp = sm_client.get_secret_value(SecretId=secret_name)
         api_key = json.loads(secret_resp["SecretString"])["key"]
         logger.info("Gemini API key loaded successfully")
+        return api_key
     except Exception as exc:
         logger.exception("Failed to load Gemini API key from %s", secret_name)
         raise RuntimeError(f"Failed to load Gemini API key from {secret_name}: {exc}")
-
-    _genai_client = genai.Client(api_key=api_key)
-    logger.info("Gemini client initialised and cached")
-    return _genai_client
-
-
-def _load_cached_model_id() -> Optional[str]:
-    """Read the resolved model ID from DynamoDB (L2 cache). Returns None on miss or error."""
-    table_name = os.environ.get("CONVERSATION_TABLE_NAME", "")
-    if not table_name:
-        return None
-    try:
-        import boto3
-        resp = boto3.resource("dynamodb").Table(table_name).get_item(
-            Key={"session_id": _INIT_CACHE_KEY}
-        )
-        item = resp.get("Item")
-        return item.get("model_id") if item else None
-    except Exception:
-        logger.warning("DynamoDB model-ID cache read failed; will resolve from API")
-        return None
-
-
-def _write_cached_model_id(model_id: str) -> None:
-    """Persist the resolved model ID to DynamoDB with a 1-hour TTL."""
-    import time
-    table_name = os.environ.get("CONVERSATION_TABLE_NAME", "")
-    if not table_name:
-        return
-    try:
-        import boto3
-        boto3.resource("dynamodb").Table(table_name).put_item(Item={
-            "session_id": _INIT_CACHE_KEY,
-            "model_id": model_id,
-            "ttl": int(time.time()) + _INIT_CACHE_TTL_SECS,
-        })
-        logger.info("Gemini model ID written to DynamoDB cache (1h TTL): %s", model_id)
-    except Exception:
-        logger.warning("DynamoDB model-ID cache write failed; continuing without caching")
-
-
-def _resolve_model_id(client) -> str:
-    """Return the Gemini model ID to use, with a two-tier cache.
-
-    L1 — module-level global: survives warm Lambda restarts in the same container.
-    L2 — DynamoDB item with 1h TTL: survives cold starts and is shared across
-         all container instances so only one instance pays the models.list() cost.
-
-    Always validates the environment variable against the cache to detect config changes.
-    """
-    global _resolved_model_id
-    preferred = _MODEL_ID
-
-    # L1: in-memory (warm start) — but verify it matches current env var
-    if _resolved_model_id:
-        if _resolved_model_id == preferred:
-            logger.info("Gemini model from memory cache: %s", _resolved_model_id)
-            return _resolved_model_id
-        else:
-            logger.info("Model changed in env (was %s, now %s)", _resolved_model_id, preferred)
-            _resolved_model_id = None
-
-    # L2: DynamoDB (cold start, cross-container) — but verify it matches current env var
-    cached = _load_cached_model_id()
-    if cached and cached == preferred:
-        logger.info("Gemini model from DynamoDB cache: %s", cached)
-        _resolved_model_id = cached
-        return _resolved_model_id
-    elif cached and cached != preferred:
-        logger.info("Cached model %s differs from env var %s; using env var", cached, preferred)
-        _write_cached_model_id(preferred)
-
-    # L3: Discover via Gemini models.list() then populate both cache tiers
-    try:
-        for model in client.models.list():
-            methods = getattr(model, "supported_actions", None) or getattr(
-                model, "supported_generation_methods", []
-            )
-            if "generateContent" in methods:
-                name = getattr(model, "name", "")
-                mid = name.split("/", 1)[1] if name.startswith("models/") else name
-                if mid == preferred:
-                    _resolved_model_id = preferred
-                    _write_cached_model_id(_resolved_model_id)
-                    logger.info("Gemini model verified and cached: %s", _resolved_model_id)
-                    return _resolved_model_id
-        logger.warning(
-            "Model %s not found in generateContent-capable list; using as configured", preferred
-        )
-    except Exception:
-        logger.exception("Failed to list Gemini models; using configured model: %s", preferred)
-
-    _resolved_model_id = preferred
-    _write_cached_model_id(_resolved_model_id)
-    return _resolved_model_id
 
 
 _SYSTEM_PROMPT = """\
@@ -202,138 +95,24 @@ behavior history requirement:
 - If the device has no history yet, proceed normally without mentioning it.
 """
 
-# ---------------------------------------------------------------------------
-# Tool definitions (Gemini Function Calling format)
-# ---------------------------------------------------------------------------
-
-_TOOLS = [
-    {
-        "name": "list_devices",
-        "description": (
-            "Return all registered IoT devices with their id, name, device_type, "
-            "and available capabilities (actions). Call this first when you need "
-            "to find the correct device_id for a user command."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "name": "list_scenes",
-        "description": (
-            "Return all active scenes with their id, name, and a description of "
-            "what devices they control. Use this when the user mentions a scene."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "name": "execute_device_command",
-        "description": (
-            "Execute an action on a specific device. Policy enforcement is applied "
-            "before any device I/O — a blocked command will return an error. "
-            "Always resolve the device_id via list_devices first if uncertain."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "device_id": {
-                    "type": "string",
-                    "description": "Exact device ID from list_devices.",
-                },
-                "action": {
-                    "type": "string",
-                    "description": (
-                        "Action to perform — must be in the device's capabilities list "
-                        "(e.g. 'on', 'off', 'set_brightness', 'toggle')."
-                    ),
-                },
-                "params": {
-                    "type": "object",
-                    "description": (
-                        "Optional action parameters, e.g. {\"brightness\": 75} for "
-                        "set_brightness. Omit or pass {} for actions that take no params."
-                    ),
-                },
-                "canonical_phrase": {
-                    "type": "string",
-                    "description": (
-                        "REQUIRED. A short, self-contained phrase that fully describes "
-                        "the resolved intent using conversation context — no pronouns "
-                        "or relative references. Example: 'turn on kitchen island light'."
-                    ),
-                },
-            },
-            "required": ["device_id", "action", "canonical_phrase"],
-        },
-    },
-    {
-        "name": "execute_scene",
-        "description": (
-            "Execute a registered scene by its ID. Scenes trigger multiple device "
-            "actions simultaneously. Policy enforcement applies to each step."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "scene_id": {
-                    "type": "string",
-                    "description": "Exact scene ID from list_scenes.",
-                },
-                "canonical_phrase": {
-                    "type": "string",
-                    "description": (
-                        "REQUIRED. A short, self-contained phrase that fully describes "
-                        "the resolved intent using conversation context — no pronouns "
-                        "or relative references. Example: 'run movie mode scene'."
-                    ),
-                },
-            },
-            "required": ["scene_id", "canonical_phrase"],
-        },
-    },
-    {
-        "name": "get_device_history",
-        "description": (
-            "Return the historical behavior for a device — most frequent actions and, "
-            "when an action is specified, whether it is typical at the current hour. "
-            "Call this before executing a command when the user's request involves a "
-            "preference or ambiguity (e.g. 'dim it', 'the usual', 'like always'). "
-            "Also useful to understand what a device is normally used for."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "device_id": {
-                    "type": "string",
-                    "description": "Exact device ID from list_devices.",
-                },
-                "action": {
-                    "type": "string",
-                    "description": (
-                        "Optional — the action you intend to execute. When provided, "
-                        "the response includes whether this action is typical at the "
-                        "current time of day."
-                    ),
-                },
-            },
-            "required": ["device_id"],
-        },
-    },
-]
-
 
 # ---------------------------------------------------------------------------
-# Tool implementations (same as bedrock_agent.py)
+# Tools — plain Python functions with Google-style docstrings.
+# ADK generates Gemini function declarations from signature + docstring automatically;
+# no separate JSON tool definitions or dispatcher needed.
 # ---------------------------------------------------------------------------
 
-def _tool_list_devices() -> Dict[str, Any]:
+
+def list_devices() -> Dict[str, Any]:
+    """Return all registered IoT devices with their id, name, device_type, and available capabilities.
+
+    Call this first when you need to find the correct device_id for a user command.
+
+    Returns:
+        A dict with 'devices' (list of device objects) and 'count'.
+    """
     from device_resolver import _get_active_catalog, DeviceRegistryError
+
     try:
         catalog = _get_active_catalog()
         devices = [
@@ -350,8 +129,16 @@ def _tool_list_devices() -> Dict[str, Any]:
         return {"error": str(exc)}
 
 
-def _tool_list_scenes() -> Dict[str, Any]:
+def list_scenes() -> Dict[str, Any]:
+    """Return all active scenes with their id, name, and description.
+
+    Use this when the user mentions a scene by name.
+
+    Returns:
+        A dict with 'scenes' (list of scene objects) and 'count'.
+    """
     from scene_catalog import get_active_scenes
+
     scenes = get_active_scenes()
     return {
         "scenes": [
@@ -366,12 +153,30 @@ def _tool_list_scenes() -> Dict[str, Any]:
     }
 
 
-def _tool_execute_device_command(
+async def execute_device_command(
     device_id: str,
     action: str,
     canonical_phrase: str,
     params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Execute an action on a specific device.
+
+    Policy enforcement is applied before any device I/O. A blocked command returns an error.
+    Always resolve the device_id via list_devices first if uncertain.
+
+    Args:
+        device_id: Exact device ID from list_devices.
+        action: Action to perform — must be in the device's capabilities list
+            (e.g. 'on', 'off', 'set_brightness', 'toggle').
+        canonical_phrase: REQUIRED. A short, self-contained phrase that fully describes
+            the resolved intent using conversation context — no pronouns or relative
+            references. Example: 'turn on kitchen island light'.
+        params: Optional action parameters, e.g. {"brightness": 75} for set_brightness.
+            Omit or pass {} for actions that take no params.
+
+    Returns:
+        A dict with success/error status and execution details.
+    """
     from device_resolver import _get_active_catalog, DeviceRegistryError
     from execution_planner import plan_device_execution, execute_steps
     from policy_engine.middleware import enforce as policy_enforce
@@ -400,7 +205,6 @@ def _tool_execute_device_command(
     if action == "set_brightness" and "brightness" not in params:
         return {"error": "set_brightness requires a 'brightness' param (0-100)."}
 
-    # Policy enforcement
     try:
         policy_ctx = get_policy_context()
         decision = policy_enforce(device["device_type"], action, params, context=policy_ctx)
@@ -419,7 +223,7 @@ def _tool_execute_device_command(
 
     steps = plan_device_execution(device, action, params)
     try:
-        results = asyncio.run(execute_steps(steps))
+        results = await execute_steps(steps)
     except Exception as exc:
         logger.exception("Agent device execution error")
         return {"error": f"Execution error: {exc}"}
@@ -428,7 +232,6 @@ def _tool_execute_device_command(
     if not result.success:
         return {"error": result.error, "device_id": device_id}
 
-    # Record behavior and learn the context-resolved canonical phrase.
     if canonical_phrase:
         if is_configured():
             save_learned_phrase(device_id, canonical_phrase, LEARNING_THRESHOLD)
@@ -445,7 +248,20 @@ def _tool_execute_device_command(
     }
 
 
-def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
+async def execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
+    """Execute a registered scene by its ID.
+
+    Scenes trigger multiple device actions simultaneously. Policy enforcement applies to each step.
+
+    Args:
+        scene_id: Exact scene ID from list_scenes.
+        canonical_phrase: REQUIRED. A short, self-contained phrase that fully describes
+            the resolved intent using conversation context — no pronouns or relative
+            references. Example: 'run movie mode scene'.
+
+    Returns:
+        A dict with success/error status and counts of succeeded/failed/blocked steps.
+    """
     from scene_catalog import get_active_scenes
     from device_resolver import _get_active_catalog, DeviceRegistryError
     from execution_planner import plan_scene_execution, execute_steps
@@ -483,7 +299,7 @@ def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
         }
 
     try:
-        results = asyncio.run(execute_steps(allowed_steps))
+        results = await execute_steps(allowed_steps)
     except Exception as exc:
         logger.exception("Agent scene execution error")
         return {"error": f"Scene execution error: {exc}"}
@@ -491,14 +307,15 @@ def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
     successes = [r for r in results if r.success]
     failures = [r for r in results if not r.success]
 
-    # Learn the canonical phrase for each successfully executed device in the scene.
     if canonical_phrase and successes:
         for r in successes:
             if is_configured():
                 save_learned_phrase(r.device_id, canonical_phrase, LEARNING_THRESHOLD)
             graph_engine.record_event(r.device_id, r.action, canonical_phrase)
-        logger.info("Learned scene phrase for %s (%d devices): %r",
-                    scene_id, len(successes), canonical_phrase)
+        logger.info(
+            "Learned scene phrase for %s (%d devices): %r",
+            scene_id, len(successes), canonical_phrase,
+        )
 
     return {
         "success": True,
@@ -520,7 +337,21 @@ def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
     }
 
 
-def _tool_get_device_history(device_id: str, action: str = "") -> Dict[str, Any]:
+def get_device_history(device_id: str, action: str = "") -> Dict[str, Any]:
+    """Return historical behavior for a device.
+
+    Returns most frequent actions and, when an action is specified, whether it is typical
+    at the current hour. Call this before executing when the user's request involves a
+    preference or ambiguity (e.g. 'dim it', 'the usual', 'like always').
+
+    Args:
+        device_id: Exact device ID from list_devices.
+        action: Optional — the action you intend to execute. When provided, the response
+            includes whether this action is typical at the current time of day.
+
+    Returns:
+        A dict with device_id, top_actions list, has_history flag, and optional action_context.
+    """
     import graph_engine
     from datetime import datetime, timezone
 
@@ -546,38 +377,55 @@ def _tool_get_device_history(device_id: str, action: str = "") -> Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
-# Tool dispatcher
+# ADK Runner (module-level, cached for Lambda warm restarts)
 # ---------------------------------------------------------------------------
 
-def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
-    """Call the right tool implementation and return a JSON-serializable result."""
-    if name == "list_devices":
-        return _tool_list_devices()
-    if name == "list_scenes":
-        return _tool_list_scenes()
-    if name == "execute_device_command":
-        return _tool_execute_device_command(
-            device_id=tool_input["device_id"],
-            action=tool_input["action"],
-            canonical_phrase=tool_input.get("canonical_phrase", ""),
-            params=tool_input.get("params"),
+
+def _get_runner():
+    """Return the cached ADK InMemoryRunner, initializing on first call."""
+    global _runner
+    if _runner is not None:
+        return _runner
+
+    try:
+        from google.adk.agents import Agent
+        from google.adk.runners import InMemoryRunner
+        from google.genai import types as genai_types
+    except ImportError:
+        raise RuntimeError(
+            "google-adk not installed. Install with: pip install google-adk"
         )
-    if name == "execute_scene":
-        return _tool_execute_scene(
-            scene_id=tool_input["scene_id"],
-            canonical_phrase=tool_input.get("canonical_phrase", ""),
-        )
-    if name == "get_device_history":
-        return _tool_get_device_history(
-            device_id=tool_input["device_id"],
-            action=tool_input.get("action", ""),
-        )
-    return {"error": f"Unknown tool: {name}"}
+
+    api_key = _load_api_key()
+    # ADK picks up the API key from GOOGLE_API_KEY at agent-creation time.
+    os.environ["GOOGLE_API_KEY"] = api_key
+
+    agent = Agent(
+        name="deviceweave",
+        model=_MODEL_ID,
+        instruction=_SYSTEM_PROMPT,
+        tools=[
+            list_devices,
+            list_scenes,
+            execute_device_command,
+            execute_scene,
+            get_device_history,
+        ],
+        generate_content_config=genai_types.GenerateContentConfig(
+            temperature=0.2,
+            max_output_tokens=1024,
+        ),
+    )
+
+    _runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
+    logger.info("ADK Runner initialized: model=%s", _MODEL_ID)
+    return _runner
 
 
 # ---------------------------------------------------------------------------
-# Agentic Loop
+# Agentic entrypoint
 # ---------------------------------------------------------------------------
+
 
 async def run_agent(
     user_message: str,
@@ -585,106 +433,98 @@ async def run_agent(
     system_prompt_extra: str = "",
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
-    Run the Gemini agentic loop using generate_content with function calling.
+    Run the Gemini agentic loop using ADK.
 
     Args:
         user_message:        The latest message from the user.
-        history:             Prior messages for the session (may be []).
+        history:             Prior text turns for the session (may be []).
                              Format: [{"role": "user"|"model", "parts": [{"text": ...}]}, ...]
-        system_prompt_extra: Optional suffix appended to the system prompt.
+        system_prompt_extra: Ignored — instruction is fixed at Agent creation time in ADK.
 
     Returns:
         (reply_text, updated_history)
         reply_text      — the agent's final text response.
-        updated_history — the full updated message list to persist.
+        updated_history — prior text turns plus the new user/model exchange.
     """
-    from google import genai  # fast sys.modules lookup after first call
-    client = _get_genai_client()
-    model_id = _resolve_model_id(client)
-    logger.info("Gemini agent invoked: model=%s history_turns=%d", model_id, len(history))
-    system_text = _SYSTEM_PROMPT + system_prompt_extra if system_prompt_extra else _SYSTEM_PROMPT
+    from google.adk.events import Event
+    from google.genai import types as genai_types
 
-    # Build message list: history + current user turn
-    messages: List[Any] = list(history) + [
-        {"role": "user", "parts": [{"text": user_message}]}
-    ]
+    if system_prompt_extra:
+        logger.warning("system_prompt_extra is not supported in ADK mode; ignoring")
 
-    config = genai.types.GenerateContentConfig(
-        system_instruction=system_text,
-        tools=[genai.types.Tool(function_declarations=_TOOLS)],
-        temperature=0.2,
-        max_output_tokens=1024,
+    runner = _get_runner()
+    session_id = str(uuid.uuid4())
+    session_service = runner.session_service
+
+    logger.info("ADK agent invoked: model=%s history_turns=%d", _MODEL_ID, len(history))
+
+    # Create an ephemeral session for this invocation.
+    session = await session_service.create_session(
+        app_name=_APP_NAME,
+        user_id=_USER_ID,
+        session_id=session_id,
     )
 
-    tool_round = 0
-    final_response = ""
-    loop = asyncio.get_event_loop()
+    # Seed the session with prior text turns from the persistent history.
+    # Non-text parts (serialized tool call/response artifacts) are silently skipped.
+    for i, turn in enumerate(history):
+        role = turn.get("role", "user")
+        parts = [
+            genai_types.Part(text=p["text"])
+            for p in turn.get("parts", [])
+            if isinstance(p, dict) and p.get("text")
+        ]
+        if not parts:
+            continue
+        author = _USER_ID if role == "user" else "deviceweave"
+        await session_service.append_event(
+            session=session,
+            event=Event(
+                author=author,
+                invocation_id=f"history-{i}",
+                content=genai_types.Content(role=role, parts=parts),
+            ),
+        )
 
+    new_message = genai_types.Content(
+        role="user",
+        parts=[genai_types.Part(text=user_message)],
+    )
+
+    final_response = ""
     try:
         async with asyncio.timeout(_RESPONSE_TIMEOUT_SECS):
-            while True:
-                logger.info(
-                    "Calling Gemini generate_content: model=%s tool_round=%d", model_id, tool_round
-                )
-                response = await client.aio.models.generate_content(
-                    model=model_id,
-                    contents=messages,
-                    config=config,
-                )
-
-                # Check for function calls in the response
-                function_calls = getattr(response, "function_calls", None) or []
-
-                if not function_calls:
-                    # No tool calls — this is the final text response
-                    final_response = response.text or ""
-                    messages.append({"role": "model", "parts": [{"text": final_response}]})
-                    logger.info(
-                        "Gemini final response: %d chars tool_rounds=%d",
-                        len(final_response),
-                        tool_round,
+            async for event in runner.run_async(
+                user_id=_USER_ID,
+                session_id=session_id,
+                new_message=new_message,
+            ):
+                if event.is_final_response() and event.content and event.content.parts:
+                    text = "".join(
+                        p.text for p in event.content.parts
+                        if hasattr(p, "text") and p.text
                     )
-                    break
-
-                # Append the model's function-call turn to the message history so the
-                # next generate_content call has the full context.
-                messages.append(response.candidates[0].content)
-
-                # Execute each tool call in a thread executor so that asyncio.run()
-                # inside the sync tool handlers doesn't conflict with this event loop.
-                tool_response_parts = []
-                for fc in function_calls:
-                    tool_name = fc.name
-                    tool_args = dict(fc.args) if fc.args else {}
-                    logger.info("Agent calling tool: %s(%s)", tool_name, json.dumps(tool_args))
-                    result = await loop.run_in_executor(
-                        None, _dispatch_tool, tool_name, tool_args
-                    )
-                    logger.info("Tool %s result: %s", tool_name, json.dumps(result, default=str))
-                    tool_response_parts.append(
-                        genai.types.Part(
-                            function_response=genai.types.FunctionResponse(
-                                name=tool_name,
-                                response=result,
-                            )
-                        )
-                    )
-
-                messages.append(genai.types.Content(role="user", parts=tool_response_parts))
-
-                tool_round += 1
-                if tool_round >= _MAX_TOOL_ROUNDS:
-                    logger.error("Agent exceeded %d tool rounds — aborting", _MAX_TOOL_ROUNDS)
-                    return "I was unable to complete the request within the allowed steps.", messages
-
+                    if text:
+                        final_response = text
     except TimeoutError:
-        logger.error("Gemini API timed out after %ds", _RESPONSE_TIMEOUT_SECS)
+        logger.error("ADK agent timed out after %ds", _RESPONSE_TIMEOUT_SECS)
         raise RuntimeError(f"Gemini API timed out after {_RESPONSE_TIMEOUT_SECS}s")
     except Exception as exc:
-        logger.exception("Gemini API error")
+        logger.exception("ADK agent error")
         raise RuntimeError(f"Gemini API failed: {exc}") from exc
 
+    # Build updated history: carry forward only text turns, then append current exchange.
+    text_history = [
+        t for t in history
+        if t.get("role") in ("user", "model")
+        and any(isinstance(p, dict) and p.get("text") for p in t.get("parts", []))
+    ]
+    updated_history = text_history + [
+        {"role": "user", "parts": [{"text": user_message}]},
+        {"role": "model", "parts": [{"text": final_response or "(no response)"}]},
+    ]
+
     logger.info(
-        "Agent finished: tool_rounds=%d session_messages=%d", tool_round, len(messages)
+        "ADK agent finished: session=%s history_turns=%d", session_id, len(updated_history)
     )
-    return final_response or "(no response)", messages
+    return final_response or "(no response)", updated_history
