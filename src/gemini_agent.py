@@ -1,38 +1,46 @@
 """
-Conversational IoT agent using Google ADK (Agent Development Kit).
+Conversational IoT agent using Google Gemini API.
 
-Refactored from direct google-genai generate_content calls to ADK:
-- Tools are plain Python functions; ADK auto-generates Gemini function declarations
-  from each function's signature and Google-style docstring.
-- Agent created with google.adk.agents.Agent — no manual JSON tool defs needed.
-- Agentic loop (tool calls, responses, retries) managed by google.adk.runners.InMemoryRunner.
-- Session seeded from caller-provided history on each invocation and discarded after;
-  DynamoDB persistence is handled by the caller (conversation_store.py).
-- Async tools (execute_device_command, execute_scene) use `await` directly instead of
-  asyncio.run() inside a thread-pool, since ADK awaits async tools in-place.
+ADK-style refactoring: tools are plain Python functions with Google-style docstrings;
+the google-genai SDK auto-generates Gemini function declarations from signatures and
+docstrings automatically — no JSON tool definitions or manual dispatcher needed.
+
+Design:
+- Tools are module-level Python callables; async tools are awaited in-place.
+- The agentic loop runs until the model produces a text reply (max 10 rounds).
+- Session history is caller-managed (conversation_store.py); only text turns are
+  carried forward so serialised tool-call artefacts are silently dropped.
 """
 
 import asyncio
 import json
 import logging
 import os
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _MODEL_ID: str = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+_MAX_TOOL_ROUNDS: int = 10
 _RESPONSE_TIMEOUT_SECS: int = int(os.environ.get("GEMINI_TIMEOUT_SECS", "25"))
 
-_APP_NAME = "deviceweave"
-_USER_ID = "default"
-
-# Module-level ADK runner — survives Lambda warm restarts.
-_runner = None
+# Module-level client — survives Lambda warm restarts.
+_genai_client = None
 
 
-def _load_api_key() -> str:
-    """Load Gemini API key from AWS Secrets Manager."""
+def _get_client():
+    """Return the cached genai.Client, initializing on first call."""
+    global _genai_client
+    if _genai_client is not None:
+        return _genai_client
+
+    try:
+        from google import genai
+    except ImportError:
+        raise RuntimeError(
+            "google-genai SDK not installed. Install with: pip install google-genai"
+        )
+
     import boto3
     from botocore.config import Config as BotocoreConfig
 
@@ -51,10 +59,13 @@ def _load_api_key() -> str:
         secret_resp = sm_client.get_secret_value(SecretId=secret_name)
         api_key = json.loads(secret_resp["SecretString"])["key"]
         logger.info("Gemini API key loaded successfully")
-        return api_key
     except Exception as exc:
         logger.exception("Failed to load Gemini API key from %s", secret_name)
         raise RuntimeError(f"Failed to load Gemini API key from {secret_name}: {exc}")
+
+    _genai_client = genai.Client(api_key=api_key)
+    logger.info("Gemini client initialized: model=%s", _MODEL_ID)
+    return _genai_client
 
 
 _SYSTEM_PROMPT = """\
@@ -98,8 +109,8 @@ behavior history requirement:
 
 # ---------------------------------------------------------------------------
 # Tools — plain Python functions with Google-style docstrings.
-# ADK generates Gemini function declarations from signature + docstring automatically;
-# no separate JSON tool definitions or dispatcher needed.
+# google-genai generates Gemini function declarations from each function's
+# signature and docstring automatically; no JSON definitions needed.
 # ---------------------------------------------------------------------------
 
 
@@ -376,50 +387,11 @@ def get_device_history(device_id: str, action: str = "") -> Dict[str, Any]:
     return result
 
 
-# ---------------------------------------------------------------------------
-# ADK Runner (module-level, cached for Lambda warm restarts)
-# ---------------------------------------------------------------------------
-
-
-def _get_runner():
-    """Return the cached ADK InMemoryRunner, initializing on first call."""
-    global _runner
-    if _runner is not None:
-        return _runner
-
-    try:
-        from google.adk.agents import Agent
-        from google.adk.runners import InMemoryRunner
-        from google.genai import types as genai_types
-    except ImportError:
-        raise RuntimeError(
-            "google-adk not installed. Install with: pip install google-adk"
-        )
-
-    api_key = _load_api_key()
-    # ADK picks up the API key from GOOGLE_API_KEY at agent-creation time.
-    os.environ["GOOGLE_API_KEY"] = api_key
-
-    agent = Agent(
-        name="deviceweave",
-        model=_MODEL_ID,
-        instruction=_SYSTEM_PROMPT,
-        tools=[
-            list_devices,
-            list_scenes,
-            execute_device_command,
-            execute_scene,
-            get_device_history,
-        ],
-        generate_content_config=genai_types.GenerateContentConfig(
-            temperature=0.2,
-            max_output_tokens=1024,
-        ),
-    )
-
-    _runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
-    logger.info("ADK Runner initialized: model=%s", _MODEL_ID)
-    return _runner
+# Tool dispatch map — looked up by name when the model requests a function call.
+_TOOL_MAP = {
+    fn.__name__: fn
+    for fn in [list_devices, list_scenes, execute_device_command, execute_scene, get_device_history]
+}
 
 
 # ---------------------------------------------------------------------------
@@ -433,87 +405,113 @@ async def run_agent(
     system_prompt_extra: str = "",
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
-    Run the Gemini agentic loop using ADK.
+    Run the Gemini agentic loop using google-genai with Python function tools.
 
     Args:
         user_message:        The latest message from the user.
         history:             Prior text turns for the session (may be []).
                              Format: [{"role": "user"|"model", "parts": [{"text": ...}]}, ...]
-        system_prompt_extra: Ignored — instruction is fixed at Agent creation time in ADK.
+        system_prompt_extra: Optional suffix appended to the system prompt.
 
     Returns:
         (reply_text, updated_history)
         reply_text      — the agent's final text response.
         updated_history — prior text turns plus the new user/model exchange.
     """
-    from google.adk.events import Event
     from google.genai import types as genai_types
 
-    if system_prompt_extra:
-        logger.warning("system_prompt_extra is not supported in ADK mode; ignoring")
+    client = _get_client()
+    logger.info("Gemini agent invoked: model=%s history_turns=%d", _MODEL_ID, len(history))
 
-    runner = _get_runner()
-    session_id = str(uuid.uuid4())
-    session_service = runner.session_service
+    system_text = _SYSTEM_PROMPT + system_prompt_extra if system_prompt_extra else _SYSTEM_PROMPT
 
-    logger.info("ADK agent invoked: model=%s history_turns=%d", _MODEL_ID, len(history))
+    # Build message list: prior history + current user turn.
+    messages: List[Any] = list(history) + [
+        {"role": "user", "parts": [{"text": user_message}]}
+    ]
 
-    # Create an ephemeral session for this invocation.
-    session = await session_service.create_session(
-        app_name=_APP_NAME,
-        user_id=_USER_ID,
-        session_id=session_id,
+    # Pass Python callables directly; google-genai auto-generates function declarations.
+    config = genai_types.GenerateContentConfig(
+        system_instruction=system_text,
+        tools=list(_TOOL_MAP.values()),
+        temperature=0.2,
+        max_output_tokens=1024,
     )
 
-    # Seed the session with prior text turns from the persistent history.
-    # Non-text parts (serialized tool call/response artifacts) are silently skipped.
-    for i, turn in enumerate(history):
-        role = turn.get("role", "user")
-        parts = [
-            genai_types.Part(text=p["text"])
-            for p in turn.get("parts", [])
-            if isinstance(p, dict) and p.get("text")
-        ]
-        if not parts:
-            continue
-        author = _USER_ID if role == "user" else "deviceweave"
-        await session_service.append_event(
-            session=session,
-            event=Event(
-                author=author,
-                invocation_id=f"history-{i}",
-                content=genai_types.Content(role=role, parts=parts),
-            ),
-        )
-
-    new_message = genai_types.Content(
-        role="user",
-        parts=[genai_types.Part(text=user_message)],
-    )
-
+    tool_round = 0
     final_response = ""
+
     try:
         async with asyncio.timeout(_RESPONSE_TIMEOUT_SECS):
-            async for event in runner.run_async(
-                user_id=_USER_ID,
-                session_id=session_id,
-                new_message=new_message,
-            ):
-                if event.is_final_response() and event.content and event.content.parts:
-                    text = "".join(
-                        p.text for p in event.content.parts
-                        if hasattr(p, "text") and p.text
+            while True:
+                logger.info(
+                    "Calling Gemini generate_content: model=%s tool_round=%d",
+                    _MODEL_ID, tool_round,
+                )
+                response = await client.aio.models.generate_content(
+                    model=_MODEL_ID,
+                    contents=messages,
+                    config=config,
+                )
+
+                function_calls = getattr(response, "function_calls", None) or []
+
+                if not function_calls:
+                    final_response = response.text or ""
+                    logger.info(
+                        "Gemini final response: %d chars tool_rounds=%d",
+                        len(final_response), tool_round,
                     )
-                    if text:
-                        final_response = text
+                    break
+
+                # Append the model's function-call turn so the next generate_content
+                # call has full context.
+                messages.append(response.candidates[0].content)
+
+                # Execute each tool; async tools are awaited directly.
+                tool_parts = []
+                for fc in function_calls:
+                    fn = _TOOL_MAP.get(fc.name)
+                    args = dict(fc.args) if fc.args else {}
+                    logger.info("Agent calling tool: %s(%s)", fc.name, json.dumps(args))
+                    try:
+                        if fn is None:
+                            result = {"error": f"Unknown tool: {fc.name}"}
+                        elif asyncio.iscoroutinefunction(fn):
+                            result = await fn(**args)
+                        else:
+                            result = fn(**args)
+                    except Exception as exc:
+                        logger.exception("Tool %s raised exception", fc.name)
+                        result = {"error": str(exc)}
+                    logger.info(
+                        "Tool %s result: %s", fc.name, json.dumps(result, default=str)
+                    )
+                    tool_parts.append(
+                        genai_types.Part(
+                            function_response=genai_types.FunctionResponse(
+                                name=fc.name,
+                                response=result,
+                            )
+                        )
+                    )
+
+                messages.append(genai_types.Content(role="user", parts=tool_parts))
+
+                tool_round += 1
+                if tool_round >= _MAX_TOOL_ROUNDS:
+                    logger.error("Agent exceeded %d tool rounds — aborting", _MAX_TOOL_ROUNDS)
+                    return "I was unable to complete the request within the allowed steps.", messages
+
     except TimeoutError:
-        logger.error("ADK agent timed out after %ds", _RESPONSE_TIMEOUT_SECS)
+        logger.error("Gemini API timed out after %ds", _RESPONSE_TIMEOUT_SECS)
         raise RuntimeError(f"Gemini API timed out after {_RESPONSE_TIMEOUT_SECS}s")
     except Exception as exc:
-        logger.exception("ADK agent error")
+        logger.exception("Gemini API error")
         raise RuntimeError(f"Gemini API failed: {exc}") from exc
 
     # Build updated history: carry forward only text turns, then append current exchange.
+    # Non-text parts (serialised tool-call artefacts from prior runs) are silently dropped.
     text_history = [
         t for t in history
         if t.get("role") in ("user", "model")
@@ -525,6 +523,6 @@ async def run_agent(
     ]
 
     logger.info(
-        "ADK agent finished: session=%s history_turns=%d", session_id, len(updated_history)
+        "Agent finished: tool_rounds=%d session_messages=%d", tool_round, len(updated_history)
     )
     return final_response or "(no response)", updated_history
