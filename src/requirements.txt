@@ -6,8 +6,9 @@
 #                    (behavior engine, scene graph storage)
 # mcp-observatory  — telemetry instrumentation for Bedrock/Claude API calls
 # boto3            — AWS SDK (used by mcp-observatory for DynamoDB metrics)
-# google-adk       — Google Agent Development Kit; manages agentic loop and tool dispatch
-# google-genai     — Google Gemini SDK (transitive via google-adk; kept explicit for types)
+# google-genai     — Google Gemini SDK; supports Python callable tools so no
+#                    google-adk (and its google-cloud-aiplatform transitive dep)
+#                    is needed in the Lambda package
 
 aiohttp>=3.9
 neo4j>=5.0
@@ -16,8 +17,4 @@ python-myq>=3.1.13
 wyze-sdk>=2.0.0
 mcp-observatory==0.2.0
 boto3>=1.26.0
-google-adk>=1.0.0
-google-genai>=1.0.0
-# numpy 2.x requires GCC >= 9.3 and glibc >= 2.28; pin to 1.x for the
-# SAM build container (Amazon Linux 2, GCC 7.3.1, glibc 2.26).
-numpy<2.0.0
+google-genai>=0.3.0
