@@ -209,7 +209,7 @@ def _tool_list_scenes() -> Dict[str, Any]:
     }
 
 
-def _tool_execute_device_command(
+async def _tool_execute_device_command(
     device_id: str,
     action: str,
     canonical_phrase: str,
@@ -262,7 +262,7 @@ def _tool_execute_device_command(
 
     steps = plan_device_execution(device, action, params)
     try:
-        results = asyncio.run(execute_steps(steps))
+        results = await execute_steps(steps)
     except Exception as exc:
         logger.exception("Agent device execution error")
         return {"error": f"Execution error: {exc}"}
@@ -290,7 +290,7 @@ def _tool_execute_device_command(
     }
 
 
-def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
+async def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
     from scene_catalog import get_active_scenes
     from device_resolver import _get_active_catalog, DeviceRegistryError
     from execution_planner import plan_scene_execution, execute_steps
@@ -328,7 +328,7 @@ def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
         }
 
     try:
-        results = asyncio.run(execute_steps(allowed_steps))
+        results = await execute_steps(allowed_steps)
     except Exception as exc:
         logger.exception("Agent scene execution error")
         return {"error": f"Scene execution error: {exc}"}
@@ -369,21 +369,21 @@ def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
 # Tool dispatcher
 # ---------------------------------------------------------------------------
 
-def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+async def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
     """Call the right tool implementation and return a JSON-serializable result."""
     if name == "list_devices":
         return _tool_list_devices()
     if name == "list_scenes":
         return _tool_list_scenes()
     if name == "execute_device_command":
-        return _tool_execute_device_command(
+        return await _tool_execute_device_command(
             device_id=tool_input["device_id"],
             action=tool_input["action"],
             canonical_phrase=tool_input.get("canonical_phrase", ""),
             params=tool_input.get("params"),
         )
     if name == "execute_scene":
-        return _tool_execute_scene(
+        return await _tool_execute_scene(
             scene_id=tool_input["scene_id"],
             canonical_phrase=tool_input.get("canonical_phrase", ""),
         )
@@ -400,7 +400,7 @@ def _call_bedrock_converse(client, **kwargs) -> Dict[str, Any]:
 # Agentic loop
 # ---------------------------------------------------------------------------
 
-def run_agent(
+async def run_agent(
     user_message: str,
     history: List[Dict[str, Any]],
     system_prompt_extra: str = "",
@@ -431,7 +431,10 @@ def run_agent(
     ]
 
     for round_idx in range(_MAX_TOOL_ROUNDS):
-        resp = _call_bedrock_converse(
+        # Run the synchronous Bedrock API call in a thread so the event loop
+        # remains unblocked and tool coroutines can be awaited directly below.
+        resp = await asyncio.to_thread(
+            _call_bedrock_converse,
             client,
             modelId=_MODEL_ID,
             system=[{"text": system_text}],
@@ -473,7 +476,7 @@ def run_agent(
                 tool_input = tool_use.get("input", {})
 
                 logger.info("Agent calling tool: %s(%s)", tool_name, json.dumps(tool_input))
-                result = _dispatch_tool(tool_name, tool_input)
+                result = await _dispatch_tool(tool_name, tool_input)
                 logger.info("Tool %s result: %s", tool_name, json.dumps(result, default=str))
 
                 tool_results.append({
