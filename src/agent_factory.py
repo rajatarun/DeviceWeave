@@ -17,7 +17,6 @@ History format:
 The factory normalizes history format between providers.
 """
 
-import asyncio
 import logging
 import os
 from typing import Any, Dict, List, Tuple
@@ -55,14 +54,10 @@ async def _run_bedrock_agent(
     history: List[Dict[str, Any]],
     system_prompt_extra: str = "",
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    """Run Bedrock Converse API agent (synchronous wrapper)."""
+    """Run Bedrock Converse API agent."""
     from bedrock_agent import run_agent as bedrock_run_agent
 
-    # Bedrock agent is synchronous; run in thread pool
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, bedrock_run_agent, user_message, history, system_prompt_extra
-    )
+    return await bedrock_run_agent(user_message, history, system_prompt_extra)
 
 
 async def _run_gemini_agent(
