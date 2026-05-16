@@ -26,16 +26,26 @@ def load_session(session_id: str) -> List[Dict[str, Any]]:
     if not _TABLE_NAME:
         logger.warning("CONVERSATION_TABLE_NAME not set — session not persisted")
         return []
+    t0 = time.monotonic()
     try:
         import boto3
         table = boto3.resource("dynamodb").Table(_TABLE_NAME)
         resp = table.get_item(Key={"session_id": session_id})
         item = resp.get("Item")
         if item is None:
+            logger.info("Session not found: session_id=%s elapsed_ms=%.0f", session_id, (time.monotonic() - t0) * 1000)
             return []
-        return json.loads(item.get("messages", "[]"))
+        messages = json.loads(item.get("messages", "[]"))
+        logger.info(
+            "Session loaded: session_id=%s turns=%d elapsed_ms=%.0f",
+            session_id, len(messages), (time.monotonic() - t0) * 1000,
+        )
+        return messages
     except Exception as exc:
-        logger.warning("Failed to load session %s: %s — starting fresh", session_id, exc)
+        logger.warning(
+            "Failed to load session %s: %s elapsed_ms=%.0f — starting fresh",
+            session_id, exc, (time.monotonic() - t0) * 1000,
+        )
         return []
 
 
@@ -43,6 +53,7 @@ def save_session(session_id: str, messages: List[Dict[str, Any]]) -> None:
     """Persist the full Converse API message list with a 24-hour TTL."""
     if not _TABLE_NAME:
         return
+    t0 = time.monotonic()
     try:
         import boto3
         table = boto3.resource("dynamodb").Table(_TABLE_NAME)
@@ -51,5 +62,12 @@ def save_session(session_id: str, messages: List[Dict[str, Any]]) -> None:
             "messages": json.dumps(messages, default=str),
             "ttl": int(time.time()) + _SESSION_TTL_SECONDS,
         })
+        logger.info(
+            "Session saved: session_id=%s messages=%d elapsed_ms=%.0f",
+            session_id, len(messages), (time.monotonic() - t0) * 1000,
+        )
     except Exception as exc:
-        logger.warning("Failed to save session %s: %s", session_id, exc)
+        logger.warning(
+            "Failed to save session %s: %s elapsed_ms=%.0f",
+            session_id, exc, (time.monotonic() - t0) * 1000,
+        )

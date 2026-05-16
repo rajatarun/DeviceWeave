@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -587,14 +588,34 @@ def _route_execute_conversational(body: Dict[str, Any], session_id: str) -> Dict
 
     logger.info("Conversational execute: session_id=%s command=%r", session_id, command)
 
+    t0 = time.monotonic()
     history = load_session(session_id)
+    logger.info(
+        "Session loaded: session_id=%s history_turns=%d elapsed_ms=%.0f",
+        session_id, len(history), (time.monotonic() - t0) * 1000,
+    )
+
+    t1 = time.monotonic()
     try:
         reply, updated_history = asyncio.run(run_agent(command, history))
     except Exception as exc:
-        logger.exception("Agent error for session %s", session_id)
+        logger.exception(
+            "Agent error for session %s elapsed_ms=%.0f",
+            session_id, (time.monotonic() - t1) * 1000,
+        )
         return _error(502, f"Agent error: {exc}")
 
+    logger.info(
+        "Agent completed: session_id=%s elapsed_ms=%.0f reply_chars=%d",
+        session_id, (time.monotonic() - t1) * 1000, len(reply),
+    )
+
+    t2 = time.monotonic()
     save_session(session_id, updated_history)
+    logger.info(
+        "Session saved: session_id=%s messages=%d elapsed_ms=%.0f",
+        session_id, len(updated_history), (time.monotonic() - t2) * 1000,
+    )
 
     return _ok({
         "type": "conversational",

@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from observatory_wrapper import observe_bedrock_converse
@@ -223,18 +224,30 @@ async def _tool_execute_device_command(
     import graph_engine
 
     params = params or {}
+    logger.info(
+        "execute_device_command: device_id=%s action=%s params=%s",
+        device_id, action, params,
+    )
 
+    t0 = time.monotonic()
     try:
         catalog = _get_active_catalog()
     except DeviceRegistryError as exc:
+        logger.error("Catalog load failed: %s", exc)
         return {"error": str(exc)}
+    logger.debug("Catalog loaded: %d devices elapsed_ms=%.0f", len(catalog), (time.monotonic() - t0) * 1000)
 
     catalog_index = {d["id"]: d for d in catalog}
     device = catalog_index.get(device_id)
     if device is None:
+        logger.warning("Device not found: device_id=%s", device_id)
         return {"error": f"Device '{device_id}' not found. Call list_devices to get valid IDs."}
 
     if action not in device.get("capabilities", []):
+        logger.warning(
+            "Unsupported action: device=%s action=%s capabilities=%s",
+            device["name"], action, device.get("capabilities", []),
+        )
         return {
             "error": f"'{device['name']}' does not support '{action}'.",
             "supported_actions": device.get("capabilities", []),
@@ -244,14 +257,22 @@ async def _tool_execute_device_command(
         return {"error": "set_brightness requires a 'brightness' param (0-100)."}
 
     # Policy enforcement
+    t1 = time.monotonic()
     try:
         policy_ctx = get_policy_context()
         decision = policy_enforce(device["device_type"], action, params, context=policy_ctx)
+        logger.debug(
+            "Policy checked: device_type=%s action=%s verdict=%s elapsed_ms=%.0f",
+            device["device_type"], action,
+            "block" if (decision and decision.is_blocked) else "modify" if (decision and decision.is_modified) else "allow",
+            (time.monotonic() - t1) * 1000,
+        )
     except Exception as exc:
         logger.warning("Policy check failed: %s — proceeding without enforcement", exc)
         decision = None
 
     if decision is not None and decision.is_blocked:
+        logger.info("Device command blocked by policy: rule_id=%s reason=%s", decision.rule_id, decision.reason)
         return {
             "blocked": True,
             "reason": decision.reason,
@@ -261,11 +282,21 @@ async def _tool_execute_device_command(
         params = decision.modified_params or {}
 
     steps = plan_device_execution(device, action, params)
+    logger.info("Executing %d step(s) for device %s/%s", len(steps), device_id, action)
+    t2 = time.monotonic()
     try:
         results = await execute_steps(steps)
     except Exception as exc:
-        logger.exception("Agent device execution error")
+        logger.exception(
+            "Device execution failed: device_id=%s action=%s elapsed_ms=%.0f",
+            device_id, action, (time.monotonic() - t2) * 1000,
+        )
         return {"error": f"Execution error: {exc}"}
+    logger.info(
+        "Device execution done: device_id=%s action=%s success=%s elapsed_ms=%.0f",
+        device_id, action, results[0].success if results else "?",
+        (time.monotonic() - t2) * 1000,
+    )
 
     result = results[0]
     if not result.success:
@@ -299,39 +330,66 @@ async def _tool_execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str,
     from learning_store import LEARNING_THRESHOLD, is_configured, save_learned_phrase
     import graph_engine
 
+    logger.info("execute_scene: scene_id=%s", scene_id)
+
     scenes = {s["id"]: s for s in get_active_scenes()}
     scene = scenes.get(scene_id)
     if scene is None:
+        logger.warning("Scene not found: scene_id=%s", scene_id)
         return {"error": f"Scene '{scene_id}' not found. Call list_scenes to get valid IDs."}
 
+    t0 = time.monotonic()
     try:
         catalog = _get_active_catalog()
     except DeviceRegistryError as exc:
+        logger.error("Catalog load failed in execute_scene: %s", exc)
         return {"error": str(exc)}
 
     steps = plan_scene_execution(scene, catalog)
+    logger.info(
+        "Scene planned: scene_id=%s steps=%d elapsed_ms=%.0f",
+        scene_id, len(steps), (time.monotonic() - t0) * 1000,
+    )
     if not steps:
         return {"error": f"Scene '{scene_id}' produced no executable steps."}
 
+    t1 = time.monotonic()
     try:
         policy_ctx = get_policy_context()
         allowed_steps, policy_blocks = policy_filter_steps(steps, context=policy_ctx)
+        logger.info(
+            "Scene policy filter: scene_id=%s allowed=%d blocked=%d elapsed_ms=%.0f",
+            scene_id, len(allowed_steps), len(policy_blocks), (time.monotonic() - t1) * 1000,
+        )
     except Exception as exc:
         logger.warning("Policy filter failed: %s — executing all steps", exc)
         allowed_steps, policy_blocks = steps, []
 
     if not allowed_steps:
+        logger.info("All scene steps blocked by policy: scene_id=%s", scene_id)
         return {
             "blocked": True,
             "reason": "All scene steps were blocked by active policies.",
             "policy_blocks": policy_blocks,
         }
 
+    logger.info("Executing %d allowed step(s) for scene %s", len(allowed_steps), scene_id)
+    t2 = time.monotonic()
     try:
         results = await execute_steps(allowed_steps)
     except Exception as exc:
-        logger.exception("Agent scene execution error")
+        logger.exception(
+            "Scene execution failed: scene_id=%s elapsed_ms=%.0f",
+            scene_id, (time.monotonic() - t2) * 1000,
+        )
         return {"error": f"Scene execution error: {exc}"}
+    logger.info(
+        "Scene execution done: scene_id=%s succeeded=%d failed=%d elapsed_ms=%.0f",
+        scene_id,
+        sum(1 for r in results if r.success),
+        sum(1 for r in results if not r.success),
+        (time.monotonic() - t2) * 1000,
+    )
 
     successes = [r for r in results if r.success]
     failures = [r for r in results if not r.success]
@@ -433,14 +491,27 @@ async def run_agent(
     for round_idx in range(_MAX_TOOL_ROUNDS):
         # Run the synchronous Bedrock API call in a thread so the event loop
         # remains unblocked and tool coroutines can be awaited directly below.
-        resp = await asyncio.to_thread(
-            _call_bedrock_converse,
-            client,
-            modelId=_MODEL_ID,
-            system=[{"text": system_text}],
-            messages=messages,
-            toolConfig={"tools": _TOOLS},
-            inferenceConfig={"maxTokens": 1024, "temperature": 0.2},
+        logger.info("Bedrock converse: round=%d messages=%d", round_idx, len(messages))
+        t_converse = time.monotonic()
+        try:
+            resp = await asyncio.to_thread(
+                _call_bedrock_converse,
+                client,
+                modelId=_MODEL_ID,
+                system=[{"text": system_text}],
+                messages=messages,
+                toolConfig={"tools": _TOOLS},
+                inferenceConfig={"maxTokens": 1024, "temperature": 0.2},
+            )
+        except Exception as exc:
+            logger.exception(
+                "Bedrock converse failed: round=%d elapsed_ms=%.0f",
+                round_idx, (time.monotonic() - t_converse) * 1000,
+            )
+            raise
+        logger.info(
+            "Bedrock converse done: round=%d stop_reason=%s elapsed_ms=%.0f",
+            round_idx, resp.get("stopReason"), (time.monotonic() - t_converse) * 1000,
         )
 
         stop_reason: str = resp["stopReason"]
@@ -476,8 +547,20 @@ async def run_agent(
                 tool_input = tool_use.get("input", {})
 
                 logger.info("Agent calling tool: %s(%s)", tool_name, json.dumps(tool_input))
-                result = await _dispatch_tool(tool_name, tool_input)
-                logger.info("Tool %s result: %s", tool_name, json.dumps(result, default=str))
+                t_tool = time.monotonic()
+                try:
+                    result = await _dispatch_tool(tool_name, tool_input)
+                except Exception as exc:
+                    logger.exception(
+                        "Tool %s raised exception: elapsed_ms=%.0f",
+                        tool_name, (time.monotonic() - t_tool) * 1000,
+                    )
+                    result = {"error": str(exc)}
+                logger.info(
+                    "Tool %s done: elapsed_ms=%.0f result=%s",
+                    tool_name, (time.monotonic() - t_tool) * 1000,
+                    json.dumps(result, default=str),
+                )
 
                 tool_results.append({
                     "toolResult": {

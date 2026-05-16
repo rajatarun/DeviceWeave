@@ -19,6 +19,7 @@ The factory normalizes history format between providers.
 
 import logging
 import os
+import time
 from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
@@ -40,13 +41,34 @@ async def run_agent(
     Returns:
         (reply_text, updated_history) — agent response and updated message history.
     """
-    provider = _select_provider()
-    logger.info("Using agent provider: %s", provider)
+    t0 = time.monotonic()
+    try:
+        provider = _select_provider()
+    except Exception as exc:
+        logger.exception("Provider selection failed")
+        raise
+    logger.info(
+        "Provider selected: %s elapsed_ms=%.0f",
+        provider, (time.monotonic() - t0) * 1000,
+    )
 
-    if provider == "gemini":
-        return await _run_gemini_agent(user_message, history, system_prompt_extra)
-    else:
-        return await _run_bedrock_agent(user_message, history, system_prompt_extra)
+    t1 = time.monotonic()
+    try:
+        if provider == "gemini":
+            result = await _run_gemini_agent(user_message, history, system_prompt_extra)
+        else:
+            result = await _run_bedrock_agent(user_message, history, system_prompt_extra)
+    except Exception as exc:
+        logger.exception(
+            "Agent run failed: provider=%s elapsed_ms=%.0f",
+            provider, (time.monotonic() - t1) * 1000,
+        )
+        raise
+    logger.info(
+        "Agent run completed: provider=%s elapsed_ms=%.0f",
+        provider, (time.monotonic() - t1) * 1000,
+    )
+    return result
 
 
 async def _run_bedrock_agent(

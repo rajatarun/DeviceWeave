@@ -12,6 +12,7 @@ adapters only receive validated, supported actions.
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -101,45 +102,74 @@ async def execute_steps(steps: List[ExecutionStep]) -> List[StepResult]:
     incurs the latency of the slower device, not the sum of both.
     return_exceptions=True ensures one failing device does not abort others.
     """
+    logger.info(
+        "execute_steps: starting %d step(s): %s",
+        len(steps),
+        [(s.device.get("id"), s.action) for s in steps],
+    )
+    t0 = time.monotonic()
     tasks = [_execute_one(step) for step in steps]
     results: List[StepResult] = await asyncio.gather(*tasks, return_exceptions=False)
+    logger.info(
+        "execute_steps: done %d step(s) succeeded=%d failed=%d elapsed_ms=%.0f",
+        len(results),
+        sum(1 for r in results if r.success),
+        sum(1 for r in results if not r.success),
+        (time.monotonic() - t0) * 1000,
+    )
     return results
 
 
 async def _execute_one(step: ExecutionStep) -> StepResult:
     device = step.device
+    device_id = device["id"]
+    logger.info("_execute_one: device_id=%s action=%s provider_type=%s", device_id, step.action, device.get("device_type"))
+    t0 = time.monotonic()
     try:
         provider = get_provider(device["device_type"])
         result = await provider.execute(device, step.action, step.params)
+        logger.info(
+            "_execute_one: success device_id=%s action=%s elapsed_ms=%.0f",
+            device_id, step.action, (time.monotonic() - t0) * 1000,
+        )
         return StepResult(
-            device_id=device["id"],
+            device_id=device_id,
             device_name=device["name"],
             action=step.action,
             success=True,
             result=result,
         )
     except ProviderError as exc:
-        logger.error("ProviderError for %s/%s: %s", device["id"], step.action, exc)
+        logger.error(
+            "ProviderError for %s/%s: %s elapsed_ms=%.0f",
+            device_id, step.action, exc, (time.monotonic() - t0) * 1000,
+        )
         return StepResult(
-            device_id=device["id"],
+            device_id=device_id,
             device_name=device["name"],
             action=step.action,
             success=False,
             error=str(exc),
         )
     except ValueError as exc:
-        logger.error("ValueError for %s/%s: %s", device["id"], step.action, exc)
+        logger.error(
+            "ValueError for %s/%s: %s elapsed_ms=%.0f",
+            device_id, step.action, exc, (time.monotonic() - t0) * 1000,
+        )
         return StepResult(
-            device_id=device["id"],
+            device_id=device_id,
             device_name=device["name"],
             action=step.action,
             success=False,
             error=str(exc),
         )
     except Exception as exc:
-        logger.exception("Unexpected error for %s/%s", device["id"], step.action)
+        logger.exception(
+            "Unexpected error for %s/%s elapsed_ms=%.0f",
+            device_id, step.action, (time.monotonic() - t0) * 1000,
+        )
         return StepResult(
-            device_id=device["id"],
+            device_id=device_id,
             device_name=device["name"],
             action=step.action,
             success=False,
