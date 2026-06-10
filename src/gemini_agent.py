@@ -431,11 +431,17 @@ async def run_agent(
     ]
 
     # Pass Python callables directly; google-genai auto-generates function declarations.
+    # Automatic function calling is disabled so the loop below owns tool dispatch:
+    # otherwise the SDK silently executes tools itself and response.function_calls
+    # is never populated, bypassing our logging, error handling, and round limits.
+    # No max_output_tokens: Gemini 3 thinking tokens count against the cap, and a
+    # low cap starves the model before it can emit a function call or any text.
+    # Temperature is left at the model default — Google recommends 1.0 for Gemini 3;
+    # lower values measurably degrade function calling.
     config = genai_types.GenerateContentConfig(
         system_instruction=system_text,
         tools=list(_TOOL_MAP.values()),
-        temperature=0.2,
-        max_output_tokens=1024,
+        automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     tool_round = 0
@@ -458,9 +464,19 @@ async def run_agent(
 
                 if not function_calls:
                     final_response = response.text or ""
+                    finish_reason = (
+                        response.candidates[0].finish_reason
+                        if response.candidates else None
+                    )
+                    if not final_response:
+                        logger.warning(
+                            "Gemini returned no text and no function calls: "
+                            "finish_reason=%s tool_rounds=%d",
+                            finish_reason, tool_round,
+                        )
                     logger.info(
-                        "Gemini final response: %d chars tool_rounds=%d",
-                        len(final_response), tool_round,
+                        "Gemini final response: %d chars finish_reason=%s tool_rounds=%d",
+                        len(final_response), finish_reason, tool_round,
                     )
                     break
 
