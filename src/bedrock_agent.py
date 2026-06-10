@@ -569,6 +569,20 @@ async def run_agent(
                     }
                 })
 
+            if not tool_results:
+                # stop_reason said tool_use but no toolUse blocks were present;
+                # appending an empty user message would fail Converse validation.
+                logger.warning(
+                    "stop_reason=tool_use with no toolUse blocks at round %d", round_idx
+                )
+                text_parts = [
+                    block["text"]
+                    for block in assistant_message.get("content", [])
+                    if "text" in block
+                ]
+                reply = " ".join(text_parts).strip() or "(no response)"
+                return reply, messages
+
             messages.append({"role": "user", "content": tool_results})
             continue
 
