@@ -15,6 +15,7 @@ import math
 import os
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,7 @@ def _load_deleted_ids() -> Set[str]:
     import boto3
     from boto3.dynamodb.conditions import Attr
     try:
-        table = boto3.resource("dynamodb").Table(_SCENE_TABLE_NAME)
+        table = get_dynamodb_resource().Table(_SCENE_TABLE_NAME)
         resp = table.scan(FilterExpression=Attr("status").eq("deleted"))
         return {item["scene_id"] for item in resp.get("Items", [])}
     except Exception as exc:
@@ -242,10 +243,9 @@ def delete_scene(scene_id: str) -> bool:
     if not any(s["id"] == scene_id for s in SCENE_CATALOG):
         return False
     if _SCENE_TABLE_NAME:
-        import boto3
         from datetime import datetime, timezone
         try:
-            table = boto3.resource("dynamodb").Table(_SCENE_TABLE_NAME)
+            table = get_dynamodb_resource().Table(_SCENE_TABLE_NAME)
             table.put_item(Item={
                 "scene_id": scene_id,
                 "status": "deleted",

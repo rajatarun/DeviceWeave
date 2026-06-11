@@ -43,6 +43,7 @@ from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
 import weather_client
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +115,7 @@ def _get_is_home() -> bool:
         return _DEFAULT_IS_HOME
 
     try:
-        import boto3
-        table = boto3.resource("dynamodb").Table(_PRESENCE_TABLE_NAME)
+        table = get_dynamodb_resource().Table(_PRESENCE_TABLE_NAME)
         resp = table.get_item(Key={"pk": "home_state"})
         item = resp.get("Item")
         if item is None:

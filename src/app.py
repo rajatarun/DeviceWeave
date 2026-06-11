@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 import behavior_engine
 import decision_engine
 import graph_engine
+from aws_clients import get_dynamodb_resource
 from device_resolver import (
     DeviceRegistryError,
     _get_active_catalog,
@@ -250,8 +251,7 @@ def _route_presence(event: Dict[str, Any]) -> Dict[str, Any]:
 
     now = datetime.now(timezone.utc).isoformat()
     try:
-        import boto3
-        table = boto3.resource("dynamodb").Table(table_name)
+        table = get_dynamodb_resource().Table(table_name)
         table.put_item(Item={"pk": "home_state", "is_home": is_home, "updated_at": now})
     except Exception as exc:
         logger.error("Presence update failed: %s", exc, exc_info=True)
@@ -301,8 +301,7 @@ def _route_create_device(event: Dict[str, Any]) -> Dict[str, Any]:
 
     now = datetime.now(timezone.utc).isoformat()
     try:
-        import boto3
-        table = boto3.resource("dynamodb").Table(registry_table)
+        table = get_dynamodb_resource().Table(registry_table)
         table.put_item(Item={
             "device_id": device_id,
             "provider": "manual",
@@ -350,7 +349,7 @@ def _route_update_device(device_id: str, event: Dict[str, Any]) -> Dict[str, Any
     from boto3.dynamodb.conditions import Key
 
     try:
-        table = boto3.resource("dynamodb").Table(registry_table)
+        table = get_dynamodb_resource().Table(registry_table)
         resp = table.query(KeyConditionExpression=Key("device_id").eq(device_id))
         items = resp.get("Items", [])
     except Exception as exc:
@@ -431,7 +430,7 @@ def _route_delete_device(device_id: str) -> Dict[str, Any]:
     from boto3.dynamodb.conditions import Key
 
     try:
-        table = boto3.resource("dynamodb").Table(registry_table)
+        table = get_dynamodb_resource().Table(registry_table)
         resp = table.query(KeyConditionExpression=Key("device_id").eq(device_id))
         items = resp.get("Items", [])
     except Exception as exc:
@@ -465,8 +464,7 @@ def _route_list_learnings() -> Dict[str, Any]:
         return _error(503, "Learning store not configured.")
 
     try:
-        import boto3
-        table = boto3.resource("dynamodb").Table(table_name)
+        table = get_dynamodb_resource().Table(table_name)
         resp = table.scan()
         items = sorted(
             resp.get("Items", []),
@@ -510,8 +508,7 @@ def _route_delete_learning(event: Dict[str, Any]) -> Dict[str, Any]:
         return _error(503, "Learning store not configured.")
 
     try:
-        import boto3
-        table = boto3.resource("dynamodb").Table(table_name)
+        table = get_dynamodb_resource().Table(table_name)
         table.delete_item(Key={"device_id": device_id, "phrase": phrase})
         invalidate_learned_phrases_cache()
     except Exception as exc:
@@ -528,8 +525,7 @@ def _route_get_presence() -> Dict[str, Any]:
         return _error(503, "Presence store not configured.")
 
     try:
-        import boto3
-        table = boto3.resource("dynamodb").Table(table_name)
+        table = get_dynamodb_resource().Table(table_name)
         resp = table.get_item(Key={"pk": "home_state"})
         item = resp.get("Item")
         if item is None:

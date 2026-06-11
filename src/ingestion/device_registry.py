@@ -31,6 +31,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Set
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ _TABLE_NAME: str = os.environ.get("DEVICE_REGISTRY_TABLE", "")
 
 def _table():
     import boto3
-    return boto3.resource("dynamodb").Table(_TABLE_NAME)
+    return get_dynamodb_resource().Table(_TABLE_NAME)
 
 
 def is_configured() -> bool:

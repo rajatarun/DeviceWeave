@@ -14,6 +14,7 @@ import logging
 import os
 import time
 from typing import Any, Dict, List
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,7 @@ def load_session(session_id: str) -> List[Dict[str, Any]]:
         return []
     t0 = time.monotonic()
     try:
-        import boto3
-        table = boto3.resource("dynamodb").Table(_TABLE_NAME)
+        table = get_dynamodb_resource().Table(_TABLE_NAME)
         resp = table.get_item(Key={"session_id": session_id})
         item = resp.get("Item")
         if item is None:
@@ -55,8 +55,7 @@ def save_session(session_id: str, messages: List[Dict[str, Any]]) -> None:
         return
     t0 = time.monotonic()
     try:
-        import boto3
-        table = boto3.resource("dynamodb").Table(_TABLE_NAME)
+        table = get_dynamodb_resource().Table(_TABLE_NAME)
         table.put_item(Item={
             "session_id": session_id,
             "messages": json.dumps(messages, default=str),

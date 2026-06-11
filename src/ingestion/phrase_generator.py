@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import List
 
 from llm_provider import get_llm_provider
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ def save_generated_phrases(device_id: str, phrases: List[str]) -> int:
     import boto3
     from botocore.exceptions import ClientError
 
-    table = boto3.resource("dynamodb").Table(_LEARNING_TABLE)
+    table = get_dynamodb_resource().Table(_LEARNING_TABLE)
     now = datetime.now(timezone.utc).isoformat()
     saved = skipped = 0
 
@@ -175,7 +176,7 @@ def _has_phrases(device_id: str) -> bool:
     import boto3
     from boto3.dynamodb.conditions import Key
     try:
-        resp = boto3.resource("dynamodb").Table(_LEARNING_TABLE).query(
+        resp = get_dynamodb_resource().Table(_LEARNING_TABLE).query(
             KeyConditionExpression=Key("device_id").eq(device_id),
             Limit=1,
             ProjectionExpression="phrase",
