@@ -14,6 +14,7 @@ import math
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def _load_device_registry() -> List[Dict[str, Any]]:
     from boto3.dynamodb.conditions import Attr
 
     try:
-        table = boto3.resource("dynamodb").Table(_REGISTRY_TABLE)
+        table = get_dynamodb_resource().Table(_REGISTRY_TABLE)
         resp = table.scan(
             FilterExpression=Attr("status").eq("active"),
             ProjectionExpression="device_id, #n, device_type, capabilities, ip, model",

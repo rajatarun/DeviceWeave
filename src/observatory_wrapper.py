@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Any, Dict
 
 import boto3
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def _get_ddb_table():
         if not table_name:
             return None
 
-        ddb = boto3.resource("dynamodb")
+        ddb = get_dynamodb_resource()
         _ddb_table = ddb.Table(table_name)
         logger.info("Observatory DynamoDB table initialized: %s", table_name)
     except Exception as exc:

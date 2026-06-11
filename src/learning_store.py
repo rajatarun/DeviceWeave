@@ -25,6 +25,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Dict, List
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def _table():
     """Lazy DynamoDB table resource — created once per Lambda container."""
     import boto3  # noqa: PLC0415 — intentional lazy import (not in requirements.txt)
     from boto3.dynamodb.conditions import Key as _Key  # noqa: F401
-    dynamodb = boto3.resource("dynamodb")
+    dynamodb = get_dynamodb_resource()
     return dynamodb.Table(_TABLE_NAME)
 
 
@@ -148,7 +149,6 @@ def load_learned_phrases(device_id: str) -> List[str]:
     if not _TABLE_NAME:
         return []
     try:
-        import boto3
         from boto3.dynamodb.conditions import Key
 
         resp = _table().query(

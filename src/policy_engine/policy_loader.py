@@ -29,6 +29,7 @@ import logging
 import os
 import time
 from typing import Any, Dict, List
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def _reload() -> None:
         import boto3
         from boto3.dynamodb.conditions import Attr
 
-        table = boto3.resource("dynamodb").Table(_TABLE_NAME)
+        table = get_dynamodb_resource().Table(_TABLE_NAME)
         items: List[Dict[str, Any]] = []
 
         # Paginate — DynamoDB returns at most 1 MB per scan call.

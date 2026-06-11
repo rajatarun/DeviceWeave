@@ -37,6 +37,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from aws_clients import get_dynamodb_resource
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ _TABLE_NAME: str = os.environ.get("POLICY_TABLE_NAME", "")
 def _table():
     """Lazy DynamoDB table resource — one boto3 resource per Lambda container."""
     import boto3
-    return boto3.resource("dynamodb").Table(_TABLE_NAME)
+    return get_dynamodb_resource().Table(_TABLE_NAME)
 
 
 def is_configured() -> bool:
