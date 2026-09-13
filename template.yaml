@@ -20,6 +20,17 @@ Globals:
         SCENE_TABLE_NAME: !Ref SceneTable
         CONVERSATION_TABLE_NAME: !Ref ConversationTable
         OBSERVATORY_METRICS_TABLE: !Ref ObservatoryMetricsTableName
+        OBSERVATORY_MAX_COST_USD: !Ref ObservatoryMaxCostUsd
+        OBSERVATORY_MAX_LATENCY_MS: !Ref ObservatoryMaxLatencyMs
+        # Input-size ceiling for mcp-observatory's scoring paths (>=0.3.0).
+        # The wrapper API DeviceWeave uses does not consult it, so this is
+        # inert today — it is set explicitly because a Converse payload
+        # (~1.5 KB system prompt + ~4.4 KB toolConfig + up to 10 rounds of
+        # history and device-roster tool results) passes the library's
+        # 10 KB default within the first tool round, and any future move to
+        # the interceptor / propose-commit paths would then silently
+        # short-circuit every conversation to input_too_large.
+        MCP_OBSERVATORY_MAX_INPUT_BYTES: "65536"
         LLM_PROVIDER: !Ref LLMProvider
         LLM_MODEL_ID: !Ref LLMModelId
         GEMINI_MODEL: !Ref GeminiModelId
@@ -129,6 +140,26 @@ Parameters:
       From shared stack output ObservatoryMetricsTableName.
       Leave blank to disable observability instrumentation.
     Default: ""
+
+  ObservatoryMaxCostUsd:
+    Type: String
+    Default: "0.25"
+    Description: >
+      Per-invocation cost budget for the mcp-observatory gate, in USD
+      (library default 0.25).  Exceeding it yields a REVIEW verdict, which
+      observatory_wrapper.py refuses — the Converse response is discarded
+      and the agent turn fails rather than actuating a device.  Raise it if
+      legitimate calls are being refused.  Leave blank for the library default.
+
+  ObservatoryMaxLatencyMs:
+    Type: String
+    Default: "8000"
+    Description: >
+      Per-invocation latency budget for the mcp-observatory gate, in
+      milliseconds (library default 8000).  Same refusal semantics as
+      ObservatoryMaxCostUsd — a Converse round slower than this is refused,
+      so raise it for deployments whose rounds legitimately run longer.
+      Leave blank for the library default.
 
   # -----------------------------------------------------------------------
   # Memgraph — host is discovered at Lambda runtime via EC2 tag memgraph=true.

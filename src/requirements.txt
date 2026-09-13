@@ -4,7 +4,13 @@
 #                    (Kasa cloud REST, SwitchBot v1.1, Govee developer API)
 # neo4j            — Bolt protocol driver for Memgraph graph database
 #                    (behavior engine, scene graph storage)
-# mcp-observatory  — telemetry instrumentation for Bedrock/Claude API calls
+# mcp-observatory  — telemetry instrumentation and output gating for
+#                    Bedrock/Claude API calls.  >=0.3.0 is required: the
+#                    wrapper API's verdict is now enforced
+#                    (observatory_wrapper.py), and 0.3.0 is the release that
+#                    fails closed on unset signing secrets and caps input size.
+#                    Neither change touches this repo's code path — see
+#                    docs/MCP_OBSERVATORY_SETUP.md.
 # boto3            — AWS SDK (used by mcp-observatory for DynamoDB metrics)
 # google-genai     — Google Gemini SDK; supports Python callable tools so no
 #                    google-adk (and its google-cloud-aiplatform transitive dep)
@@ -15,6 +21,6 @@ neo4j>=5.0
 ring-doorbell>=0.9
 python-myq>=3.1.13
 wyze-sdk>=2.0.0
-mcp-observatory==0.2.0
+mcp-observatory>=0.3.0
 boto3>=1.26.0
 google-genai>=0.3.0
