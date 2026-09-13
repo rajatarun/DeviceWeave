@@ -39,7 +39,7 @@ AWS_REGION=us-east-1                                      # Region
 
 #### Gemini Configuration (if using Gemini agent or LLM)
 ```bash
-GEMINI_MODEL=gemini-3-flash-preview  # Model for all Gemini API calls (default)
+GEMINI_MODEL=gemini-3.8-flash  # Model for all Gemini API calls (default)
 
 # API key secret is hardcoded to: gemini/api_key
 # Secret format: {"api_key": "YOUR_API_KEY"}
@@ -58,7 +58,7 @@ LLM_PROVIDER=auto        # Adaptive (default)
 ```yaml
 AGENT_PROVIDER: gemini              # SMS via Gemini API
 LLM_PROVIDER: gemini                # Device resolution via Gemini
-GEMINI_MODEL: gemini-3-flash-preview  # Model for all calls
+GEMINI_MODEL: gemini-3.8-flash  # Model for all calls
 ```
 **Cost**: ~$0.00075 per SMS (vs ~$0.001 with Bedrock)
 **Latency**: <50ms streaming responses

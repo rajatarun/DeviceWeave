@@ -153,9 +153,9 @@ Parameters:
 
   GeminiModelId:
     Type: String
-    Default: "gemini-3-flash-preview"
+    Default: "gemini-3.8-flash"
     Description: >
-      Gemini model ID for non-live generateContent calls (e.g., gemini-3-flash-preview).
+      Gemini model ID for non-live generateContent calls (e.g., gemini-3.8-flash).
       Only used when LLMProvider includes Gemini (auto, gemini).
 
   AgentProvider:
