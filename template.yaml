@@ -186,23 +186,37 @@ Parameters:
 
   ObservatoryMaxCostUsd:
     Type: String
-    Default: "0.25"
+    Default: "5.00"
     Description: >
-      Per-invocation cost budget for the mcp-observatory gate, in USD
-      (library default 0.25).  Exceeding it yields a REVIEW verdict, which
-      observatory_wrapper.py refuses — the Converse response is discarded
-      and the agent turn fails rather than actuating a device.  Raise it if
-      legitimate calls are being refused.  Leave blank for the library default.
+      Per-invocation cost budget for the mcp-observatory gate, in USD.
+      Exceeding it yields a REVIEW verdict, which observatory_wrapper.py
+      refuses — the Converse response is discarded and the agent turn fails
+      rather than actuating a device.
+
+      Deliberately set well above the library default of 0.25 because the
+      figure being compared is the library's own ESTIMATE from its built-in
+      price table, which has no entry for the Claude Haiku models this
+      deployment uses — it is not a Bedrock-billed amount.  Gating device
+      actuation on a mis-estimated cost would refuse correct calls for a
+      reason unrelated to safety.  Treat this as a runaway-loop backstop,
+      not a budget, until the price table covers the model in use.
 
   ObservatoryMaxLatencyMs:
     Type: String
-    Default: "8000"
+    Default: "30000"
     Description: >
       Per-invocation latency budget for the mcp-observatory gate, in
-      milliseconds (library default 8000).  Same refusal semantics as
-      ObservatoryMaxCostUsd — a Converse round slower than this is refused,
-      so raise it for deployments whose rounds legitimately run longer.
-      Leave blank for the library default.
+      milliseconds.  Same refusal semantics as ObservatoryMaxCostUsd — a
+      Converse round slower than this is refused and the device is not
+      actuated.
+
+      Raised from the library default of 8000.  An 8-second Converse round
+      is ordinary here, not pathological: the agentic loop carries a device
+      roster in toolConfig and runs up to ten rounds of history, so the
+      library default would refuse slow-but-correct calls and leave a user
+      pressing a switch that does nothing.  Latency is a liveness signal,
+      not a safety one — a slow answer is not a wrong answer — so the budget
+      is set to catch a hung call rather than a merely slow one.
 
   # -----------------------------------------------------------------------
   # Memgraph — host is discovered at Lambda runtime via EC2 tag memgraph=true.
