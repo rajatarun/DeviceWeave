@@ -10,6 +10,7 @@ name in app's own module dict at import time, so patching the *source*
 module after the fact would not affect what app.py actually calls.
 """
 
+import importlib
 import json
 
 import pytest
@@ -181,3 +182,134 @@ def test_unsupported_method_on_known_path_is_404():
     # PATCH isn't wired up for /execute at all.
     response = app.handler(_event("PATCH", "/execute"), None)
     assert response["statusCode"] == 404
+
+
+# ---------------------------------------------------------------------------
+# Per-gate confidence thresholds
+#
+# SCENE_/DEVICE_/LLM_CONFIDENCE_THRESHOLD each override CONFIDENCE_THRESHOLD
+# for one gate and fall back to it when unset. The module-level constants are
+# resolved at import time, so the wiring is checked with a reload and the
+# gates themselves by patching the constants app.py actually reads.
+# ---------------------------------------------------------------------------
+
+def _reload_app(monkeypatch, **env):
+    for key in (
+        "CONFIDENCE_THRESHOLD",
+        "SCENE_CONFIDENCE_THRESHOLD",
+        "DEVICE_CONFIDENCE_THRESHOLD",
+        "LLM_CONFIDENCE_THRESHOLD",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return importlib.reload(app)
+
+
+@pytest.fixture(autouse=True)
+def _restore_app_module():
+    """Undo any reload so later tests see the original module object."""
+    yield
+    importlib.reload(app)
+
+
+def test_thresholds_fall_back_to_confidence_threshold(monkeypatch):
+    reloaded = _reload_app(monkeypatch, CONFIDENCE_THRESHOLD="0.55")
+
+    assert reloaded.SCENE_CONFIDENCE_THRESHOLD == 0.55
+    assert reloaded.DEVICE_CONFIDENCE_THRESHOLD == 0.55
+    assert reloaded.LLM_CONFIDENCE_THRESHOLD == 0.55
+
+
+def test_each_gate_can_be_overridden_independently(monkeypatch):
+    reloaded = _reload_app(
+        monkeypatch,
+        CONFIDENCE_THRESHOLD="0.4",
+        SCENE_CONFIDENCE_THRESHOLD="0.7",
+        LLM_CONFIDENCE_THRESHOLD="0.9",
+    )
+
+    assert reloaded.SCENE_CONFIDENCE_THRESHOLD == 0.7
+    assert reloaded.LLM_CONFIDENCE_THRESHOLD == 0.9
+    # Unset gate still inherits the base value.
+    assert reloaded.DEVICE_CONFIDENCE_THRESHOLD == 0.4
+
+
+def test_default_thresholds_are_the_testing_value(monkeypatch):
+    reloaded = _reload_app(monkeypatch)
+
+    assert reloaded.CONFIDENCE_THRESHOLD == 0.4
+    assert reloaded.DEVICE_CONFIDENCE_THRESHOLD == 0.4
+
+
+def test_non_numeric_override_falls_back_rather_than_crashing(monkeypatch):
+    reloaded = _reload_app(
+        monkeypatch, CONFIDENCE_THRESHOLD="0.4", DEVICE_CONFIDENCE_THRESHOLD="high"
+    )
+
+    assert reloaded.DEVICE_CONFIDENCE_THRESHOLD == 0.4
+
+
+def test_scene_gate_uses_its_own_threshold(monkeypatch):
+    """A scene below SCENE_CONFIDENCE_THRESHOLD must not fire even when the
+    (lower) device threshold would have accepted the same score."""
+    _stub_execute_pipeline(monkeypatch)
+    monkeypatch.setattr(app, "resolve_scene", lambda command: ({"id": "s1"}, 0.5))
+    monkeypatch.setattr(app, "SCENE_CONFIDENCE_THRESHOLD", 0.7)
+    monkeypatch.setattr(app, "DEVICE_CONFIDENCE_THRESHOLD", 0.4)
+    scene_calls = []
+    monkeypatch.setattr(
+        app, "_handle_scene",
+        lambda *args, **kwargs: scene_calls.append(args) or {"statusCode": 200, "body": "{}"},
+    )
+
+    response = app.handler(_event("POST", "/execute", {"command": "turn on the office light"}), None)
+
+    assert scene_calls == []
+    # Falls through to the device path, which still accepts at 0.9 >= 0.4.
+    assert response["statusCode"] == 200
+    assert _body(response)["type"] == "device"
+
+
+def test_device_gate_uses_its_own_threshold(monkeypatch):
+    """Tier 1 at 0.9 is refused when DEVICE_CONFIDENCE_THRESHOLD is raised,
+    and the 422 reports that gate's threshold."""
+    _stub_execute_pipeline(monkeypatch)
+    monkeypatch.setattr(app, "DEVICE_CONFIDENCE_THRESHOLD", 0.95)
+    monkeypatch.setattr(app, "LLM_CONFIDENCE_THRESHOLD", 0.7)
+    monkeypatch.setattr(app, "_get_active_catalog", lambda: [DEVICE])
+    monkeypatch.setattr(app, "llm_resolve", lambda command, action, catalog: None)
+
+    response = app.handler(_event("POST", "/execute", {"command": "turn on the office light"}), None)
+
+    assert response["statusCode"] == 422
+    payload = _body(response)
+    assert payload["threshold"] == 0.95
+    assert payload["llm_threshold"] == 0.7
+
+
+def test_llm_gate_uses_its_own_threshold(monkeypatch):
+    """A tier-2 answer between the device and LLM thresholds is refused."""
+    _stub_execute_pipeline(monkeypatch)
+    monkeypatch.setattr(app, "DEVICE_CONFIDENCE_THRESHOLD", 0.95)
+    monkeypatch.setattr(app, "LLM_CONFIDENCE_THRESHOLD", 0.9)
+    monkeypatch.setattr(app, "_get_active_catalog", lambda: [DEVICE])
+    monkeypatch.setattr(
+        app, "llm_resolve",
+        lambda command, action, catalog: {
+            "devices": [{"device_id": "office_light", "action": "turn_on", "params": {}}],
+            "confidence": 0.8,
+            "reasoning": "probably the office light",
+        },
+    )
+
+    response = app.handler(_event("POST", "/execute", {"command": "turn on the office light"}), None)
+
+    assert response["statusCode"] == 422
+
+    # The same answer clears a lower LLM gate.
+    monkeypatch.setattr(app, "LLM_CONFIDENCE_THRESHOLD", 0.7)
+    response = app.handler(_event("POST", "/execute", {"command": "turn on the office light"}), None)
+
+    assert response["statusCode"] == 200
+    assert _body(response)["resolution_tier"] == "llm"

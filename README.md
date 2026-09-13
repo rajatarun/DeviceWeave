@@ -40,7 +40,7 @@ POST /execute (one-shot)    POST /execute + session_id    SMS → End User Messa
         │                           │                    (reply SMS)
         │◄──────────────────────────┘
         ▼
- Scene Resolver ── conf ≥ 0.70 ──►         POST /policies/author   POST /ingest · EventBridge
+ Scene Resolver ── conf ≥ 0.40 ──►         POST /policies/author   POST /ingest · EventBridge
      │ (nearest-neighbour                          │                      │
      │  phrase cosine)                    LLM Policy Compiler     Ingestion Pipeline
      │ below threshold                    (Claude Haiku 4.5)       ├── full sync (daily)
@@ -48,12 +48,12 @@ POST /execute (one-shot)    POST /execute + session_id    SMS → End User Messa
  Intent Parser                           Policy Validator                │
      │ (deterministic regex)             (schema + conf ≥ 0.85)   Provider Discovery
      ▼                                           │                  (Kasa · Govee · SwitchBot)
- Device Resolver ── conf ≥ 0.70 ──►     DynamoDB PolicyTable            │
+ Device Resolver ── conf ≥ 0.40 ──►     DynamoDB PolicyTable            │
      │ (TF cosine +                      (versioned rules)         DynamoDB DeviceRegistry
      │  learned phrases)                         │
      │ below threshold          ┌────────────────────────────────────────────┐
      ▼                          │              Policy Engine                 │
- LLM Resolver ── conf ≥ 0.70 ──►│  context_provider  temp · humidity · time  │
+ LLM Resolver ── conf ≥ 0.40 ──►│  context_provider  temp · humidity · time  │
      │ (Claude Haiku 4.5)       │                    cloud_cover · is_home   │
      │ below threshold          │  policy_loader     (DynamoDB TTL cache)    │
      ▼                          │  evaluator         (condition matching)    │
@@ -77,12 +77,22 @@ POST /execute (one-shot)    POST /execute + session_id    SMS → End User Messa
                                            (conf ≥ 0.85 · canonical phrase)
 ```
 
+Each `conf ≥` gate above is independently configurable and shows its **default**
+value, `0.40` — a testing default. **`0.70` is the recommended production
+setting for all three.** See [Confidence thresholds](#confidence-thresholds).
+
+| Gate in the diagram | Environment variable |
+|---|---|
+| Scene Resolver | `SCENE_CONFIDENCE_THRESHOLD` |
+| Device Resolver | `DEVICE_CONFIDENCE_THRESHOLD` |
+| LLM Resolver | `LLM_CONFIDENCE_THRESHOLD` |
+
 ### Execution request flow
 
-1. **Scene resolution** — nearest-neighbour cosine similarity against each individual sample phrase. Confidence ≥ 0.70 triggers the scene (potentially multi-device).
+1. **Scene resolution** — nearest-neighbour cosine similarity against each individual sample phrase. Confidence ≥ `SCENE_CONFIDENCE_THRESHOLD` (default `0.4`; `0.70` recommended in production) triggers the scene (potentially multi-device).
 2. **Intent parsing** — deterministic regex parser extracts `action`, `device_query`, and `params`. No model calls, no network I/O.
 3. **Device resolution** — TF-vector cosine similarity against the device catalog, augmented with phrases learned from prior successful executions.
-4. **LLM resolver (Tier 2)** — invoked only when Tier 1 cosine falls below 0.70. Claude Haiku 4.5 resolves contextual and behavioural commands using weather data and device roster.
+4. **LLM resolver (Tier 2)** — invoked only when Tier 1 falls below `DEVICE_CONFIDENCE_THRESHOLD`. Claude Haiku 4.5 resolves contextual and behavioural commands using weather data and device roster, and its own confidence is then gated by `LLM_CONFIDENCE_THRESHOLD`.
 5. **Policy Engine** — evaluates the resolved `(device_type, action)` pair against active Policy DSL rules stored in DynamoDB. BLOCK returns 403 with no I/O. MODIFY updates params before execution.
 6. **Safety layer** — capability gate, parameter validation, idempotency check. No device I/O until all checks pass.
 7. **Execution** — routed through the provider registry. Scene and multi-device steps run concurrently via `asyncio.gather`.
@@ -257,12 +267,20 @@ curl -X POST $API_URL/learn \
 **Low confidence rejection (422)**
 ```json
 {
-  "error": "No device matched with sufficient confidence (best=0.1162, threshold=0.7).",
+  "error": "Could not resolve command with sufficient confidence (final=0.1162, threshold=0.4). Closest cosine match: 'Office Fan'.",
   "best_match_id": "office_fan",
-  "confidence": 0.1162,
+  "cosine_score": 0.1162,
+  "behavior_score": 0.5,
+  "final_score": 0.1162,
+  "threshold": 0.4,
+  "llm_threshold": 0.4,
   "hint": "Use POST /learn to add new phrases for a device."
 }
 ```
+
+`threshold` is `DEVICE_CONFIDENCE_THRESHOLD` (the tier-1 gate the `final_score`
+was compared against) and `llm_threshold` is `LLM_CONFIDENCE_THRESHOLD` (the
+tier-2 gate that also refused), so it is clear which one to move.
 
 ### Policy authoring example
 
@@ -785,7 +803,7 @@ Six checks fire in sequence before any device I/O:
 
 | # | Check | Failure response |
 |---|-------|-----------------|
-| 1 | Confidence ≥ 0.70 | `422` — low confidence, suggests `/learn` |
+| 1 | Confidence ≥ the gate's threshold (default `0.4`) | `422` — low confidence, suggests `/learn` |
 | 2 | Action in `device["capabilities"]` | `422` — unsupported action |
 | 3 | `set_brightness` has a numeric value | `400` — missing parameter |
 | 4 | **Policy Engine — BLOCK verdict** | `403` — blocked by active policy rule |
@@ -796,13 +814,45 @@ The Policy Engine is check 4–5: it fires after resolution (the system knows wh
 
 LLM calls are bounded to two roles: (a) Tier 2 device resolution when cosine confidence fails, and (b) policy compilation via `/policies/author`. Neither LLM call can directly trigger device I/O — the deterministic safety layer and Policy Engine sit between them and the hardware.
 
+### Confidence thresholds
+
+Check 1 is three separate gates, each with its own environment variable. An
+unset per-gate variable falls back to `CONFIDENCE_THRESHOLD`.
+
+| Variable | Gate | Default |
+|---|---|---|
+| `CONFIDENCE_THRESHOLD` | fallback for any gate left unset | `0.4` |
+| `SCENE_CONFIDENCE_THRESHOLD` | scene resolution (fires several devices at once) | inherits `CONFIDENCE_THRESHOLD` |
+| `DEVICE_CONFIDENCE_THRESHOLD` | tier-1 device resolution (TF cosine + behaviour) | inherits `CONFIDENCE_THRESHOLD` |
+| `LLM_CONFIDENCE_THRESHOLD` | tier-2 LLM resolver's self-reported confidence | inherits `CONFIDENCE_THRESHOLD` |
+
+**`0.4` is a testing default.** It is deliberately permissive: while a device
+catalog is still being trained, a strict gate rejects most commands. **`0.70` is
+the recommended production setting** for all three gates — they decide whether
+to actuate physical hardware, and there is no undo.
+
+Set them per stage in `template.yaml` (parameters `ConfidenceThreshold`,
+`SceneConfidenceThreshold`, `DeviceConfidenceThreshold`, `LlmConfidenceThreshold`):
+
+```bash
+# Production: tighten every gate at once.
+sam deploy --parameter-overrides ConfidenceThreshold=0.70
+
+# Or per gate — e.g. trust a trained scene catalog, but hold the LLM tier
+# (which acts on the model's own say-so) to a higher bar.
+sam deploy --parameter-overrides \
+  ConfidenceThreshold=0.70 \
+  SceneConfidenceThreshold=0.60 \
+  LlmConfidenceThreshold=0.85
+```
+
 ---
 
 ## Continuous learning
 
 Every successful execution with confidence ≥ 0.85 writes the normalized command to DynamoDB as a new sample phrase for the resolved device. On subsequent requests that phrase is included in the cosine similarity corpus.
 
-- **Auto-learn threshold**: `LEARNING_CONFIDENCE_THRESHOLD` env var (default `0.85`)
+- **Auto-learn threshold**: `LEARNING_CONFIDENCE_THRESHOLD` env var (default `0.85`) — distinct from the execute gates in [Confidence thresholds](#confidence-thresholds)
 - **Manual binding**: `POST /learn` — takes effect immediately (cache invalidated)
 - **Cache**: learned phrases are held in Lambda container memory; refreshed on cold start or after a `/learn` write
 

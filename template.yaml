@@ -12,7 +12,13 @@ Globals:
         LOG_LEVEL: INFO
         LEARNING_TABLE_NAME: !Ref LearningTable
         LEARNING_CONFIDENCE_THRESHOLD: "0.85"
-        CONFIDENCE_THRESHOLD: "0.4"
+        # 0.4 is a testing default; 0.70 is the recommended production value.
+        # Each gate can be set independently — an unset per-gate variable falls
+        # back to CONFIDENCE_THRESHOLD.
+        CONFIDENCE_THRESHOLD: !Ref ConfidenceThreshold
+        SCENE_CONFIDENCE_THRESHOLD: !Ref SceneConfidenceThreshold
+        DEVICE_CONFIDENCE_THRESHOLD: !Ref DeviceConfidenceThreshold
+        LLM_CONFIDENCE_THRESHOLD: !Ref LlmConfidenceThreshold
         DEVICE_REGISTRY_TABLE: !Ref DeviceRegistryTable
         POLICY_TABLE_NAME: !Ref PolicyTable
         POLICY_CONFIDENCE_THRESHOLD: "0.85"
@@ -81,6 +87,43 @@ Parameters:
       Lambda is placed in public subnets with direct IGW route.
       Example: subnet-12345678,subnet-87654321
     Default: ""
+
+  # -----------------------------------------------------------------------
+  # Confidence thresholds — one gate each, all defaulting to
+  # CONFIDENCE_THRESHOLD when left blank.
+  #
+  # 0.4 is a TESTING default: it is permissive, which is useful while a device
+  # catalog is still being trained and a strict gate would reject most
+  # commands. 0.70 is the RECOMMENDED PRODUCTION setting for all three — these
+  # gates decide whether to actuate physical hardware, and there is no undo.
+  # -----------------------------------------------------------------------
+  ConfidenceThreshold:
+    Type: String
+    Default: "0.4"
+    Description: >
+      Base confidence threshold, used by any gate whose own variable is blank.
+      Testing default 0.4; recommended production value 0.70.
+
+  SceneConfidenceThreshold:
+    Type: String
+    Default: ""
+    Description: >
+      Threshold for scene resolution (a scene fires several devices at once).
+      Blank inherits ConfidenceThreshold. Recommended production value: 0.70.
+
+  DeviceConfidenceThreshold:
+    Type: String
+    Default: ""
+    Description: >
+      Threshold for tier-1 device resolution (TF cosine + behaviour score).
+      Blank inherits ConfidenceThreshold. Recommended production value: 0.70.
+
+  LlmConfidenceThreshold:
+    Type: String
+    Default: ""
+    Description: >
+      Threshold for the tier-2 LLM resolver's self-reported confidence.
+      Blank inherits ConfidenceThreshold. Recommended production value: 0.70.
 
   # -----------------------------------------------------------------------
   # LLM Provider Configuration

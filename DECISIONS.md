@@ -69,13 +69,23 @@ A DynamoDB read on every execution would add ~5–15 ms and a DynamoDB API call 
 
 ---
 
-## 9. Learning threshold at 0.85, execute threshold at 0.70
+## 9. Learning threshold at 0.85, execute threshold recommended at 0.70 (ships at 0.4)
 
-**Execute threshold (0.70)**: below this the match is too uncertain to act on. The system returns a 422 with a hint to use `/learn`.
+**Execute threshold (0.70 recommended, 0.4 shipped default)**: below this the match is too uncertain to act on. The system returns a 422 with a hint to use `/learn`.
 
-**Learning threshold (0.85)**: a phrase is only persisted as a training example if the system was already confident. Persisting low-confidence matches would reinforce incorrect associations and degrade future resolution accuracy. The gap between the two thresholds (0.70–0.85) is the "execute but don't learn" zone — the system will act but not treat the phrase as a reliable example.
+The shipped default is `0.4`, not `0.70`. That is a **testing** value: a fresh device catalog has no learned phrases, so a strict gate rejects nearly every command and the system looks broken before it has been trained. `0.70` is the value the design intends and the recommended production setting — these gates decide whether to actuate physical hardware, and there is no undo. The gap between the shipped default and the recommendation is a deliberate trade-off, not an oversight, and it is now stated wherever the number appears rather than only in this file.
 
-Both values are configurable via environment variables (`LEARNING_CONFIDENCE_THRESHOLD` in template.yaml) so they can be tuned per stage without code changes.
+**Three gates, not one.** The execute threshold is applied at three different decision points, which until now shared a single `CONFIDENCE_THRESHOLD` variable — so tightening the LLM tier also tightened scene matching. Each gate now reads its own variable and falls back to `CONFIDENCE_THRESHOLD` when unset:
+
+| Variable | Gate | Why it may differ |
+|---|---|---|
+| `SCENE_CONFIDENCE_THRESHOLD` | scene resolution | a scene actuates several devices at once, so a wrong match is wider |
+| `DEVICE_CONFIDENCE_THRESHOLD` | tier-1 device resolution | scored from the TF cosine and behaviour history, both local and auditable |
+| `LLM_CONFIDENCE_THRESHOLD` | tier-2 LLM resolver | the model's *self-reported* confidence — a weaker signal than a measured cosine, and the one most worth holding to a higher bar |
+
+**Learning threshold (0.85)**: a phrase is only persisted as a training example if the system was already confident. Persisting low-confidence matches would reinforce incorrect associations and degrade future resolution accuracy. The gap between the execute and learning thresholds is the "execute but don't learn" zone — the system will act but not treat the phrase as a reliable example.
+
+All values are configurable via environment variables (`ConfidenceThreshold`, `SceneConfidenceThreshold`, `DeviceConfidenceThreshold`, `LlmConfidenceThreshold` and `LEARNING_CONFIDENCE_THRESHOLD` in template.yaml) so they can be tuned per stage without code changes.
 
 ---
 
@@ -127,7 +137,7 @@ PITR costs approximately $0.20 per GB-month. The learned phrases table will be s
 
 ## 15. Scene-first dispatch in /execute
 
-`_route_execute` tries scene resolution before device intent parsing. The alternative (try device first, fall back to scene) would require the device resolver to fail before the scene resolver runs, adding latency on every scene command. Scene commands are also semantically different from device commands — "starting work" should never be parsed as an intent targeting a single device. The scene resolver running first is both faster and semantically cleaner. Confidence gating (≥ 0.70) prevents spurious scene matches on device commands whose vocabulary doesn't overlap with any scene's sample phrases.
+`_route_execute` tries scene resolution before device intent parsing. The alternative (try device first, fall back to scene) would require the device resolver to fail before the scene resolver runs, adding latency on every scene command. Scene commands are also semantically different from device commands — "starting work" should never be parsed as an intent targeting a single device. The scene resolver running first is both faster and semantically cleaner. Confidence gating (`SCENE_CONFIDENCE_THRESHOLD`, default `0.4`, `0.70` recommended in production — see decision 9) prevents spurious scene matches on device commands whose vocabulary doesn't overlap with any scene's sample phrases.
 
 ---
 
@@ -198,7 +208,7 @@ The deterministic validation layer runs after the LLM and enforces the schema in
 **Chosen**: reject rules with LLM confidence < 0.85
 **Rejected**: lower threshold (0.70), no threshold, manual review queue
 
-Policy rules are persistent safety constraints, not one-shot commands. A mis-compiled rule could silently block devices for days or weeks. The execute threshold (0.70) is appropriate for commands — the system acts and the user immediately sees the result. For policies, the feedback loop is much slower: a wrong rule might not be noticed until the user wonders why their fan is always blocked.
+Policy rules are persistent safety constraints, not one-shot commands. A mis-compiled rule could silently block devices for days or weeks. The execute threshold (0.70 recommended — see decision 9) is appropriate for commands — the system acts and the user immediately sees the result. For policies, the feedback loop is much slower: a wrong rule might not be noticed until the user wonders why their fan is always blocked.
 
 The 0.85 threshold is the same as the learning threshold (decision 9): both represent "the system is confident enough to create a durable record". The LLM is instructed to return an explicit rejection object rather than a low-confidence policy, so the user receives a clear error message explaining what the system could not resolve rather than a silently degraded rule.
 
