@@ -25,6 +25,8 @@ CONTRACT_FILENAME = "observatory_metrics_item.json"
 # "{iso8601}#{trace_id}" -- the timestamp must sort first, so it is anchored.
 _SK_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?#.+$")
 _PK_RE = re.compile(r"^([A-Z_]+)#(.+)$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
 
 def load_contract(path: str | Path | None = None) -> dict[str, Any]:
@@ -95,6 +97,38 @@ def check_item(item: dict[str, Any], contract: dict[str, Any] | None = None) -> 
     # I4 -- rows expire.
     if "ttl" not in item:
         problems.append("I4: no 'ttl' attribute; rows would accumulate in a shared table forever")
+
+    # I6-I8 -- the SpanTimelineIndex key attributes. A GSI indexes only items
+    # that carry both of its keys, so a writer omitting either is invisible to
+    # every dashboard in exactly the way v1's pk-prefix mismatches were, except
+    # now it is a test failure instead of a silence.
+    span_date = _unwrap(item.get("span_date"))
+    timestamp = _unwrap(item.get("timestamp"))
+    operation = _unwrap(item.get("operation"))
+
+    if not span_date:
+        problems.append(
+            "I6: no 'span_date'; the SpanTimelineIndex partition key is missing, so this "
+            "row is not in the index and no dashboard will ever show it"
+        )
+    elif not _DATE_RE.match(str(span_date)):
+        problems.append(f"I6: span_date {span_date!r} is not YYYY-MM-DD")
+
+    if not timestamp:
+        problems.append(
+            "I7: no 'timestamp'; the SpanTimelineIndex sort key is missing, so this row is "
+            "not in the index"
+        )
+    elif not _TS_RE.match(str(timestamp)):
+        problems.append(f"I7: timestamp {timestamp!r} is not ISO 8601")
+    elif span_date and _DATE_RE.match(str(span_date)) and str(timestamp)[:10] != str(span_date):
+        problems.append(
+            f"I7: timestamp {timestamp!r} and span_date {span_date!r} disagree; the row "
+            "would be indexed under a day it did not happen on"
+        )
+
+    if not operation:
+        problems.append("I8: no 'operation'; readers filter and group on it")
 
     return problems
 

@@ -13,7 +13,7 @@ item through the vendored, dependency-free ``contracts/conformance.py`` so a
 regression like that fails a local test instead of a cross-repo audit.
 
 Assertions are driven from the vendored contract file wherever possible
-(``check_item``, ``readers_for``, ``discriminator_values``) rather than from
+(``check_item``, ``gsi``, ``discriminator_values``) rather than from
 constants retyped here, so a contract version bump that DeviceWeave hasn't
 caught up with breaks this test instead of silently drifting.
 """
@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 import observatory_wrapper as ow
-from contracts.conformance import check_item, load_contract, readers_for
+from contracts.conformance import check_item, load_contract
 
 CONTRACT = load_contract()  # finds contracts/observatory_metrics_item.json beside conformance.py
 
@@ -146,11 +146,12 @@ def test_key_attributes_are_lowercase_pk_sk_never_uppercase(monkeypatch, fake_dy
 
 
 # ---------------------------------------------------------------------------
-# I5: DeviceWeave's telemetry must actually be reachable by a dashboard —
-# readers_for() is the contract's own machine-readable form of that check.
+# Contract v2.0.0: reads go through the SpanTimelineIndex GSI, not pk.
+# I5 (pk reachability / readers_for) is superseded -- a GSI indexes only items
+# carrying both of its key attributes, so that is now the reachability check.
 # ---------------------------------------------------------------------------
 
-def test_emitted_pk_has_at_least_one_reader(monkeypatch, fake_dynamodb, fake_mcp_observatory):
+def test_emitted_item_carries_the_span_timeline_index_keys(monkeypatch, fake_dynamodb, fake_mcp_observatory):
     monkeypatch.setenv("OBSERVATORY_METRICS_TABLE", "obs-metrics-dev")
 
     @ow.observe_bedrock_converse(model_id="test-model")
@@ -160,12 +161,15 @@ def test_emitted_pk_has_at_least_one_reader(monkeypatch, fake_dynamodb, fake_mcp
     wrapped()
 
     item = fake_dynamodb.Table("obs-metrics-dev").put_items[0]
-    readers = readers_for(item["pk"], CONTRACT)
+    gsi = CONTRACT["gsi"]
 
-    assert readers != [], (
-        f"pk={item['pk']!r} has no readers in the contract's namespace_registry — "
-        "this telemetry would be written, billed, and never seen by any dashboard"
+    assert gsi["partition_key"] in item, (
+        f"item has no '{gsi['partition_key']}' — it would not be in the SpanTimelineIndex "
+        "and no dashboard would ever show it"
     )
+    assert gsi["sort_key"] in item, f"item has no '{gsi['sort_key']}'"
+    assert item[gsi["partition_key"]] == item[gsi["sort_key"]][:10]
+    assert check_item(item, CONTRACT) == []
 
 
 # ---------------------------------------------------------------------------

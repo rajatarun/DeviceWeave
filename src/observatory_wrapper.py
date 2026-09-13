@@ -207,6 +207,10 @@ def _push_metric(operation: str, span: Dict[str, Any], extra: Dict[str, Any]) ->
             "operation": operation,
             "trace_id": trace_id,
             "timestamp": timestamp_str,
+            # SpanTimelineIndex partition key (contract v2.0.0, I6/I7). Sliced
+            # from timestamp_str (already UTC — see datetime.utcnow() default
+            # above) so the two attributes can never disagree.
+            "span_date": timestamp_str[:10],
             "model_id": extra.get("model_id", "unknown"),
             "prompt_tokens": Decimal(str(span.get("prompt_tokens", 0))),
             "completion_tokens": Decimal(str(span.get("completion_tokens", 0))),

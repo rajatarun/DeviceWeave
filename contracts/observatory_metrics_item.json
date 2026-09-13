@@ -1,6 +1,6 @@
 {
   "contract": "observatory_metrics_item",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "canonical_home": "https://github.com/rajatarun/mcp-observatory/blob/main/contracts/observatory_metrics_item.json",
   "description": [
     "The item contract for the shared OBSERVATORY_METRICS DynamoDB table, provisioned by",
@@ -9,9 +9,16 @@
     "build dashboards from it, none of which can see each other's code, so the item shape",
     "is a cross-repository interface and is pinned here rather than in any one consumer.",
     "Copies vendored into consumer repositories must carry the same version string; a",
-    "conformance test in each repository asserts its writer or reader against this file."
+    "conformance test in each repository asserts its writer or reader against this file.",
+    "",
+    "v2.0.0 moves reads off the partition key. Under v1 a reader queried whole partitions",
+    "by exact pk, so a writer's rows were visible only if it had guessed the same pk prefix",
+    "grammar the reader enumerated -- and three of the five writers had not, leaving their",
+    "telemetry durable, billable and permanently invisible. Reads now go through the",
+    "SpanTimelineIndex GSI, which is keyed on a date bucket and a timestamp, so a reader",
+    "never needs to know what prefix a writer chose. The base-table pk is now a writer's",
+    "own business; the two index attributes are what every writer must get right."
   ],
-
   "key_schema": {
     "partition_key": "pk",
     "sort_key": "sk",
@@ -22,12 +29,10 @@
       "will report as success while writing nothing at all."
     ]
   },
-
   "sk_grammar": {
     "format": "{start_time_iso8601}#{trace_id}",
     "rationale": "Readers range-query on sk lexicographically, so the timestamp must sort first and must be UTC ISO 8601."
   },
-
   "pk_grammar": {
     "format": "{namespace}#{discriminator}",
     "note": [
@@ -36,20 +41,35 @@
       "are durable, billable and permanently invisible to every dashboard."
     ]
   },
-
   "namespace_registry": {
     "OBSERVATORY": {
       "discriminator": "operation",
-      "discriminator_values": ["invoke_agent", "invoke_model", "classify_question", "synthesize_answer"],
-      "writers": ["teamweave", "deviceweave", "contextweave", "screenweave-mcp"],
-      "readers": ["teamweave:agent_metrics_handler", "teamweave:unified_observability_handler", "deployweave:observatory_metrics"],
-      "status": "active"
+      "discriminator_values": [
+        "invoke_agent",
+        "invoke_model",
+        "classify_question",
+        "synthesize_answer"
+      ],
+      "writers": [
+        "teamweave",
+        "deviceweave",
+        "contextweave",
+        "screenweave-mcp"
+      ],
+      "readers": [
+        "teamweave:agent_metrics_handler",
+        "teamweave:unified_observability_handler",
+        "deployweave:observatory_metrics"
+      ],
+      "status": "legacy-informational"
     },
     "SPAN": {
       "discriminator": "tool_name_or_model",
-      "writers": ["mcp_observatory.aws.DynamoDBSpanExporter"],
+      "writers": [
+        "mcp_observatory.aws.DynamoDBSpanExporter"
+      ],
       "readers": [],
-      "status": "unread",
+      "status": "legacy-informational",
       "note": [
         "This is the namespace the shared library exporter writes. No reader queries it.",
         "Migrating a service off its vendored copy onto the library exporter (the stated",
@@ -60,36 +80,73 @@
     },
     "WRAPPER": {
       "discriminator": "method",
-      "writers": ["toolweave"],
+      "writers": [
+        "toolweave"
+      ],
       "readers": [],
-      "status": "unread"
+      "status": "legacy-informational"
     },
     "INVOCATION": {
       "discriminator": "method",
-      "writers": ["toolweave"],
+      "writers": [
+        "toolweave"
+      ],
       "readers": [],
-      "status": "unread"
+      "status": "legacy-informational"
     }
   },
-
   "required_attributes": {
     "pk": "S",
     "sk": "S",
-    "ttl": "N"
+    "ttl": "N",
+    "span_date": "S -- YYYY-MM-DD in UTC, the SpanTimelineIndex partition; normally timestamp[:10]",
+    "timestamp": "S -- ISO 8601 in UTC, the SpanTimelineIndex sort key",
+    "operation": "S -- what kind of call this span was; readers filter and group on it"
   },
-
   "recommended_attributes": {
-    "service": "S -- the emitting service; the only attribute that identifies a row's origin once several writers share a namespace",
-    "operation": "S",
-    "trace_id": "S",
-    "timestamp": "S"
+    "service": "S -- the emitting service; the only attribute that identifies a row's origin once several writers share the index",
+    "trace_id": "S"
   },
-
   "invariants": [
     "I1: key attributes are spelled 'pk' and 'sk' in lower case",
     "I2: pk matches {namespace}#{discriminator} with a namespace listed in namespace_registry",
     "I3: sk matches {iso8601}#{trace_id}",
     "I4: ttl is present and is a Unix epoch in the future, so rows expire rather than accumulate",
-    "I5: a writer's namespace has at least one reader, or is explicitly marked status=unread here"
+    "I5: superseded in v2 -- reachability is no longer a property of the namespace, because reads go through SpanTimelineIndex rather than the partition key",
+    "I6: span_date is present and is YYYY-MM-DD, or the row is absent from every dashboard",
+    "I7: timestamp is present and is ISO 8601 in UTC, and agrees with span_date",
+    "I8: operation is present and non-empty"
+  ],
+  "gsi": {
+    "name": "SpanTimelineIndex",
+    "partition_key": "span_date",
+    "sort_key": "timestamp",
+    "projection": "ALL",
+    "why": [
+      "Both readers already query one partition over a time range and then filter and",
+      "aggregate in memory. A date bucket plus a timestamp serves that directly while",
+      "requiring no agreement about vocabulary: keying the index on 'operation' instead",
+      "would have traded a pk-prefix convention for an operation-name convention, and a",
+      "reader wanting everything would still have had to enumerate the values."
+    ],
+    "caveats": [
+      "A GSI indexes only items that carry BOTH key attributes. A writer that omits",
+      "span_date or timestamp is exactly as invisible as it was under v1, which is why",
+      "those attributes are required rather than recommended, and why I6-I8 exist.",
+      "The index is not retroactive: rows written before this contract have no span_date",
+      "and will not appear. They remain reachable by their original pk. Backfilling them",
+      "is a separate migration and is not attempted by the conformance tests.",
+      "span_date has one partition per day, so the current day is a write hotspot. At this",
+      "portfolio's volume that is well inside what on-demand adaptive capacity absorbs; if",
+      "write rates grow, bucket by hour (YYYY-MM-DDTHH) rather than reintroducing a",
+      "category-based partition key.",
+      "AWS creates at most one GSI per UpdateTable operation, so this must be deployed as",
+      "its own CloudFormation change, and its backfill must finish before readers switch."
+    ]
+  },
+  "namespace_registry_note": [
+    "Kept for archaeology and for reading rows written before v2. Under v2 a namespace",
+    "carrying no reader is no longer a defect, because readers do not query by pk at all.",
+    "readers_for() is retained for the same reason and now answers a historical question."
   ]
 }
