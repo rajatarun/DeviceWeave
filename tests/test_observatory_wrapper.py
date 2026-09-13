@@ -7,18 +7,16 @@ Also pins two behaviours relevant to the upcoming mcp-observatory 0.2.0 ->
   1. Import-failure tolerance: get_wrapper() must return None, never raise,
      when mcp_observatory is unimportable — this already holds today and
      must keep holding after the re-pin.
-  2. The 0.3.0 "HIGH-criticality + too little evidence -> REVIEW instead of
-     ALLOW" gate: DeviceWeave's observe_bedrock_converse() decorator does
-     not currently call any decision/gating method on the wrapper it gets
-     from get_wrapper() at all (it only uses the wrapper's truthiness as an
-     on/off switch, then does its own ad hoc metric push) — so there is no
-     code path today that could distinguish a REVIEW verdict from ALLOW.
-     This is documented as an xfail below rather than skipped so it starts
-     failing loudly (turns into an unexpected pass, i.e. XPASS) the moment
-     someone wires the gate in and the expectation should be promoted to a
-     real assertion.
+  2. The 0.3.0 REVIEW gate: observe_bedrock_converse() now runs the Bedrock
+     call through InvocationWrapperAPI.invoke() and enforces the returned
+     WrapperDecision. A "review" or "block" verdict — and an absent one —
+     raises ObservatoryGateError so the agentic loop never reaches tool
+     dispatch with an uncleared answer; only "allow" returns the response,
+     annotated with gate_decision / gate_reason. The telemetry span is
+     pushed to DynamoDB on every one of those paths.
 """
 
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
@@ -127,6 +125,10 @@ def test_observe_bedrock_converse_falls_through_when_wrapper_unavailable(missing
 
 
 def test_observe_bedrock_converse_pushes_metric_on_success(monkeypatch, fake_dynamodb, fake_mcp_observatory):
+    """Telemetry-only degradation: fake_mcp_observatory's wrapper exposes no
+    invoke(), as an mcp-observatory older than the wrapper API would, so the
+    call runs ungated and the metric is built from the Bedrock response —
+    DeviceWeave's pre-gate behaviour, unchanged."""
     monkeypatch.setenv("OBSERVATORY_METRICS_TABLE", "obs-metrics-dev")
 
     @ow.observe_bedrock_converse(model_id="test-model", session_id="sess-9")
@@ -142,40 +144,267 @@ def test_observe_bedrock_converse_pushes_metric_on_success(monkeypatch, fake_dyn
     assert table.put_items[0]["session_id"] == "sess-9"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "mcp-observatory 0.3.0 introduces a HIGH-criticality-with-insufficient-"
-        "evidence gate that returns a REVIEW verdict instead of ALLOW. "
-        "observatory_wrapper.observe_bedrock_converse() never calls any "
-        "decision/gating API on the wrapper object it holds (get_wrapper() "
-        "result is only used as a truthy on/off switch) — there is no code "
-        "path today that inspects a WrapperDecision at all, so a REVIEW "
-        "verdict cannot currently change execution (block, hold for approval, "
-        "annotate the response, etc.). This test documents the expected "
-        "behaviour once that gate is wired in: a REVIEW decision should be "
-        "surfaced on the result rather than silently treated as allowed."
-    ),
-    strict=True,
-)
+# ---------------------------------------------------------------------------
+# observe_bedrock_converse() — gate decision handling
+#
+# The wrapper object returned by instrument_wrapper_api() is an
+# InvocationWrapperAPI: `await wrapper.invoke(source=..., model=..., prompt=...,
+# input_payload=..., call=...)` runs `call`, records a span, and returns a
+# WrapperResult carrying `.output`, `.span` and `.decision` (a WrapperDecision
+# with `.action` in {"allow", "review", "block"}, `.reason`, `.metadata`).
+# The fakes below implement exactly that contract; the real library is
+# exercised too, further down.
+# ---------------------------------------------------------------------------
+
+_BEDROCK_RESPONSE = {
+    "usage": {"inputTokens": 10, "outputTokens": 5},
+    "stopReason": "end_turn",
+    "output": {"message": {"role": "assistant", "content": [{"text": "ok"}]}},
+}
+
+_CONVERSE_KWARGS = {
+    "modelId": "test-model",
+    "system": [{"text": "system prompt"}],
+    "messages": [{"role": "user", "content": [{"text": "turn on the fan"}]}],
+}
+
+
+class _FakeDecision:
+    def __init__(self, action, reason="", metadata=None):
+        self.action = action
+        self.reason = reason
+        self.metadata = metadata or {}
+
+
+class _FakeSpan:
+    """Minimal stand-in for mcp_observatory's TraceContext."""
+
+    def __init__(self):
+        self.trace_id = "trace-gate"
+        self.start_time = datetime(2026, 4, 25, 1, 14, 0)
+        self.end_time = datetime(2026, 4, 25, 1, 14, 2)
+        self.prompt_tokens = 11
+        self.completion_tokens = 3
+        self.cost_usd = 0.00007
+        self.composite_risk_score = 0.42
+
+
+class _FakeResult:
+    def __init__(self, output, decision):
+        self.output = output
+        self.span = _FakeSpan()
+        self.decision = decision
+
+
+class FakeGateWrapper:
+    """Stand-in for InvocationWrapperAPI with a fixed verdict."""
+
+    def __init__(self, decision, call_raises=None, invoke_raises=None):
+        self._decision = decision
+        self._call_raises = call_raises
+        self._invoke_raises = invoke_raises
+        self.invocations = 0
+
+    async def invoke(self, *, source, model, prompt, input_payload, call, **kwargs):
+        self.invocations += 1
+        self.prompt = prompt
+        self.input_payload = input_payload
+        output = call()
+        if self._invoke_raises is not None:
+            raise self._invoke_raises
+        return _FakeResult(output, self._decision)
+
+
+def _wrap(wrapper_obj, monkeypatch, response=None, boom=None):
+    """Install `wrapper_obj` as the singleton and return a decorated callable."""
+    monkeypatch.setattr(ow, "_wrapper", wrapper_obj)
+
+    calls = []
+
+    @ow.observe_bedrock_converse(model_id="test-model", session_id="sess-9")
+    def wrapped(client, **kwargs):
+        calls.append(kwargs)
+        if boom is not None:
+            raise boom
+        return response if response is not None else dict(_BEDROCK_RESPONSE)
+
+    wrapped.calls = calls
+    return wrapped
+
+
 def test_observe_bedrock_converse_surfaces_review_verdict(monkeypatch, fake_dynamodb):
+    """A REVIEW verdict must not be silently treated as ALLOW.
+
+    Was an xfail: the decorator used get_wrapper() only as a truthy on/off
+    switch and never inspected a decision, so REVIEW was indistinguishable
+    from ALLOW. The call is now routed through the wrapper's invoke() and the
+    verdict is enforced.
+    """
+    monkeypatch.setenv("OBSERVATORY_METRICS_TABLE", "obs-metrics-dev")
+    gate = FakeGateWrapper(_FakeDecision("review", "insufficient_evidence", {"criticality": "high"}))
+    wrapped = _wrap(gate, monkeypatch)
+
+    with pytest.raises(ow.ObservatoryGateError) as excinfo:
+        wrapped(object(), **_CONVERSE_KWARGS)
+
+    assert excinfo.value.gate_decision == "review"
+    assert excinfo.value.gate_reason == "insufficient_evidence"
+    assert excinfo.value.gate_metadata == {"criticality": "high"}
+
+    # Telemetry must still be written for a refused invocation.
+    item = fake_dynamodb.Table("obs-metrics-dev").put_items[0]
+    assert item["gate_decision"] == "review"
+    assert item["gate_reason"] == "insufficient_evidence"
+    assert item["prompt_tokens"] == Decimal("11")
+    assert item["duration_ms"] == Decimal("2000.0")
+    assert item["composite_risk_score"] == Decimal("0.42")
+
+
+def test_observe_bedrock_converse_raises_on_block_verdict(monkeypatch, fake_dynamodb):
+    monkeypatch.setenv("OBSERVATORY_METRICS_TABLE", "obs-metrics-dev")
+    gate = FakeGateWrapper(_FakeDecision("block", "empty_output"))
+    wrapped = _wrap(gate, monkeypatch)
+
+    with pytest.raises(ow.ObservatoryGateError) as excinfo:
+        wrapped(object(), **_CONVERSE_KWARGS)
+
+    assert excinfo.value.gate_decision == "block"
+    assert excinfo.value.gate_reason == "empty_output"
+    assert fake_dynamodb.Table("obs-metrics-dev").put_items[0]["gate_decision"] == "block"
+
+
+def test_observe_bedrock_converse_refuses_when_verdict_is_missing(monkeypatch, fake_dynamodb):
+    """No verdict is not evidence of a safe answer — refuse."""
+    monkeypatch.setenv("OBSERVATORY_METRICS_TABLE", "obs-metrics-dev")
+    gate = FakeGateWrapper(_FakeDecision("", ""))
+    wrapped = _wrap(gate, monkeypatch)
+
+    with pytest.raises(ow.ObservatoryGateError) as excinfo:
+        wrapped(object(), **_CONVERSE_KWARGS)
+
+    assert excinfo.value.gate_decision == "unavailable"
+
+
+def test_observe_bedrock_converse_returns_annotated_result_on_allow(monkeypatch, fake_dynamodb):
+    monkeypatch.setenv("OBSERVATORY_METRICS_TABLE", "obs-metrics-dev")
+    gate = FakeGateWrapper(_FakeDecision("allow", "within_budget"))
+    wrapped = _wrap(gate, monkeypatch)
+
+    result = wrapped(object(), **_CONVERSE_KWARGS)
+
+    # The Converse response is returned untouched apart from the verdict.
+    assert result["stopReason"] == "end_turn"
+    assert result["gate_decision"] == "allow"
+    assert result["gate_reason"] == "within_budget"
+    assert gate.invocations == 1
+    assert len(wrapped.calls) == 1
+
+    item = fake_dynamodb.Table("obs-metrics-dev").put_items[0]
+    assert item["gate_decision"] == "allow"
+    assert item["session_id"] == "sess-9"
+
+    # The span prompt is reconstructed from the Converse kwargs.
+    assert "system prompt" in gate.prompt
+    assert "turn on the fan" in gate.prompt
+
+
+def test_observe_bedrock_converse_propagates_bedrock_failure_without_retrying(monkeypatch):
+    """A failure of the Bedrock call itself surfaces unchanged, and once."""
+    boom = RuntimeError("ThrottlingException")
+    gate = FakeGateWrapper(_FakeDecision("allow"))
+    wrapped = _wrap(gate, monkeypatch, boom=boom)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        wrapped(object(), **_CONVERSE_KWARGS)
+
+    assert excinfo.value is boom
+    assert len(wrapped.calls) == 1
+
+
+def test_observe_bedrock_converse_refuses_when_gate_machinery_fails(monkeypatch):
+    """If the gate cannot produce a verdict, the answer is not cleared."""
+    gate = FakeGateWrapper(_FakeDecision("allow"), invoke_raises=RuntimeError("scoring blew up"))
+    wrapped = _wrap(gate, monkeypatch)
+
+    with pytest.raises(ow.ObservatoryGateError) as excinfo:
+        wrapped(object(), **_CONVERSE_KWARGS)
+
+    assert excinfo.value.gate_decision == "unavailable"
+    # The model is not re-invoked behind the gate's back.
+    assert len(wrapped.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Against the real mcp-observatory (>=0.3.0) when it is installed
+# ---------------------------------------------------------------------------
+
+def test_real_wrapper_constructs_without_any_observatory_secrets(monkeypatch):
+    """
+    0.3.0 makes TokenIssuer/TokenVerifier/CommitTokenManager raise
+    InsecureDefaultSecretError when MCP_OBSERVATORY_TOKEN_SECRET /
+    MCP_OBSERVATORY_COMMIT_SECRET are unset. DeviceWeave only uses
+    instrument_wrapper_api(), which constructs none of them — this pins that,
+    so a future switch to instrument()/build_gate() fails here rather than in
+    a Lambda.
+    """
+    pytest.importorskip("mcp_observatory")
+    for var in (
+        "MCP_OBSERVATORY_TOKEN_SECRET",
+        "MCP_OBSERVATORY_COMMIT_SECRET",
+        "MCP_OBSERVATORY_ALLOW_DEV_SECRET",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    wrapper = ow.get_wrapper()
+
+    assert wrapper is not None
+    assert callable(getattr(wrapper, "invoke", None))
+
+
+def test_real_wrapper_allows_a_normal_converse_response(monkeypatch, fake_dynamodb):
+    pytest.importorskip("mcp_observatory")
     monkeypatch.setenv("OBSERVATORY_METRICS_TABLE", "obs-metrics-dev")
 
-    class FakeReviewWrapper:
-        """Stand-in for a future wrapper whose policy gates on REVIEW."""
+    @ow.observe_bedrock_converse(model_id="test-model")
+    def wrapped(client, **kwargs):
+        return dict(_BEDROCK_RESPONSE)
 
-        def decide(self, *args, **kwargs):
-            return type("WrapperDecision", (), {"action": "review", "reason": "insufficient_evidence"})()
+    result = wrapped(object(), **_CONVERSE_KWARGS)
 
-    monkeypatch.setattr(ow, "_wrapper", FakeReviewWrapper())
-    monkeypatch.setattr(ow, "get_wrapper", lambda: FakeReviewWrapper())
+    assert result["gate_decision"] == "allow"
+    item = fake_dynamodb.Table("obs-metrics-dev").put_items[0]
+    assert item["gate_decision"] == "allow"
+    assert item["prompt_tokens"] > Decimal("0")
+
+
+def test_real_wrapper_blocks_an_empty_converse_response(monkeypatch, fake_dynamodb):
+    pytest.importorskip("mcp_observatory")
+    monkeypatch.setenv("OBSERVATORY_METRICS_TABLE", "obs-metrics-dev")
 
     @ow.observe_bedrock_converse(model_id="test-model")
-    def wrapped():
-        return {"usage": {"inputTokens": 1, "outputTokens": 1}}
+    def wrapped(client, **kwargs):
+        return ""
 
-    result = wrapped()
+    with pytest.raises(ow.ObservatoryGateError) as excinfo:
+        wrapped(object(), **_CONVERSE_KWARGS)
 
-    # Desired future behaviour: a REVIEW verdict must be visible on the
-    # result so callers (bedrock_agent.py) can act on it instead of treating
-    # the call as an ordinary ALLOW.
-    assert result.get("observatory_verdict") == "review"
+    assert excinfo.value.gate_decision == "block"
+    assert excinfo.value.gate_reason == "empty_output"
+    assert fake_dynamodb.Table("obs-metrics-dev").put_items[0]["gate_decision"] == "block"
+
+
+def test_real_wrapper_reviews_when_latency_budget_is_exceeded(monkeypatch, fake_dynamodb):
+    """A REVIEW from the real WrapperPolicy refuses, exactly like a BLOCK."""
+    pytest.importorskip("mcp_observatory")
+    monkeypatch.setenv("OBSERVATORY_METRICS_TABLE", "obs-metrics-dev")
+    monkeypatch.setenv("OBSERVATORY_MAX_LATENCY_MS", "0")
+
+    @ow.observe_bedrock_converse(model_id="test-model")
+    def wrapped(client, **kwargs):
+        return dict(_BEDROCK_RESPONSE)
+
+    with pytest.raises(ow.ObservatoryGateError) as excinfo:
+        wrapped(object(), **_CONVERSE_KWARGS)
+
+    assert excinfo.value.gate_decision == "review"
+    assert excinfo.value.gate_reason == "latency_budget_exceeded"
