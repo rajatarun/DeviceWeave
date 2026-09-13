@@ -76,7 +76,36 @@ for _noisy in ("botocore", "boto3", "urllib3", "s3transfer", "neo4j"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+# Base threshold, kept for backwards compatibility: it is the fallback for
+# every gate below that has no per-gate override set.
+#
+# 0.4 is a *testing* default — permissive enough that resolution rarely falls
+# through while a catalog is still being trained. 0.70 is the recommended
+# production setting for all three gates (see README "Confidence thresholds").
 CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.4"))
+
+
+def _resolve_threshold(env_var: str) -> float:
+    """Per-gate threshold, falling back to CONFIDENCE_THRESHOLD when unset."""
+    raw = os.environ.get(env_var, "").strip()
+    if not raw:
+        return CONFIDENCE_THRESHOLD
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring non-numeric %s=%r — falling back to CONFIDENCE_THRESHOLD=%s",
+            env_var, raw, CONFIDENCE_THRESHOLD,
+        )
+        return CONFIDENCE_THRESHOLD
+
+
+# The three gates are independent: a scene fires a multi-device routine, a
+# tier-1 match acts on one device, and a tier-2 LLM answer acts on the model's
+# say-so. They were sharing one number only because nobody had split them.
+SCENE_CONFIDENCE_THRESHOLD = _resolve_threshold("SCENE_CONFIDENCE_THRESHOLD")
+DEVICE_CONFIDENCE_THRESHOLD = _resolve_threshold("DEVICE_CONFIDENCE_THRESHOLD")
+LLM_CONFIDENCE_THRESHOLD = _resolve_threshold("LLM_CONFIDENCE_THRESHOLD")
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +595,7 @@ def _route_execute(event: Dict[str, Any]) -> Dict[str, Any]:
 
     # 1. Scene resolution
     scene, scene_conf = resolve_scene(normalized)
-    if scene is not None and scene_conf >= CONFIDENCE_THRESHOLD:
+    if scene is not None and scene_conf >= SCENE_CONFIDENCE_THRESHOLD:
         return _handle_scene(scene, scene_conf, normalized, intent_source=intent.source)
 
     # 2. Single-device resolution
@@ -776,7 +805,7 @@ def _handle_device_command(normalized_command: str, intent_source: str = "text")
         device["id"], cosine_score, b_score, final_score,
     )
 
-    if final_score >= CONFIDENCE_THRESHOLD:
+    if final_score >= DEVICE_CONFIDENCE_THRESHOLD:
         return _execute_device(
             device, intent.action, intent.params,
             normalized_command, final_score, tier="cosine",
@@ -789,7 +818,7 @@ def _handle_device_command(normalized_command: str, intent_source: str = "text")
     # ------------------------------------------------------------------
     logger.info(
         "Tier 1 miss (%.4f < %.2f) — invoking LLM resolver (intent_type=%s).",
-        final_score, CONFIDENCE_THRESHOLD, intent_type,
+        final_score, DEVICE_CONFIDENCE_THRESHOLD, intent_type,
     )
 
     try:
@@ -799,7 +828,7 @@ def _handle_device_command(normalized_command: str, intent_source: str = "text")
 
     llm_result = llm_resolve(normalized_command, intent.action, active_catalog)
 
-    if llm_result and llm_result.get("confidence", 0) >= CONFIDENCE_THRESHOLD:
+    if llm_result and llm_result.get("confidence", 0) >= LLM_CONFIDENCE_THRESHOLD:
         catalog_index = {d["id"]: d for d in active_catalog}
         llm_conf = llm_result["confidence"]
 
@@ -852,14 +881,15 @@ def _handle_device_command(normalized_command: str, intent_source: str = "text")
     return _error(
         422,
         f"Could not resolve command with sufficient confidence "
-        f"(final={final_score:.4f}, threshold={CONFIDENCE_THRESHOLD}). "
+        f"(final={final_score:.4f}, threshold={DEVICE_CONFIDENCE_THRESHOLD}). "
         f"Closest cosine match: '{device['name']}'.",
         extra={
             "best_match_id": device["id"],
             "cosine_score": cosine_score,
             "behavior_score": b_score,
             "final_score": final_score,
-            "threshold": CONFIDENCE_THRESHOLD,
+            "threshold": DEVICE_CONFIDENCE_THRESHOLD,
+            "llm_threshold": LLM_CONFIDENCE_THRESHOLD,
             "hint": "Use POST /learn to add new phrases for a device.",
         },
     )

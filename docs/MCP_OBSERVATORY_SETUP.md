@@ -4,7 +4,7 @@ This document describes how to configure MCP Observatory for DeviceWeave telemet
 
 ## Overview
 
-MCP Observatory provides instrumentation for AWS Bedrock API calls, recording metrics to DynamoDB for monitoring and analysis. The implementation in DeviceWeave follows the guidelines from [MCP Observatory Implementation](https://github.com/rajatarun/TeamWeave/blob/main/docs/MCP_OBSERVATORY_IMPLEMENTATION.md).
+MCP Observatory provides instrumentation **and output gating** for AWS Bedrock API calls: it records metrics to DynamoDB for monitoring and analysis, and returns a verdict on each model response that DeviceWeave enforces before the response can drive device actuation. The implementation in DeviceWeave follows the guidelines from [MCP Observatory Implementation](https://github.com/rajatarun/TeamWeave/blob/main/docs/MCP_OBSERVATORY_IMPLEMENTATION.md).
 
 ## Prerequisites
 
@@ -15,8 +15,15 @@ MCP Observatory provides instrumentation for AWS Bedrock API calls, recording me
 ## Installation
 
 Dependencies are listed in `src/requirements.txt`:
-- `mcp-observatory==0.2.0` — telemetry instrumentation library
+- `mcp-observatory>=0.3.0` — telemetry instrumentation and gating library
 - `boto3>=1.26.0` — AWS SDK for DynamoDB access
+
+### What 0.3.0 changed, and what it means here
+
+| 0.3.0 change | Effect on DeviceWeave |
+|---|---|
+| `TokenIssuer` / `TokenVerifier` / `CommitTokenManager` raise `InsecureDefaultSecretError` when `MCP_OBSERVATORY_TOKEN_SECRET` / `MCP_OBSERVATORY_COMMIT_SECRET` are unset (unless `MCP_OBSERVATORY_ALLOW_DEV_SECRET=1`) | **None.** DeviceWeave imports only `instrument_wrapper_api` and `WrapperPolicy`; the wrapper API builds a `Tracer` and an `InvocationWrapperAPI` and constructs none of those three. No secret has to be provisioned, and none is referenced in `template.yaml`. `tests/test_observatory_wrapper.py::test_real_wrapper_constructs_without_any_observatory_secrets` pins this, so adopting `instrument()` (which does construct a `TokenIssuer`) or `aws.gate.build_gate()` later fails in tests rather than in a Lambda. |
+| `MCP_OBSERVATORY_MAX_INPUT_BYTES` (default 10240) short-circuits oversized calls to `input_too_large` | **None today** — the limit is consulted by `core/interceptor.execute_v2()` and `proposal_commit/proposer.py`, neither of which is on DeviceWeave's path. It is nevertheless set explicitly to `65536` in `template.yaml`, because a Converse payload (~1.5 KB system prompt + ~4.4 KB `toolConfig` + up to 10 rounds of history and device-roster tool results) passes the 10 KB default inside the first tool round: were one of those paths ever adopted, the default would silently route every real conversation to a fallback. |
 
 Install with:
 ```bash
@@ -129,16 +136,44 @@ The `observatory_wrapper` module manages the lifecycle of the MCP Observatory wr
 The `run_agent()` function's Bedrock Converse API call is wrapped with the `@observe_bedrock_converse` decorator:
 
 ```python
-@observe_bedrock_converse
+@observe_bedrock_converse(model_id=_MODEL_ID)
 def _call_bedrock_converse(client, **kwargs) -> Dict[str, Any]:
     """Wrap Bedrock converse call for observatory instrumentation."""
     return client.converse(**kwargs)
 ```
 
 This decorator:
-- Records request metadata (model ID, system prompt, tool config)
-- Captures output tokens from the Bedrock response
-- Logs telemetry to DynamoDB with automatic TTL-based cleanup
+- Runs the call through `InvocationWrapperAPI.invoke()`, which records request metadata (model ID, system prompt, tool config), token counts, cost and risk signals
+- Logs telemetry to DynamoDB with automatic TTL-based cleanup — on every path, refusals included
+- Enforces the returned `WrapperDecision` (see below)
+
+### Output gating
+
+`WrapperPolicy.decide()` returns one of three verdicts, and `observatory_wrapper.py` acts on each:
+
+| Verdict | Typical reason | DeviceWeave behaviour |
+|---|---|---|
+| `allow` | `within_budget` | The Converse response is returned with `gate_decision` / `gate_reason` attached. |
+| `review` | `cost_budget_exceeded`, `latency_budget_exceeded`, insufficient evidence on a high-criticality call | **Refused** — `ObservatoryGateError` is raised. |
+| `block` | `empty_output` | **Refused** — `ObservatoryGateError` is raised. |
+| *(none — the gate itself failed)* | — | **Refused.** A missing verdict is not evidence of a safe answer. |
+
+A `review` is refused rather than annotated or queued because the Converse response drives the agentic loop's next step, which is dispatching the model's tool calls — including `execute_device_command`, which actuates physical hardware with no undo. There is no human-approval queue for an answer to wait in, so "a human should look at this" and "act on it now, unsupervised" cannot both hold.
+
+The error propagates out of `run_agent()`; both callers already fail safe. `app._route_execute_conversational()` returns `502` and does **not** save the session; `sms_handler` replies with an error and discards the turn. No half-gated turn is persisted, and no device I/O happens.
+
+Budgets are configurable so that a refusal can be tuned rather than endured:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OBSERVATORY_MAX_COST_USD` | `0.25` (library default) | Per-invocation cost ceiling; above it, `review`. |
+| `OBSERVATORY_MAX_LATENCY_MS` | `8000` (library default) | Per-invocation latency ceiling; above it, `review`. |
+
+Note that the cost figure is the library's own estimate from token counts and its default price table (it has no entry for Claude Haiku 4.5), not a Bedrock-billed amount.
+
+### Graceful degradation
+
+If `mcp-observatory` is not installed or the wrapper fails to construct, `get_wrapper()` returns `None` and the Bedrock call runs unwrapped — no gating, no telemetry, no crash. If a wrapper is constructed but exposes no `invoke()` (a release older than the wrapper API), the pre-gate telemetry-only path runs instead. Neither case blocks the conversational agent.
 
 ## Monitoring
 
@@ -180,7 +215,7 @@ For real-time dashboard queries and monitoring, configure an Amazon Managed Prom
 Run the test suite to verify the instrumentation:
 
 ```bash
-pytest src/tests/
+python3 -m pytest -q
 ```
 
 The observatory wrapper is designed to be transparent — tests should pass with or without telemetry enabled.
