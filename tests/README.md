@@ -1,7 +1,7 @@
 # DeviceWeave test suite
 
 ```
-python3 -m pytest -q     # 62 passed, 1 xfailed in well under 1s
+python3 -m pytest -q     # 79 passed in well under 1s
 ```
 
 `pytest.ini` sets `pythonpath = src` so every module under `src/` imports by
@@ -23,7 +23,8 @@ packages actually needed (`pytest`, `boto3`).
 | `device_resolver.resolve_device` | the TF-vector cosine path with a stubbed device/phrase corpus, blank query, empty catalog, and registry-not-configured propagation |
 | `policy_engine.evaluator.compute_verdict` | BLOCK/MODIFY/ALLOW precedence using the README's three example rules verbatim, AND-semantics across multiple conditions, BLOCK > MODIFY precedence, the `turn_off`/`get_status` safe-action bypass, and defensive device_type re-scoping |
 | `observatory_wrapper.get_wrapper` / `_push_metric` | singleton caching, graceful `None` on import failure, the exact DynamoDB item shape `_push_metric` writes (types included — token counts as `Decimal`), non-blocking behaviour on a DynamoDB failure |
-| `observatory_wrapper.observe_bedrock_converse` | falls through to the wrapped call when the wrapper is unavailable; pushes a metric on success |
+| `observatory_wrapper.observe_bedrock_converse` | falls through to the wrapped call when the wrapper is unavailable; telemetry-only (pre-gate) behaviour when the wrapper exposes no `invoke()`; and, on the gated path, REVIEW/BLOCK/missing-verdict refusals (`ObservatoryGateError`, span still pushed with `gate_decision`/`gate_reason`), the `gate_decision`/`gate_reason` annotation on ALLOW, a Bedrock failure propagating unchanged and un-retried, and gate-machinery failure refusing rather than re-invoking the model. Four tests run against the real `mcp-observatory` (`importorskip`): ALLOW, empty-output BLOCK, latency-budget REVIEW, and construction with no `MCP_OBSERVATORY_*` secrets set |
+| `app` confidence thresholds | per-gate override, fallback to `CONFIDENCE_THRESHOLD`, the shipped `0.4` default, non-numeric fallback, and one test per gate (scene / device / LLM) proving each is independent of the other two |
 | `app.handler` route dispatch | `GET /health` (registry configured and not), `POST /execute` happy path with the resolver and executor stubbed, unsupported-capability 422, missing/invalid body 400s, both-tiers-failed 422, and unknown-route/unknown-method 404s |
 
 ## What's stubbed, and why
@@ -55,10 +56,13 @@ packages actually needed (`pytest`, `boto3`).
   metric-shape tests.
 - **`mcp_observatory`** — two opt-in fixtures: `missing_mcp_observatory`
   (forces `ImportError` via `sys.modules["mcp_observatory"] = None`) and
-  `fake_mcp_observatory` (injects a minimal fake module) so the
-  "package available" tests don't depend on the real `mcp-observatory`
-  package actually being pip-installed in whatever environment runs this
-  suite.
+  `fake_mcp_observatory` (injects a minimal fake module, whose wrapper
+  deliberately has no `invoke()` and so exercises the telemetry-only
+  degradation path) so the "package available" tests don't depend on the
+  real `mcp-observatory` package actually being pip-installed in whatever
+  environment runs this suite. The four tests that *do* want the real
+  library `pytest.importorskip` it, so the suite still runs green without
+  it — install `mcp-observatory>=0.3.0` to exercise them.
 
 `app.py` route-dispatch tests additionally monkeypatch `app.resolve_scene`,
 `app.resolve_device`, `app.decision_engine.compute_score`, `app.execute_steps`,
@@ -82,33 +86,30 @@ closed without `MCP_OBSERVATORY_ALLOW_DEV_SECRET=1`) will exercise:
    required constructor argument to `instrument_wrapper_api()` that raises on
    call, these tests catch it immediately.
 
-2. **Execute path when the gate returns REVIEW** — **the code has no such
-   path today**, so this is the `xfail`
-   (`test_observe_bedrock_converse_surfaces_review_verdict` in
-   `test_observatory_wrapper.py`). See "xfail" below for why.
+2. **Execute path when the gate returns REVIEW** — now wired and asserted.
+   `observe_bedrock_converse()` runs the Bedrock call through
+   `InvocationWrapperAPI.invoke()` and enforces the returned
+   `WrapperDecision`: `review`, `block` and a missing verdict all raise
+   `ObservatoryGateError`, so the agentic loop never reaches tool dispatch
+   with an uncleared answer; only `allow` returns the response. See "the
+   former xfail" below.
 
-## xfail
+## The former xfail
 
 **`test_observatory_wrapper.py::test_observe_bedrock_converse_surfaces_review_verdict`**
 
-Reason recorded on the test: `observatory_wrapper.observe_bedrock_converse()`
-never calls any decision/gating method on the wrapper object `get_wrapper()`
-returns — it only checks the wrapper for truthiness as an on/off switch, then
-builds its own span dict from the raw Bedrock response and writes it straight
-to DynamoDB via `_push_metric()`. No `WrapperDecision`, no `.decide()` call,
-nothing from `mcp_observatory.policy`/`risk`/`fallback` is ever invoked. This
-is true **today, at `mcp-observatory==0.2.0`**, independent of the 0.3.0
-re-pin: even the *current* `WrapperPolicy.decide()` (which already returns
-`action="review"` on a cost/latency budget overrun in 0.2.0) is dead code as
-far as DeviceWeave is concerned. So when 0.3.0 adds the HIGH-criticality
-insufficient-evidence → `REVIEW` gate, there is still nothing in
-`observatory_wrapper.py` or `bedrock_agent.py` that would observe or act on
-it — a `REVIEW` verdict is silently indistinguishable from `ALLOW`.
+This was a `strict=True` xfail recording that
+`observatory_wrapper.observe_bedrock_converse()` never called any
+decision/gating method on the wrapper object `get_wrapper()` returned — it
+used the wrapper only as a truthy on/off switch, built its own span dict from
+the raw Bedrock response, and wrote that straight to DynamoDB. A `REVIEW`
+verdict was therefore indistinguishable from `ALLOW`, at 0.2.0 as much as at
+0.3.0.
 
-The test is marked `strict=True` specifically so that if someone later wires
-the gate in, the test flips to an unexpected pass (XPASS) and **fails the
-run**, forcing the assertion to be promoted from "documents the gap" to
-"proves the fix."
+The gate is now wired (`ObservatoryGateError`), so the test is a plain
+assertion: a REVIEW verdict raises, carries `gate_decision` / `gate_reason` /
+`gate_metadata`, and still writes its telemetry span. The suite has no xfails
+left — a re-introduced gap would show up as a failure, not as an expected one.
 
 No other correctness bugs were found and marked `xfail`; the rest of the
 findings are README/code discrepancies documented in the task's final report.
