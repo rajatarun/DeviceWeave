@@ -1,0 +1,95 @@
+{
+  "contract": "observatory_metrics_item",
+  "version": "1.0.0",
+  "canonical_home": "https://github.com/rajatarun/mcp-observatory/blob/main/contracts/observatory_metrics_item.json",
+  "description": [
+    "The item contract for the shared OBSERVATORY_METRICS DynamoDB table, provisioned by",
+    "the tarun-teamweave-shared stack and written by every weave service that emits span",
+    "telemetry. The table has many writers in different languages and several readers that",
+    "build dashboards from it, none of which can see each other's code, so the item shape",
+    "is a cross-repository interface and is pinned here rather than in any one consumer.",
+    "Copies vendored into consumer repositories must carry the same version string; a",
+    "conformance test in each repository asserts its writer or reader against this file."
+  ],
+
+  "key_schema": {
+    "partition_key": "pk",
+    "sort_key": "sk",
+    "note": [
+      "DynamoDB attribute names are case sensitive and the table declares these exactly.",
+      "An item whose key attributes are spelled any other way (PK/SK, Pk/Sk) is rejected",
+      "by PutItem with a ValidationException, which a writer that swallows exceptions",
+      "will report as success while writing nothing at all."
+    ]
+  },
+
+  "sk_grammar": {
+    "format": "{start_time_iso8601}#{trace_id}",
+    "rationale": "Readers range-query on sk lexicographically, so the timestamp must sort first and must be UTC ISO 8601."
+  },
+
+  "pk_grammar": {
+    "format": "{namespace}#{discriminator}",
+    "note": [
+      "The namespace is what makes a row findable. A reader queries whole partitions by",
+      "exact pk, so a writer using a namespace no reader enumerates is writing rows that",
+      "are durable, billable and permanently invisible to every dashboard."
+    ]
+  },
+
+  "namespace_registry": {
+    "OBSERVATORY": {
+      "discriminator": "operation",
+      "discriminator_values": ["invoke_agent", "invoke_model", "classify_question", "synthesize_answer"],
+      "writers": ["teamweave", "deviceweave", "contextweave", "screenweave-mcp"],
+      "readers": ["teamweave:agent_metrics_handler", "teamweave:unified_observability_handler", "deployweave:observatory_metrics"],
+      "status": "active"
+    },
+    "SPAN": {
+      "discriminator": "tool_name_or_model",
+      "writers": ["mcp_observatory.aws.DynamoDBSpanExporter"],
+      "readers": [],
+      "status": "unread",
+      "note": [
+        "This is the namespace the shared library exporter writes. No reader queries it.",
+        "Migrating a service off its vendored copy onto the library exporter (the stated",
+        "point of platform edge E2) therefore removes that service from every dashboard",
+        "without any error surfacing. Resolving this is a platform decision recorded in",
+        "docs/integration-audit.md, not something a consumer repository can fix alone."
+      ]
+    },
+    "WRAPPER": {
+      "discriminator": "method",
+      "writers": ["toolweave"],
+      "readers": [],
+      "status": "unread"
+    },
+    "INVOCATION": {
+      "discriminator": "method",
+      "writers": ["toolweave"],
+      "readers": [],
+      "status": "unread"
+    }
+  },
+
+  "required_attributes": {
+    "pk": "S",
+    "sk": "S",
+    "ttl": "N"
+  },
+
+  "recommended_attributes": {
+    "service": "S -- the emitting service; the only attribute that identifies a row's origin once several writers share a namespace",
+    "operation": "S",
+    "trace_id": "S",
+    "timestamp": "S"
+  },
+
+  "invariants": [
+    "I1: key attributes are spelled 'pk' and 'sk' in lower case",
+    "I2: pk matches {namespace}#{discriminator} with a namespace listed in namespace_registry",
+    "I3: sk matches {iso8601}#{trace_id}",
+    "I4: ttl is present and is a Unix epoch in the future, so rows expire rather than accumulate",
+    "I5: a writer's namespace has at least one reader, or is explicitly marked status=unread here"
+  ]
+}
