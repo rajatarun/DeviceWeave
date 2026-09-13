@@ -23,7 +23,7 @@ from llm_provider.base import BaseLLMProvider
 logger = logging.getLogger(__name__)
 
 _GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-_DEFAULT_MODEL = "gemini-3-flash-preview"
+_DEFAULT_MODEL = "gemini-3.8-flash"
 
 _api_key_cache: Optional[str] = None
 
@@ -53,7 +53,8 @@ def _load_api_key(secret_name: str) -> str:
 class GeminiLLMProvider(BaseLLMProvider):
     """
     Calls the Gemini generateContent endpoint with a system instruction and
-    a single user turn.  Compatible with all gemini-2.x and gemini-1.5 models.
+    a single user turn.  Defaults to gemini-3.8-flash but is not hard-pinned
+    to that model — any gemini-* model name can be passed through.
     """
 
     def __init__(

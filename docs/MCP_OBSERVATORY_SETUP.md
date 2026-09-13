@@ -166,8 +166,8 @@ Budgets are configurable so that a refusal can be tuned rather than endured:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `OBSERVATORY_MAX_COST_USD` | `0.25` (library default) | Per-invocation cost ceiling; above it, `review`. |
-| `OBSERVATORY_MAX_LATENCY_MS` | `8000` (library default) | Per-invocation latency ceiling; above it, `review`. |
+| `OBSERVATORY_MAX_COST_USD` | `5.00` (library default `0.25`) | Per-invocation cost ceiling; above it, `review` — which this repo refuses. Raised deliberately: the value compared is the library's own **estimate** from a price table with no Claude Haiku entry, not a Bedrock-billed amount. A runaway-loop backstop, not a budget. |
+| `OBSERVATORY_MAX_LATENCY_MS` | `30000` (library default `8000`) | Per-invocation latency ceiling; above it, `review` — which this repo refuses. Raised deliberately: an 8 s Converse round is ordinary for an agentic loop carrying a device roster over up to ten rounds, so the library default refuses slow-but-correct calls. Latency is a liveness signal, not a safety one. |
 
 Note that the cost figure is the library's own estimate from token counts and its default price table (it has no entry for Claude Haiku 4.5), not a Bedrock-billed amount.
 

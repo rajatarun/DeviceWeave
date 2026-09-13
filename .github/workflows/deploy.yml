@@ -266,7 +266,7 @@ jobs:
               "LambdaPublicSubnetIds=${{ steps.public_subnets.outputs.public_subnet_ids }}" \
               AgentProvider=gemini \
               LLMProvider=gemini \
-              GeminiModelId=gemini-3-flash-preview \
+              GeminiModelId=gemini-3.8-flash \
               ObservatoryMetricsTableName="${{ steps.observatory.outputs.observatory_table_name }}" \
               MemgraphSecretArn="${{ steps.memgraph.outputs.memgraph_secret_arn }}"
 
