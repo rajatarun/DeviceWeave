@@ -1,0 +1,10 @@
+# Test-only dependencies for DeviceWeave.
+#
+# Runtime deps (src/requirements.txt) are NOT required to run the test suite —
+# tests/conftest.py stubs the network/AWS-touching pieces of boto3, Memgraph
+# (graph_engine), Open-Meteo (weather_client) and mcp-observatory so the whole
+# suite runs offline. boto3 itself is still needed because several modules
+# import it lazily even on code paths the tests take (e.g. aws_clients).
+
+pytest>=7.4
+boto3>=1.26.0
