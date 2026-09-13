@@ -104,9 +104,15 @@ The if/elif chain is the simplest implementation but scatters protocol knowledge
 
 ---
 
-## 12. boto3 excluded from requirements.txt
+## 12. boto3 pinned in requirements.txt (reversed: it used to be excluded)
 
-`boto3` is pre-installed in the Lambda Python 3.11 runtime. Including it in `requirements.txt` causes SAM to bundle it into the deployment package, adding approximately 10 MB. It is deliberately excluded from `src/requirements.txt`. Developers installing dependencies locally for testing should run `pip install boto3` separately. This is documented in the README and in `learning_store.py`.
+**Original decision**: `boto3` is pre-installed in the Lambda Python 3.11 runtime. Including it in `requirements.txt` causes SAM to bundle it into the deployment package, adding approximately 10 MB, so it was deliberately excluded and developers installed it locally with `pip install boto3`.
+
+**Current state**: `src/requirements.txt` pins `boto3>=1.26.0`. The pin was added in commit `d5c11cc`, which adopted MCP Observatory for Bedrock telemetry — the observatory path writes spans to DynamoDB, and the change declared the SDK it writes with rather than relying on whatever version the runtime happens to ship. The ~10 MB package cost above is real and was accepted at that point; this file simply kept describing the world before it.
+
+Worth knowing if the trade-off is ever revisited: `mcp-observatory` itself does not require `boto3` (it declares only `asyncpg`, and imports `boto3` lazily inside its optional `aws` extra), and DeviceWeave's own DynamoDB writes go through `aws_clients.get_dynamodb_resource()`. So the pin is a version floor and an explicit statement of intent, not a hard dependency of the observatory library. Dropping it would restore the 10 MB but return the deployment to whatever `boto3` the runtime provides.
+
+The lazy `import boto3` inside `learning_store._table()` is unrelated to packaging: it keeps the SDK off the cold-start import path for requests that never touch the learning table.
 
 ---
 

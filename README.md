@@ -949,4 +949,4 @@ sam local invoke DeviceWeaveFunction \
   --event '{"requestContext":{"http":{"method":"POST","path":"/execute"}},"body":"{\"command\":\"starting work\"}"}'
 ```
 
-`boto3` is pre-installed in the Lambda Python 3.11 runtime and is not in `src/requirements.txt` (would add ~10 MB to the package). Install it locally only.
+`boto3` is pre-installed in the Lambda Python 3.11 runtime and is *also* pinned in `src/requirements.txt` (`boto3>=1.26.0`, added with the MCP Observatory telemetry path), so SAM bundles it — roughly 10 MB of the deployment package. See DECISIONS.md #12 for the trade-off.

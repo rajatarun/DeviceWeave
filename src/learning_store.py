@@ -16,9 +16,12 @@ Degraded mode: when LEARNING_TABLE_NAME is not set (e.g. local dev without
 DynamoDB), every function returns an empty/False result silently. The rest
 of the system continues without learning.
 
-boto3 is pre-installed in the Lambda Python 3.11 runtime.
-For local dev: pip install boto3 (not included in requirements.txt to avoid
-adding ~10 MB to the Lambda deployment package).
+boto3 is pre-installed in the Lambda Python 3.11 runtime and is also pinned
+in src/requirements.txt (boto3>=1.26.0, added with the MCP Observatory
+telemetry path — see DECISIONS.md #12), so a local `pip install -r
+src/requirements.txt` already provides it. The import below is kept lazy to
+keep the SDK off the cold-start path for requests that never touch the
+learning table, not because the package is missing from requirements.
 """
 
 import logging
@@ -40,7 +43,7 @@ LEARNING_THRESHOLD: float = float(
 
 def _table():
     """Lazy DynamoDB table resource — created once per Lambda container."""
-    import boto3  # noqa: PLC0415 — intentional lazy import (not in requirements.txt)
+    import boto3  # noqa: PLC0415 — intentional lazy import (cold-start cost)
     from boto3.dynamodb.conditions import Key as _Key  # noqa: F401
     dynamodb = get_dynamodb_resource()
     return dynamodb.Table(_TABLE_NAME)
