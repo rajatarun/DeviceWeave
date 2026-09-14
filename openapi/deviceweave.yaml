@@ -1,0 +1,751 @@
+openapi: 3.0.3
+
+info:
+  title: DeviceWeave API
+  version: "1.0.0"
+  description: |
+    Natural-language home automation: an intent arrives as text or as a camera
+    observation, gets resolved to a scene or a device, is checked against the
+    policy engine, and is executed against a provider.
+
+    **Resolving the server and the data stores.** Do not hardcode anything:
+
+        aws cloudformation describe-stacks --stack-name deviceweave \
+          --query "Stacks[0].Outputs"
+
+    `scripts/stack_env.py` turns those outputs into environment variables —
+    the API base URL, all five DynamoDB tables **and the two GSI names**. A
+    table name alone does not let you query a table whose access pattern is an
+    index: you either name the index or you scan.
+
+    **503 means unconfigured, not down.** Several routes return 503 when the
+    table they need has no environment variable set — learnings, presence and
+    policies each do. A harness that treats 503 as a transient outage will
+    retry forever against a stack that is simply missing a setting.
+
+    `tests/test_openapi_contract.py` checks this file against the `Path:` and
+    `Method:` entries in `template.yaml` in both directions, so it cannot
+    document a route the gateway does not forward.
+
+servers:
+  - url: "{apiBaseUrl}"
+    description: Resolved from the ApiBaseUrl stack output
+    variables:
+      apiBaseUrl:
+        default: https://example.execute-api.us-east-1.amazonaws.com/prod
+        description: The ApiBaseUrl output of the deviceweave stack
+
+tags:
+  - name: execution
+    description: Turning an intent into a device action
+  - name: devices
+    description: The device registry, populated by provider ingestion
+  - name: learning
+    description: Phrase-to-device bindings
+  - name: policy
+    description: Natural-language rules compiled to a validated DSL
+  - name: presence
+    description: Home-occupancy state, consumed by the policy engine
+
+paths:
+
+  /health:
+    get:
+      tags: [execution]
+      operationId: getHealth
+      summary: Liveness, plus which subsystems are actually configured
+      description: |
+        Always 200. `registry_ok: false` with a `registry_error` means the
+        device registry could not be read — the service is up and the catalog
+        is empty, which is not the same thing and does not show in the status
+        code.
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, devices, registry_ok, scenes, learning_enabled, graph_enabled]
+                properties:
+                  status: { type: string, example: healthy }
+                  devices: { type: integer, description: Active devices in the catalog }
+                  registry_ok: { type: boolean }
+                  registry_error:
+                    type: string
+                    description: Present only when registry_ok is false
+                  scenes: { type: integer }
+                  learning_enabled: { type: boolean, description: LEARNING_TABLE_NAME is set }
+                  graph_enabled: { type: boolean }
+
+  /execute:
+    post:
+      tags: [execution]
+      operationId: execute
+      summary: Execute an intent — one-shot, or a conversational turn
+      description: |
+        **Two modes, selected by the body, not by the path.** Supplying a
+        non-empty `session_id` switches to the agentic loop with
+        DynamoDB-persisted history and returns `{"type": "conversational", …}`.
+        Without it, the request is one-shot: the command is matched against
+        scenes first and falls through to single-device resolution.
+
+        A one-shot intent can come from text (`command`) or from a camera
+        (`source: "vision"` with an `observation`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                command: { type: string, description: The natural-language instruction }
+                session_id:
+                  type: string
+                  description: Non-empty switches to conversational mode, where `command` is required
+                source:
+                  type: string
+                  description: e.g. "vision" for a camera-derived intent
+                observation:
+                  type: object
+                  description: Camera payload, when source is vision
+                  additionalProperties: true
+      responses:
+        "200":
+          description: Executed, or answered conversationally
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [type]
+                additionalProperties: true
+                properties:
+                  type:
+                    type: string
+                    description: '"conversational" for session mode; otherwise the one-shot result kind'
+                  session_id: { type: string, description: Conversational mode only }
+                  response: { type: string, description: Conversational mode only }
+                  messages_in_session: { type: integer, description: Conversational mode only }
+        "400":
+          description: Body is not JSON, no intent could be extracted, or conversational mode got an empty command
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: The agent failed (conversational mode)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /providers:
+    get:
+      tags: [devices]
+      operationId: listProviders
+      responses:
+        "200":
+          description: Registered device providers
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [providers, count]
+                properties:
+                  providers: { type: array, items: { type: string } }
+                  count: { type: integer }
+
+  /ingest:
+    post:
+      tags: [devices]
+      operationId: ingest
+      summary: Sync devices from a provider into the registry
+      description: |
+        Returns **202** — the pipeline has run, but this is the only write path
+        into the registry, so `GET /devices` reflects it only once the cache
+        invalidates.
+
+        Ring has a two-factor flow that arrives as a **200, not an error**:
+        `{"status": "2fa_required"}` with the code sent by SMS, then the same
+        call again with `two_fa_code`. A harness that only checks for 2xx will
+        read "we texted you a code" as a successful sync.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider: { type: string, default: kasa }
+                mode: { type: string, enum: [full, delta], default: delta }
+                refresh_token: { type: string, description: Ring only }
+                two_fa_code: { type: string, description: Ring only — the SMS code }
+      responses:
+        "200":
+          description: Ring two-factor challenge — not a completed sync
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, message, next_step]
+                properties:
+                  status: { type: string, enum: [2fa_required, 2fa_code_invalid] }
+                  message: { type: string }
+                  next_step: { type: string, description: The exact call to make next }
+        "202":
+          description: The sync ran; the body is the pipeline's result
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400":
+          description: Unknown mode, or the pipeline rejected the request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: The provider pipeline failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /devices:
+    get:
+      tags: [devices]
+      operationId: listDevices
+      responses:
+        "200":
+          description: The active device catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices, count]
+                properties:
+                  devices:
+                    type: array
+                    items: { $ref: "#/components/schemas/Device" }
+                  count: { type: integer }
+        "503": { $ref: "#/components/responses/RegistryUnavailable" }
+    post:
+      tags: [devices]
+      operationId: createDeviceRejected
+      summary: Always 405 — devices come from provider ingestion
+      description: |
+        API Gateway routes this, and the handler refuses it: devices are not
+        created by hand, they are discovered. Use `POST /ingest`. It is
+        documented because it is routed — a client that finds it and expects a
+        create gets a 405 with the alternative in the message.
+      responses:
+        "405":
+          description: '"Devices are managed via provider ingest. Use POST /ingest to sync."'
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /devices/{device_id}:
+    parameters:
+      - $ref: "#/components/parameters/DeviceId"
+    get:
+      tags: [devices]
+      operationId: getDevice
+      responses:
+        "200":
+          description: The device
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/RegistryUnavailable" }
+    put:
+      tags: [devices]
+      operationId: updateDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: The updated device
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400":
+          description: Body is not valid JSON, or a field is unusable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/RegistryUnavailable" }
+    delete:
+      tags: [devices]
+      operationId: deleteDevice
+      summary: Deactivate a device
+      description: |
+        A soft delete: every registry row for the device is set to
+        `status: inactive`. The rows stay, so a later ingest can revive the
+        device rather than re-creating it.
+      responses:
+        "200":
+          description: Deactivated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_id, status, updated_at]
+                properties:
+                  device_id: { type: string }
+                  status: { type: string, enum: [inactive] }
+                  updated_at: { type: string, format: date-time }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500":
+          description: The deactivation write failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /scenes:
+    get:
+      tags: [execution]
+      operationId: listScenes
+      description: |
+        The active catalog is the built-in `SCENE_CATALOG` minus anything
+        deleted through `DELETE /scenes/{scene_id}`, so a scene that is gone
+        here may still exist in the code.
+      responses:
+        "200":
+          description: Active scenes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scenes, count]
+                properties:
+                  scenes:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+                  count: { type: integer }
+
+  /scenes/{scene_id}:
+    delete:
+      tags: [execution]
+      operationId: deleteScene
+      parameters:
+        - name: scene_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Removed from the active catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scene_id, status]
+                properties:
+                  scene_id: { type: string }
+                  status: { type: string, enum: [deleted] }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500":
+          description: The delete failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /learn:
+    post:
+      tags: [learning]
+      operationId: learnPhrase
+      summary: Bind a phrase to a device
+      description: |
+        `persisted: false` in a 200 means the binding already existed, not that
+        the write failed — the request succeeded either way.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id, phrase]
+              properties:
+                device_id: { type: string }
+                phrase: { type: string, description: Lower-cased before storage }
+      responses:
+        "200":
+          description: Learned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, device_id, phrase, persisted]
+                properties:
+                  status: { type: string, enum: [learned] }
+                  device_id: { type: string }
+                  phrase: { type: string }
+                  persisted: { type: boolean, description: false when the binding already existed }
+        "400":
+          description: Body is not JSON, or device_id/phrase is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: The device_id is not in the active catalog; the error lists the known ids
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/StoreUnconfigured" }
+
+  /learnings:
+    get:
+      tags: [learning]
+      operationId: listLearnings
+      description: |
+        A full table scan, newest first, with no pagination — every binding is
+        returned in one response.
+      responses:
+        "200":
+          description: All phrase-to-device bindings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [learnings, count]
+                properties:
+                  learnings:
+                    type: array
+                    items:
+                      type: object
+                      required: [device_id, phrase, source, confidence, use_count, created_at]
+                      properties:
+                        device_id: { type: string }
+                        phrase: { type: string }
+                        source: { type: string, default: learned }
+                        confidence: { type: number }
+                        use_count: { type: integer }
+                        created_at: { type: string }
+                  count: { type: integer }
+        "500":
+          description: The scan failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/StoreUnconfigured" }
+    delete:
+      tags: [learning]
+      operationId: deleteLearning
+      summary: Remove one phrase-to-device binding
+      description: |
+        Identified by a **request body**, not a path parameter, because the key
+        is the (device_id, phrase) pair. Idempotent: deleting a binding that
+        does not exist is a 200 with `deleted: true`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_id, phrase]
+              properties:
+                device_id: { type: string }
+                phrase: { type: string }
+      responses:
+        "200":
+          description: Gone (or never present)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_id, phrase, deleted]
+                properties:
+                  device_id: { type: string }
+                  phrase: { type: string }
+                  deleted: { type: boolean }
+        "400":
+          description: Body is not JSON, or device_id/phrase is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The delete failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/StoreUnconfigured" }
+
+  /presence:
+    get:
+      tags: [presence]
+      operationId: getPresence
+      description: |
+        Defaults to `is_home: true` with a null `updated_at` when nothing has
+        ever been written — the policy engine gets the safe answer rather than
+        an error, so a null `updated_at` is the only way to tell "nobody has
+        set this" from "someone set it to true".
+      responses:
+        "200":
+          description: Current occupancy state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Presence" }
+        "500":
+          description: The read failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/StoreUnconfigured" }
+    post:
+      tags: [presence]
+      operationId: setPresence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [is_home]
+              properties:
+                is_home:
+                  type: boolean
+                  description: Must be a real boolean — "true" as a string is a 400
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Presence" }
+        "400":
+          description: Body is not JSON, is_home missing, or is_home is not a boolean
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: The write failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/StoreUnconfigured" }
+
+  /policies/author:
+    post:
+      tags: [policy]
+      operationId: authorPolicy
+      summary: Compile a natural-language rule into a validated policy
+      description: |
+        Three stages, and the status code says which one stopped: an LLM
+        infrastructure failure is a **502** (retryable), a rule the validator
+        rejects is a **422** (not retryable — the rule itself is the problem),
+        and a storage failure is a 500. The 422 body carries
+        `rejection_stage`, the confidence threshold, and the LLM's raw output,
+        so a rejection can be diagnosed without re-running the compile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rule]
+              properties:
+                rule: { type: string, description: The rule in plain language }
+      responses:
+        "201":
+          description: Compiled, validated and stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+        "400":
+          description: Body is not JSON, or rule is missing/empty
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: The compiled rule failed validation
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    properties:
+                      rule: { type: string }
+                      rejection_stage: { type: string, enum: [validation] }
+                      confidence_threshold: { type: number }
+                      llm_raw_output:
+                        description: What the compiler produced, so the rejection can be diagnosed
+                        type: object
+                        additionalProperties: true
+        "500":
+          description: Persisting the policy failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: The LLM compiler failed for infrastructure reasons — retry
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/PolicyStoreUnconfigured" }
+
+  /policies:
+    get:
+      tags: [policy]
+      operationId: listPolicies
+      description: |
+        Filtering by `device_type` uses the `device-type-created-index` GSI,
+        published as the `PolicyTableDeviceTypeCreatedIndex` stack output.
+      parameters:
+        - name: device_type
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          description: Capped at 100; a non-numeric value falls back to 50 rather than erroring
+          schema: { type: integer, default: 50, maximum: 100 }
+      responses:
+        "200":
+          description: Active policies
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [policies, count]
+                properties:
+                  policies:
+                    type: array
+                    items: { $ref: "#/components/schemas/Policy" }
+                  count: { type: integer }
+                  filter:
+                    type: object
+                    description: Echoed only when device_type was supplied
+                    properties:
+                      device_type: { type: string }
+        "503": { $ref: "#/components/responses/PolicyStoreUnconfigured" }
+
+  /policies/{rule_id}:
+    parameters:
+      - name: rule_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [policy]
+      operationId: getPolicy
+      description: |
+        Returns the latest version unless `?version=` names one. The table is
+        keyed (rule_id, version), so every version is retained.
+      parameters:
+        - name: version
+          in: query
+          description: A non-numeric value is ignored and the latest is returned
+          schema: { type: integer }
+      responses:
+        "200":
+          description: The policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Policy" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/PolicyStoreUnconfigured" }
+    delete:
+      tags: [policy]
+      operationId: deactivatePolicy
+      summary: Deactivate a policy
+      description: |
+        A soft delete — the version history stays. Deactivating an
+        already-inactive policy is a 404, so this is not idempotent.
+      responses:
+        "200":
+          description: Deactivated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rule_id, status]
+                properties:
+                  rule_id: { type: string }
+                  status: { type: string, enum: [inactive] }
+        "404":
+          description: No such policy, or it is already inactive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/PolicyStoreUnconfigured" }
+
+components:
+
+  parameters:
+    DeviceId:
+      name: device_id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    RegistryUnavailable:
+      description: |
+        The device registry could not be read. Configuration or a DynamoDB
+        failure — not a transient overload, so retrying does not help.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    StoreUnconfigured:
+      description: |
+        LEARNING_TABLE_NAME or PRESENCE_TABLE_NAME is not set on the Lambda.
+        Unconfigured, not down: retrying will never succeed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    PolicyStoreUnconfigured:
+      description: POLICY_TABLE_NAME is not set on the Lambda. Unconfigured, not down.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    Presence:
+      type: object
+      required: [is_home, updated_at]
+      properties:
+        is_home: { type: boolean }
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: null when occupancy has never been written
+
+    Device:
+      type: object
+      description: The public view of a registry row; providers add their own fields.
+      additionalProperties: true
+      properties:
+        id: { type: string }
+        name: { type: string }
+        provider: { type: string, description: Registry sort key — one device can have rows per provider }
+        status: { type: string, enum: [active, inactive] }
+        type: { type: string }
+
+    Policy:
+      type: object
+      description: A compiled, validated policy rule. Keyed (rule_id, version).
+      additionalProperties: true
+      properties:
+        rule_id: { type: string }
+        version: { type: integer }
+        device_type: { type: string, description: Partition key of device-type-created-index }
+        created_at: { type: string, description: Sort key of device-type-created-index }
+        confidence: { type: number }
+        status: { type: string, enum: [active, inactive] }
