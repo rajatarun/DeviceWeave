@@ -1061,3 +1061,50 @@ Outputs:
     Value: !Ref PresenceTable
     Export:
       Name: !Sub "DeviceWeavePresenceTable-${StageName}"
+
+  # The outputs below complete the set an automation harness needs to resolve
+  # every coordinate from `describe-stacks` alone. scripts/stack_env.py reads
+  # them; tests/test_openapi_contract.py asserts each one still exists and, for
+  # the index names, that the table really defines an index by that name. An
+  # output naming an index that does not exist fails at query time, not deploy
+  # time, which is the worse of the two.
+
+  DeviceRegistryProviderStatusIndex:
+    Description: >
+      GSI on the device registry (provider → status). The table is keyed
+      (device_id, provider), so "every active device from this provider" is
+      only answerable through this index — DeviceRegistryTableName on its own
+      leaves a caller to scan.
+    Value: provider-status-index
+    Export:
+      Name: !Sub "DeviceWeaveRegistryProviderStatusIndex-${StageName}"
+
+  PolicyTableDeviceTypeCreatedIndex:
+    Description: >
+      GSI on the policy table (device_type → created_at), backing
+      GET /policies?device_type=. The table is keyed (rule_id, version).
+    Value: device-type-created-index
+    Export:
+      Name: !Sub "DeviceWeavePolicyDeviceTypeCreatedIndex-${StageName}"
+
+  SceneTableName:
+    Description: >
+      DynamoDB scene-deletion table. Holds deletions, not scenes: the active
+      catalog is SCENE_CATALOG minus the ids recorded here, so an empty table
+      means every built-in scene is active.
+    Value: !Ref SceneTable
+    Export:
+      Name: !Sub "DeviceWeaveSceneTable-${StageName}"
+
+  ConversationTableName:
+    Description: DynamoDB session-history table for conversational POST /execute
+    Value: !Ref ConversationTable
+    Export:
+      Name: !Sub "DeviceWeaveConversationTable-${StageName}"
+
+  OpenApiSpecPath:
+    Description: >
+      Repo-relative path to the OpenAPI description of this API. Its `servers`
+      block is templated on ApiBaseUrl above, so a harness resolves the stack
+      first and the spec second rather than hardcoding a URL.
+    Value: openapi/deviceweave.yaml
