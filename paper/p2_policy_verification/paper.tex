@@ -23,7 +23,7 @@
 \maketitle
 
 \begin{abstract}
-Smart-home platforms increasingly let people write automation policies in plain English, which a large language model (LLM) compiles into a rule language. Validation then happens one rule at a time: the output is well-formed, typed, and above a confidence threshold. Per-rule validation cannot see a rule that contradicts itself, a \emph{modify} that a \emph{block} always overrides, two modifiers that disagree about the same moment, or a safety property that no rule actually guarantees. We formalize the rule language of DeviceWeave and show that, because every condition constrains one context field, the set of contexts a rule matches is a finite union of axis-aligned boxes. Satisfiability, shadowing, conflict, redundancy and invariant coverage are then decidable \emph{exactly} by interval arithmetic, with a concrete witness context for every finding (Theorems~\ref{thm:exact} and~\ref{thm:witness}) and a polynomial bound for a fixed number of fields (Proposition~\ref{prop:complexity}). On 1{,}000 random rule sets, the checker's findings match an independent Z3 encoding exactly, and all 1{,}353 conflict and invariant witnesses reproduce their finding when replayed through the production evaluator. The checker runs 14--39$\times$ faster than Z3, and it now gates policy authoring in the author's DeviceWeave deployment. We also release a 380-rule benchmark that scores compiled rules by semantic equivalence rather than by string match. Compiled faithfully, all 20 of its self-contradictory rules pass the per-rule validator; only the set-level analysis rejects them.
+Smart-home platforms increasingly let people write automation policies in plain English, which a large language model (LLM) compiles into a rule language. Validation then happens one rule at a time: the output is well-formed, typed, and above a confidence threshold. Per-rule validation cannot see a rule that contradicts itself, a \emph{modify} that a \emph{block} always overrides, two modifiers that disagree about the same moment, or a safety property that no rule actually guarantees. We formalize the rule language of DeviceWeave and show that, because every condition constrains one context field, the set of contexts a rule matches is a finite union of axis-aligned boxes. Satisfiability, shadowing, conflict, redundancy and invariant coverage are then decidable \emph{exactly} by interval arithmetic, with a concrete witness context for every finding (Theorems~\ref{thm:exact} and~\ref{thm:witness}) and a polynomial bound for fixed numbers of fields and of atoms per rule (Proposition~\ref{prop:complexity}). On 1{,}000 random rule sets, the checker's findings match an independent Z3 encoding exactly, and all 1{,}353 conflict and invariant witnesses reproduce their finding when replayed through the production evaluator. The checker runs 14--39$\times$ faster than Z3, and it now gates policy authoring in our DeviceWeave deployment. We also release a 380-rule benchmark that scores compiled rules by semantic equivalence rather than by string match. Compiled faithfully, all 20 of its self-contradictory rules pass the per-rule validator; only the set-level analysis rejects them.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -42,12 +42,12 @@ Each one is a valid rule that goes live and silently does something other than w
 \begin{enumerate}
 \item formal semantics for the DSL, mirroring the production evaluator, and a proof that these failure modes, together with redundancy, are decidable exactly by interval arithmetic, with witnesses and a complexity bound (Section~\ref{sec:theory});
 \item an implementation that gates policy authoring. Unsatisfiable rules and invariant counterexamples are refused; conflicts are returned as warnings with a witness (Section~\ref{sec:system});
-\item cross-validation against an independent SMT encoding in Z3~\cite{demoura2008}, and replay of every witness through the real evaluator (Section~\ref{sec:eval});
+\item cross-validation against an independent satisfiability modulo theories (SMT) encoding in Z3~\cite{demoura2008}, and replay of every witness through the real evaluator (Section~\ref{sec:eval});
 \item a 380-rule benchmark for LLM policy compilation, scored by semantic equivalence, and a measurement of the per-rule validator's blind spot on it (Section~\ref{sec:bench}).
 \end{enumerate}
 
 \section{Related Work}
-Conflict detection among home-automation rules has been studied for trigger-action programming. Examples include IFTTT-style rule analysis and model checking of SmartThings apps~\cite{celik2018,nguyen2018}, which typically compile to a model checker or SMT solver. Firewall-policy analysis addresses the same shadowing and redundancy questions over header fields~\cite{alshaer2004}. Our contribution is observing that DeviceWeave's DSL is in the fragment where each constraint is \emph{unary}, which makes these questions solvable exactly without a solver in the serving path. We still cross-check against one. LLM compilation to formal specifications has been evaluated mostly by syntactic match. We score by semantic equivalence instead.
+Conflict detection among home-automation rules has been studied for trigger-action programming. Examples include analysis of IFTTT-style (``If This Then That'') rules and model checking of SmartThings apps~\cite{celik2018,nguyen2018}, which typically compile to a model checker or SMT solver. Firewall-policy analysis addresses the same shadowing and redundancy questions over header fields~\cite{alshaer2004}. Our contribution is observing that DeviceWeave's DSL is in the fragment where each constraint is \emph{unary}, which makes these questions solvable exactly without a solver in the serving path. We still cross-check against one. Where LLM compilation to a rule language is evaluated by comparing output to a reference, a string or syntactic comparison counts $\mathit{hour}\ge22$ and $\mathit{hour}>21$ as different; we score by semantic equivalence, so they count as equal.
 
 \section{Semantics and Exact Analysis}\label{sec:theory}
 \subsection{The DSL}
@@ -105,7 +105,7 @@ The witness is built fieldwise from a non-empty box. For an interval it returns 
 Let a device have $m$ rules with at most $k$ atoms each. Every box that arises during the analysis is a union of cells of a grid with at most $2mk+3$ cells per field. Hence the number of pairwise disjoint boxes representing any intermediate set is at most $(2mk+3)^d$, and each finding is decided in time polynomial in $m$ for fixed $d$ and $k$.
 \end{proposition}
 \begin{proof}
-All interval endpoints come from atom thresholds or the two domain bounds, so each field has at most $mk+2$ distinct endpoints. $n$ points on a line cut it into $n$ singletons and at most $n-1$ open segments between them, so $D_f$ splits into at most $2(mk+2)-1=2mk+3$ elementary pieces. Every box produced by intersection or by Lemma~\ref{lem:diff} has endpoints among these thresholds, so it is a union of product cells. Disjoint boxes, each containing at least one cell, number at most the cell count, $(2mk+3)^d$. Each step of Lemma~\ref{lem:diff} is $O(d)$, which gives the polynomial bound.
+All interval endpoints come from atom thresholds or the two domain bounds, so each field has at most $mk+2$ distinct endpoints. A set of $n$ points on a line cuts it into $n$ singletons and at most $n-1$ open segments between them, and $D_f$ splits into at most $2(mk+2)-1=2mk+3$ elementary pieces. Every box produced by intersection or by Lemma~\ref{lem:diff} has endpoints among these thresholds, so it is a union of product cells. Disjoint boxes, each containing at least one cell, number at most the cell count, $(2mk+3)^d$. Each step of Lemma~\ref{lem:diff} is $O(d)$, which gives the polynomial bound.
 \end{proof}
 
 With $d=6$ the bound is loose. In practice rule sets are small and most rules touch one or two fields (Section~\ref{sec:eval}).
@@ -118,12 +118,10 @@ The checker (\texttt{rule\_set\_checker.py}) has no dependencies and runs inside
 \end{itemize}
 Witnesses prefer typical values (70\,\textdegree F, noon) when the region permits, so a counterexample reads as a plausible afternoon rather than $-80$\,\textdegree F at midnight.
 
-\textbf{Independent SMT encoding.} A separate script encodes the same predicates in Z3: fields are Real/Int/Bool variables with domain constraints, rules are conjunctions, and the evaluator's priority is spelled out as formulas. It is not in the serving path. It exists so that the interval implementation is checked against a solver rather than against its author's reading of it. If the DSL gains a cross-field condition, the box argument stops holding, and this encoding is the one to keep.
+\textbf{Independent SMT encoding.} A separate script encodes the same predicates in Z3: fields are Real/Int/Bool variables with domain constraints, rules are conjunctions, and the evaluator's priority is spelled out as formulas. It is not in the serving path. It exists so that the interval implementation is checked against a solver rather than against our own reading of it. If the DSL gains a cross-field condition, the box argument stops holding, and this encoding is the one to keep.
 
 \section{Evaluation}\label{sec:eval}
-\textbf{Agreement.} We generated 1{,}000 random rule sets of 1--6 rules over two devices. Thresholds were drawn to include boundary cases (hour 24, humidity 101, equal and not-equal on the same value), with a heater-when-away invariant. The findings, compared as (kind, rules) pairs, were \emph{identical} between the interval checker and Z3 on all 1{,}000 sets. The sets produced 544 unsatisfiable rules, 966 invariant violations, 265 block/allow conflicts, 122 modifier conflicts, 101 redundancies and 61 shadowed modifiers.
-
-\textbf{Witness replay.} Every witness for a block/allow conflict (265), a modifier conflict (122) or an invariant violation (966) was replayed through the \emph{production} evaluator, and all 1{,}353 reproduced the finding. For modifier conflicts this means the verdict was \emph{modify} and the older modifier's parameters were not the ones applied. Unsatisfiable, shadowed and redundant findings are claims about the absence of contexts, so they have no witness to replay; they are covered by the Z3 agreement. A mutation that made $>$ inclusive failed both the agreement test and the replay test.
+\textbf{Agreement.} We generated 1{,}000 random rule sets of 1--6 rules over two devices. Thresholds were drawn to include boundary cases (hour 24, humidity 101, equal and not-equal on the same value), with a heater-when-away invariant. The findings, compared as (kind, rules) pairs, were \emph{identical} between the interval checker and Z3 on all 1{,}000 sets. The agreement claim covers sets of 1--6 rules; the larger sets of Table~\ref{tab:time} were timed on both but not compared finding by finding. The out-of-domain thresholds are deliberate: hour 24 and humidity 101 lie outside their fields' domains, and they check that both implementations intersect every atom with its field's domain rather than trusting the threshold. The sets produced 544 unsatisfiable rules, 966 invariant violations, 265 block/allow conflicts, 122 modifier conflicts, 101 redundancies and 61 shadowed modifiers.
 
 \begin{table}[t]
 \centering
@@ -142,6 +140,9 @@ Rules & Interval checker & Z3 encoding & Speed-up\\
 \end{tabular}
 \end{table}
 
+\textbf{Witness replay.} Every witness for a block/allow conflict (265), a modifier conflict (122) or an invariant violation (966) was replayed through the \emph{production} evaluator, and all 1{,}353 reproduced the finding. For modifier conflicts this means the verdict was \emph{modify} and the older modifier's parameters were not the ones applied. Unsatisfiable, shadowed and redundant findings are claims about the absence of contexts, so they have no witness to replay; they are covered by the Z3 agreement. A mutation that made $>$ inclusive failed both the agreement test and the replay test.
+
+
 \textbf{Cost.} Table~\ref{tab:time}: the checker analyzes a realistic household (5--20 rules per device) in about 7\,ms or less, and 80 rules in under 0.1\,s, 14--39$\times$ faster than the Z3 encoding. Timings are medians on one x86\_64 machine; the Z3 column includes Python encoding overhead. Growth is superlinear, as Proposition~\ref{prop:complexity} allows, but far below the bound.
 
 \section{A Benchmark for LLM Policy Compilation}\label{sec:bench}
@@ -149,7 +150,7 @@ The analysis catches errors \emph{between} rules. The remaining question is how 
 \begin{itemize}
 \item 200 single-condition rules (20 condition phrasings $\times$ 5 action phrasings $\times$ 2 devices), including explicit numbers and the semantic shorthands the compiler's prompt defines;
 \item 120 two-condition conjunctions;
-\item 20 modify rules;
+\item 20 rules with a \emph{modify} action;
 \item 20 rules that must be refused (unsupported devices or conditions, vague requests);
 \item 20 self-contradictions.
 \end{itemize}
@@ -168,8 +169,8 @@ Because the policy language is unary per field, whole-rule-set verification is e
 \begin{thebibliography}{99}
 \bibitem{prior-device} T.~Raja, \pend{title of the DeviceWeave device-control paper}, \pend{venue, year}.
 \bibitem{demoura2008} L.~de~Moura and N.~Bj{\o}rner, ``Z3: An efficient SMT solver,'' in \emph{Proc. TACAS}, 2008, pp.~337--340.
-\bibitem{celik2018} Z.~B. Celik, P.~McDaniel, and G.~Tan, ``Soteria: Automated IoT safety and security analysis,'' in \emph{Proc. USENIX ATC}, 2018.
-\bibitem{nguyen2018} D.~T. Nguyen, C.~Song, Z.~Qian, S.~V. Krishnamurthy, E.~J.~M. Colbert, and P.~McDaniel, ``IoTSan: Fortifying the safety of IoT systems,'' in \emph{Proc. CoNEXT}, 2018.
-\bibitem{alshaer2004} E.~S. Al-Shaer and H.~H. Hamed, ``Discovery of policy anomalies in distributed firewalls,'' in \emph{Proc. IEEE INFOCOM}, 2004.
+\bibitem{celik2018} Z.~B. Celik, P.~McDaniel, and G.~Tan, ``Soteria: Automated IoT safety and security analysis,'' in \emph{Proc. USENIX ATC}, 2018, pp.~147--158.
+\bibitem{nguyen2018} D.~T. Nguyen, C.~Song, Z.~Qian, S.~V. Krishnamurthy, E.~J.~M. Colbert, and P.~McDaniel, ``IoTSan: Fortifying the safety of IoT systems,'' in \emph{Proc. CoNEXT}, 2018, pp.~191--203.
+\bibitem{alshaer2004} E.~S. Al-Shaer and H.~H. Hamed, ``Discovery of policy anomalies in distributed firewalls,'' in \emph{Proc. IEEE INFOCOM}, 2004, pp.~2605--2616.
 \end{thebibliography}
 \end{document}
