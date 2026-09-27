@@ -1,0 +1,43 @@
+{
+  "$comment": "Every score DeviceWeave emits, declared against contracts/score_envelope.json (vendored from ContextWeave). tests/test_score_contract.py holds this file to the contract and resolves every producer.",
+  "scores": [
+    {
+      "name": "deviceweave.cosine_score",
+      "kind": "similarity",
+      "range": [0, 1],
+      "source": "measurement",
+      "calibrated": false,
+      "neutral": "wherever unrelated phrases land under the TF vectoriser, typically 0.2-0.4; not 0",
+      "meaning": "Cosine between the utterance's device phrase and a device's name corpus. Not a probability that this is the intended device; it knows nothing of the other candidates.",
+      "producer": "device_resolver:_cosine_similarity"
+    },
+    {
+      "name": "deviceweave.behavior_score",
+      "kind": "score",
+      "range": [0, 1],
+      "source": "heuristic",
+      "calibrated": false,
+      "neutral": 0.5,
+      "meaning": "Blend of hour-of-day match, action frequency and a weather prior; 0.5 means no history.",
+      "producer": "behavior_engine:score"
+    },
+    {
+      "name": "deviceweave.final_score",
+      "kind": "score",
+      "range": [0, 1],
+      "source": "heuristic",
+      "calibrated": false,
+      "meaning": "alpha * cosine + (1 - alpha) * behavior, thresholded at 0.4. Averages a similarity with a heuristic score, which rule R3 forbids across producers; kept as a within-system heuristic and declared as an ordering-only score so nothing downstream treats it as a confidence (confidence-semantics.md D2).",
+      "producer": "decision_engine:compute_score"
+    },
+    {
+      "name": "deviceweave.policy_compile_confidence",
+      "kind": "score",
+      "range": [0, 1],
+      "source": "self",
+      "calibrated": false,
+      "meaning": "The LLM compiler's own confidence in a compiled policy, gated at 0.85 by the validator. Self-report; policy_compile_bench.py measures how often an accepted rule means something else.",
+      "producer": "policy_authoring.validator:validate_policy"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "$comment": "Shared contract for what a score in [0, 1] means across the weave systems. Vendored byte-identical into ContextWeave, DeviceWeave, CipherWeave and mcp-observatory next to score_contract.py; each repository's tests check its own score registry and emitted envelopes against it. The prose behind every rule is ContextWeave docs/confidence-semantics.md.",
+  "version": "1.0.0",
+  "kinds": {
+    "probability": {
+      "meaning": "P(event) for a stated event; calibrated against outcomes of that event",
+      "requires": ["event", "calibrated"],
+      "must_be_calibrated": true,
+      "operations": ["threshold", "average_same_event", "multiply_independent", "noisy_or", "importance_weight"]
+    },
+    "posterior_mean": {
+      "meaning": "Mean of a posterior over some quantity; as calibrated as the observations that feed it",
+      "requires": ["event", "evidence"],
+      "must_be_calibrated": false,
+      "operations": ["threshold", "rank_same_quantity"]
+    },
+    "score": {
+      "meaning": "An ordering-only number: higher means more of something, with no probability claim",
+      "requires": [],
+      "must_be_calibrated": false,
+      "operations": ["threshold", "rank_same_producer"]
+    },
+    "similarity": {
+      "meaning": "A similarity between two representations; its scale belongs to the model that produced it",
+      "requires": ["neutral"],
+      "must_be_calibrated": false,
+      "operations": ["threshold", "rank_same_producer"]
+    },
+    "risk_indicator": {
+      "meaning": "A standardised deviation or weighted indicator of risk; unbounded above unless stated, not a probability of harm",
+      "requires": ["evidence"],
+      "must_be_calibrated": false,
+      "operations": ["threshold", "max_same_producer"]
+    }
+  },
+  "sources": ["self", "human", "model", "measurement", "heuristic"],
+  "envelope_required": ["value", "kind", "source", "calibrated"],
+  "registry_required": ["name", "kind", "range", "source", "calibrated", "meaning", "producer"],
+  "rules": {
+    "R1": "Only probabilities compose by probability rules (multiply, noisy-OR, Bayes).",
+    "R2": "A probability must be calibrated, and say against what (calibration_ref).",
+    "R3": "Never average or add scores of different kinds or different producers; combine decisions instead.",
+    "R4": "Carry the evidence count with any score whose reliability depends on it.",
+    "R5": "Absence is not zero: an unobserved score has value null and observed false, never a default."
+  }
+}

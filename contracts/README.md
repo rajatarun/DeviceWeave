@@ -33,3 +33,15 @@ mcp-observatory, not a local fork.
 
 `conformance.py` is deliberately dependency-free (no `jsonschema`, no
 `boto3`) so it runs anywhere without pulling in extra requirements.
+
+## The score contract (vendored from ContextWeave)
+
+`score_envelope.json` and `score_contract.py` are copied byte-identical from
+[`ContextWeave/contracts/`](https://github.com/rajatarun/ContextWeave/tree/main/contracts),
+their canonical home. They define what a score in `[0, 1]` means across the
+weave systems and which scores may be combined (rules R1–R5 of ContextWeave's
+`docs/confidence-semantics.md`). Do not edit them here: `tests/test_score_contract.py`
+pins their sha256.
+
+`scores.json` is DeviceWeave's own declaration of the scores it emits, and does
+live here.
