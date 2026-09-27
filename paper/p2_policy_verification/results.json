@@ -10,29 +10,34 @@
    "redundant": 101,
    "shadowed": 61
   },
-  "witness_replays": 1231,
-  "witness_replays_confirmed": 1231
+  "witness_replays": 1353,
+  "witness_replays_confirmed": 1353,
+  "witness_replays_by_kind": {
+   "invariant_violated": 966,
+   "conflict_modify": 122,
+   "conflict_block_allow": 265
+  }
  },
  "timing": {
   "5": {
-   "interval_ms": 0.35,
-   "z3_ms": 16.78
+   "interval_ms": 0.41,
+   "z3_ms": 16.05
   },
   "10": {
-   "interval_ms": 1.75,
-   "z3_ms": 44.98
+   "interval_ms": 1.68,
+   "z3_ms": 43.24
   },
   "20": {
-   "interval_ms": 6.63,
-   "z3_ms": 124.74
+   "interval_ms": 7.08,
+   "z3_ms": 125.25
   },
   "40": {
-   "interval_ms": 21.71,
-   "z3_ms": 398.26
+   "interval_ms": 22.04,
+   "z3_ms": 354.09
   },
   "80": {
-   "interval_ms": 118.14,
-   "z3_ms": 1162.72
+   "interval_ms": 85.14,
+   "z3_ms": 1181.89
   }
  },
  "benchmark": {

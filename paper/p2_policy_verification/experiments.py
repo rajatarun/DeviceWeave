@@ -37,6 +37,7 @@ rng = random.Random(2026)
 agree = total = 0
 kinds = Counter()
 replays = replay_ok = 0
+by_kind_replay = {}
 for trial in range(1000):
     rules = [T.random_rule(rng, f"t{trial}_{i}", rng.choice(["light", "heater"])) for i in range(rng.randint(1, 6))]
     inv = [{"name": "inv", "device_type": "heater",
@@ -48,13 +49,22 @@ for trial in range(1000):
     agree += a == b
     for f in fs:
         kinds[f.kind] += 1
-        if f.kind in ("conflict_block_allow", "invariant_violated"):
+        if f.kind in ("conflict_block_allow", "invariant_violated", "conflict_modify"):
             dev = f.device_type
-            v = compute_verdict(rules, dev, "turn_on", f.witness).verdict
+            dev_rules = [r for r in rules if r["scope"]["device_type"] == dev]
+            d = compute_verdict(dev_rules, dev, "turn_on", f.witness)
             replays += 1
-            replay_ok += (v == "block") if f.kind == "conflict_block_allow" else (v != "block")
+            by_kind_replay[f.kind] = by_kind_replay.get(f.kind, 0) + 1
+            if f.kind == "conflict_block_allow":
+                ok = d.verdict == "block"
+            elif f.kind == "invariant_violated":
+                ok = d.verdict != "block"
+            else:  # the newer modifier (or an even newer one) applies, never the older
+                ok = d.verdict == "modify" and d.rule_id != f.rule_ids[1]
+            replay_ok += ok
 out["agreement"] = {"sets": total, "identical": agree, "finding_counts": dict(kinds),
-                    "witness_replays": replays, "witness_replays_confirmed": replay_ok}
+                    "witness_replays": replays, "witness_replays_confirmed": replay_ok,
+                    "witness_replays_by_kind": by_kind_replay}
 
 # 2. Time per analysis, interval checker vs Z3, by rule-set size.
 timing = {}

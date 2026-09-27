@@ -15,7 +15,7 @@
 
 \begin{document}
 
-\title{Catching Conflicts Before They Reach the Door Lock:\\ Solver-Verified Compilation of Natural-Language Smart-Home Policies}
+\title{Catching Conflicts Before They Go Live:\\ Solver-Verified Compilation of Natural-Language Smart-Home Policies}
 
 \author{\IEEEauthorblockN{Tarun Raja}
 \IEEEauthorblockA{\pend{Affiliation} \\ \pend{email}}}
@@ -23,7 +23,7 @@
 \maketitle
 
 \begin{abstract}
-Smart-home platforms increasingly let people write automation policies in plain English, which a large language model (LLM) compiles into a rule language. Validation then happens one rule at a time: the output is well-formed, typed, and above a confidence threshold. Per-rule validation cannot see a rule that contradicts itself, a \emph{modify} that a \emph{block} always overrides, two modifiers that disagree about the same moment, or a safety property that no rule actually guarantees. We formalize the rule language of DeviceWeave and show that, because every condition constrains one context field, the set of contexts a rule matches is a finite union of axis-aligned boxes. Satisfiability, shadowing, conflict, redundancy and invariant coverage are then decidable \emph{exactly} by interval arithmetic, with a concrete witness context for every finding (Theorems~\ref{thm:exact} and~\ref{thm:witness}) and a polynomial bound for a fixed number of fields (Proposition~\ref{prop:complexity}). On 1{,}000 random rule sets, the checker's findings match an independent Z3 encoding exactly, and all 1{,}231 witnesses reproduce the finding when replayed through the production evaluator. The checker runs 10--48$\times$ faster than Z3. It now gates policy authoring in production. We also release a 380-rule benchmark that scores compiled rules by semantic equivalence rather than by string match. All 20 of its self-contradictory rules, compiled faithfully, pass the per-rule validator.
+Smart-home platforms increasingly let people write automation policies in plain English, which a large language model (LLM) compiles into a rule language. Validation then happens one rule at a time: the output is well-formed, typed, and above a confidence threshold. Per-rule validation cannot see a rule that contradicts itself, a \emph{modify} that a \emph{block} always overrides, two modifiers that disagree about the same moment, or a safety property that no rule actually guarantees. We formalize the rule language of DeviceWeave and show that, because every condition constrains one context field, the set of contexts a rule matches is a finite union of axis-aligned boxes. Satisfiability, shadowing, conflict, redundancy and invariant coverage are then decidable \emph{exactly} by interval arithmetic, with a concrete witness context for every finding (Theorems~\ref{thm:exact} and~\ref{thm:witness}) and a polynomial bound for a fixed number of fields (Proposition~\ref{prop:complexity}). On 1{,}000 random rule sets, the checker's findings match an independent Z3 encoding exactly, and all 1{,}353 conflict and invariant witnesses reproduce their finding when replayed through the production evaluator. The checker runs 14--39$\times$ faster than Z3, and it now gates policy authoring in the author's DeviceWeave deployment. We also release a 380-rule benchmark that scores compiled rules by semantic equivalence rather than by string match. Compiled faithfully, all 20 of its self-contradictory rules pass the per-rule validator; only the set-level analysis rejects them.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -40,10 +40,10 @@ In DeviceWeave~\cite{prior-device}, a person writes ``don't run the heater when 
 \end{itemize}
 Each one is a valid rule that goes live and silently does something other than what was asked. This paper contributes:
 \begin{enumerate}
-\item formal semantics for the DSL, mirroring the production evaluator, and a proof that all five questions above are decidable exactly by interval arithmetic, with witnesses and a complexity bound (Section~\ref{sec:theory});
+\item formal semantics for the DSL, mirroring the production evaluator, and a proof that these failure modes, together with redundancy, are decidable exactly by interval arithmetic, with witnesses and a complexity bound (Section~\ref{sec:theory});
 \item an implementation that gates policy authoring. Unsatisfiable rules and invariant counterexamples are refused; conflicts are returned as warnings with a witness (Section~\ref{sec:system});
 \item cross-validation against an independent SMT encoding in Z3~\cite{demoura2008}, and replay of every witness through the real evaluator (Section~\ref{sec:eval});
-\item a 380-rule benchmark for LLM policy compilation, scored by semantic equivalence (Section~\ref{sec:bench}).
+\item a 380-rule benchmark for LLM policy compilation, scored by semantic equivalence, and a measurement of the per-rule validator's blind spot on it (Section~\ref{sec:bench}).
 \end{enumerate}
 
 \section{Related Work}
@@ -57,7 +57,7 @@ The context has fields $F$ with domains: temperature $[-80,150]$\,\textdegree F,
 For device $\delta$, context $x$, and rules ordered newest first, the verdict for switching on is: \emph{block} if some block rule of $\delta$ has $x\in\M(r)$; otherwise \emph{modify} with the parameters of the newest matching modifier, if one exists; otherwise \emph{allow}. Allow rules never override a block.
 \end{definition}
 
-This is exactly the behaviour of the production evaluator when every field is present in $x$. A missing field makes an atom false, which can only prevent a rule from matching.
+This is exactly the behavior of the production evaluator when every field is present in $x$. A missing field makes an atom false, which can only prevent a rule from matching.
 
 \subsection{Boxes}
 A \emph{box} is $B=\prod_{f}I_f$, where each $I_f\subseteq D_f$ is an interval (open, closed or half-open; integer-valued for hour) or a subset of $\{\top,\bot\}$ for booleans.
@@ -111,7 +111,7 @@ All interval endpoints come from atom thresholds or the two domain bounds, so ea
 With $d=6$ the bound is loose. In practice rule sets are small and most rules touch one or two fields (Section~\ref{sec:eval}).
 
 \section{System}\label{sec:system}
-The checker (\texttt{rule\_set\_checker.py}) has no dependencies and runs inside the authoring Lambda. After the LLM compiler and the per-rule validator, the new rule is analysed as the newest member of its device's active policies:
+The checker (\texttt{rule\_set\_checker.py}) has no dependencies and runs inside the authoring Lambda. After the LLM compiler and the per-rule validator, the new rule is analyzed as the newest member of its device's active policies:
 \begin{itemize}
 \item an \emph{unsatisfiable} rule, or an \emph{invariant} violation (invariants are configured as a list of $(\delta,A_I)$ pairs), returns HTTP 422 and the rule is not stored;
 \item conflicts, shadowing and redundancy are stored and returned under \texttt{analysis}, each with its witness context, so the author sees, for example, that an existing block overrides their new allow.
@@ -123,7 +123,7 @@ Witnesses prefer typical values (70\,\textdegree F, noon) when the region permit
 \section{Evaluation}\label{sec:eval}
 \textbf{Agreement.} We generated 1{,}000 random rule sets of 1--6 rules over two devices. Thresholds were drawn to include boundary cases (hour 24, humidity 101, equal and not-equal on the same value), with a heater-when-away invariant. The findings, compared as (kind, rules) pairs, were \emph{identical} between the interval checker and Z3 on all 1{,}000 sets. The sets produced 544 unsatisfiable rules, 966 invariant violations, 265 block/allow conflicts, 122 modifier conflicts, 101 redundancies and 61 shadowed modifiers.
 
-\textbf{Witness replay.} All 1{,}231 witnesses for block/allow conflicts and invariant violations were replayed through the \emph{production} evaluator, and all 1{,}231 reproduced the finding. A mutation that made $>$ inclusive failed both the agreement test and the replay test.
+\textbf{Witness replay.} Every witness for a block/allow conflict (265), a modifier conflict (122) or an invariant violation (966) was replayed through the \emph{production} evaluator, and all 1{,}353 reproduced the finding. For modifier conflicts this means the verdict was \emph{modify} and the older modifier's parameters were not the ones applied. Unsatisfiable, shadowed and redundant findings are claims about the absence of contexts, so they have no witness to replay; they are covered by the Z3 agreement. A mutation that made $>$ inclusive failed both the agreement test and the replay test.
 
 \begin{table}[t]
 \centering
@@ -133,16 +133,16 @@ Witnesses prefer typical values (70\,\textdegree F, noon) when the region permit
 \toprule
 Rules & Interval checker & Z3 encoding & Speed-up\\
 \midrule
-5 & 0.35 & 16.8 & $48\times$\\
-10 & 1.75 & 45.0 & $26\times$\\
-20 & 6.63 & 124.7 & $19\times$\\
-40 & 21.7 & 398.3 & $18\times$\\
-80 & 118.1 & 1162.7 & $10\times$\\
+5 & 0.41 & 16.1 & $39\times$\\
+10 & 1.68 & 43.2 & $26\times$\\
+20 & 7.08 & 125.3 & $18\times$\\
+40 & 22.0 & 354.1 & $16\times$\\
+80 & 85.1 & 1181.9 & $14\times$\\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\textbf{Cost.} Table~\ref{tab:time}: the checker analyses a realistic household (5--20 rules per device) in under 7\,ms, and 80 rules in about 0.1\,s, 10--48$\times$ faster than the Z3 encoding. Growth is superlinear, as Proposition~\ref{prop:complexity} allows, but far below the bound.
+\textbf{Cost.} Table~\ref{tab:time}: the checker analyzes a realistic household (5--20 rules per device) in about 7\,ms or less, and 80 rules in under 0.1\,s, 14--39$\times$ faster than the Z3 encoding. Timings are medians on one x86\_64 machine; the Z3 column includes Python encoding overhead. Growth is superlinear, as Proposition~\ref{prop:complexity} allows, but far below the bound.
 
 \section{A Benchmark for LLM Policy Compilation}\label{sec:bench}
 The analysis catches errors \emph{between} rules. The remaining question is how often the compiler gets a single rule wrong in a way the validator accepts. We release 380 plain-English rules with gold policies:
@@ -157,7 +157,7 @@ Scoring is by \emph{meaning}: a compiled rule is correct iff it has the gold dev
 
 \textbf{The validator's blind spot, measured.} Compiled faithfully, all 20 self-contradictions (20/20) pass the per-rule validator. They are well-formed, typed and confident, and only the set-level analysis rejects them.
 
-\pend{LLM results pending: accuracy and silent error rate for the deployed compiler (Claude on Bedrock) and for other models require model access not available in this environment. The harness (\texttt{scripts/policy\_compile\_bench.py run}) is complete; \texttt{--responses} scores saved outputs offline.}
+Measuring accuracy and the silent error rate of specific LLM compilers requires running each model over the benchmark, and we leave it to future work. The released harness calls the deployed compiler directly, or scores saved compiler outputs offline, so results for any model can be reproduced from its outputs alone. The contradiction result above needs no model: it is a property of the validator, and it holds for any compiler that renders these rules faithfully.
 
 \section{Limitations}
 The analysis assumes every context field is present. A missing field can only stop a rule matching, so a block may fail to fire, and the evaluator treats that as no match. Invariants are user-supplied; the system checks them but does not infer them. The benchmark's phrasings are templated from the compiler's own semantic reference. It therefore measures fidelity to that reference, not robustness to free paraphrase, which a human-written split would test.
