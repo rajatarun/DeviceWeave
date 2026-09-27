@@ -549,10 +549,22 @@ paths:
                 rule: { type: string, description: The rule in plain language }
       responses:
         "201":
-          description: Compiled, validated and stored
+          description: |
+            Compiled, validated and stored. `analysis` lists what the rule-set
+            checker found when the rule was added beside the device's active
+            policies — overlaps where a block overrides this allow, modifiers
+            that disagree, a rule that adds nothing — each with a witness
+            context. Only warnings and info reach a 201; an error is a 422.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Policy" }
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Policy"
+                  - type: object
+                    properties:
+                      analysis:
+                        type: array
+                        items: { $ref: "#/components/schemas/RuleSetFinding" }
         "400":
           description: Body is not JSON, or rule is missing/empty
           content:
@@ -568,12 +580,16 @@ paths:
                   - type: object
                     properties:
                       rule: { type: string }
-                      rejection_stage: { type: string, enum: [validation] }
+                      rejection_stage: { type: string, enum: [validation, rule_set_analysis] }
                       confidence_threshold: { type: number }
                       llm_raw_output:
                         description: What the compiler produced, so the rejection can be diagnosed
                         type: object
                         additionalProperties: true
+                      analysis:
+                        description: Present when rejection_stage is rule_set_analysis
+                        type: array
+                        items: { $ref: "#/components/schemas/RuleSetFinding" }
         "500":
           description: Persisting the policy failed
           content:
@@ -710,6 +726,21 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+    RuleSetFinding:
+      type: object
+      required: [kind, severity, rule_ids, device_type, message]
+      properties:
+        kind:
+          type: string
+          enum: [unsatisfiable, shadowed, conflict_block_allow, conflict_modify, redundant, invariant_violated]
+        severity: { type: string, enum: [error, warning, info] }
+        rule_ids: { type: array, items: { type: string } }
+        device_type: { type: string }
+        message: { type: string }
+        witness:
+          type: object
+          description: A context in which the finding is true (evaluate the rules against it to see it)
+          additionalProperties: true
     Error:
       type: object
       required: [error]

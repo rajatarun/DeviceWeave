@@ -376,3 +376,18 @@ The SMS channel has no concept of a session token — the only persistent identi
 The `sms:` prefix namespaces SMS sessions separately from HTTP sessions in `ConversationTable` — a collision between a phone number and a UUID is impossible by construction. The same DynamoDB table is reused (no second table) because the data model and TTL semantics are identical: both paths store a list of Converse API message dicts with a 24-hour TTL.
 
 Reset keywords (`reset`, `new`, `clear`, `restart`, `start over`) clear the session without invoking the agent. This is a safety valve: if the conversation history becomes stale or the agent gets confused, the user can recover with a single word.
+
+---
+
+## 33. Rule-set analysis by interval arithmetic, cross-checked against Z3
+
+**Chosen**: `policy_authoring/rule_set_checker.py` — each rule's matching contexts as a union of boxes, exact satisfiability / overlap / coverage by interval arithmetic, run on every `POST /policies/author` against the device's active policies; `scripts/policy_rules_smt.py` encodes the same questions for Z3 and the tests require identical answers on random rule sets
+**Rejected**: per-rule validation only; Z3 as a Lambda dependency
+
+The validator checks one rule at a time, so it accepts a rule that contradicts itself (`temperature > 80 AND temperature < 60`), a modify that a block always overrides, two modifiers that disagree about the same moment, and a rule set in which a stated safety property has a gap. Each goes live and silently does something other than what was asked.
+
+Every DSL condition constrains one field and a rule ANDs its conditions, so a rule matches a union of axis-aligned boxes (`!=` splits one field in two) and the questions are decidable exactly with intervals — integer `time_hour` included, so `22 < time_hour < 23` is unsatisfiable. That keeps the Lambda free of a ~30 MB native wheel. Z3 is kept as an independent encoding rather than dropped: 200 random rule sets must produce the same findings from both, and a mutation that makes `>` inclusive fails both that test and a second one replaying every witness through the real `policy_engine.evaluator`. When the DSL grows a cross-field condition, the box argument stops holding and the Z3 encoding is the one to keep.
+
+On authoring: an `unsatisfiable` rule, or an `invariant_violated` against `POLICY_INVARIANTS` (optional JSON list of `{name, device_type, conditions}` meaning "must be blocked from switching on there"), is a 422 with `rejection_stage: "rule_set_analysis"` and is not stored. Conflicts, shadowing and redundancy are warnings returned with the stored policy under `analysis`, each with a witness context. The analysis assumes every context field is present; a missing field can only stop a block firing, which the evaluator already treats as no match.
+
+`scripts/policy_compile_bench.py` measures the compiler that feeds all of this: 380 plain-English rules with gold policies (single conditions, conjunctions, modifiers, 20 that must be refused, 20 self-contradictions). It scores by *meaning* — two rules are equal when they match exactly the same contexts — and reports the silent error rate: rules the validator accepted that mean something else.

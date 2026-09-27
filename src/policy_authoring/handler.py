@@ -35,8 +35,13 @@ Pipeline for POST /policies/author
   1. Parse + validate request body (no LLM involved)
   2. LLM compiler  → raw Policy DSL dict or None (502 if None)
   3. Validator     → clean policy dict or ValidationError (422 if error)
-  4. Policy store  → DynamoDB write → stored item
-  5. Return 201 with the stored policy
+  4. Rule-set analysis against the device's active policies
+                   → an error finding (the rule can never fire, or a stated
+                     invariant would have a counterexample) is a 422 with
+                     rejection_stage "rule_set_analysis"; warnings are returned
+                     with the stored policy under "analysis"
+  5. Policy store  → DynamoDB write → stored item
+  6. Return 201 with the stored policy
 """
 
 import json
@@ -53,6 +58,7 @@ from policy_authoring.policy_store import (
     list_policies,
     save_policy,
 )
+from policy_authoring.rule_set_checker import Invariant, check_new_rule
 from policy_authoring.validator import (
     CONFIDENCE_THRESHOLD,
     ValidationError,
@@ -64,6 +70,24 @@ logging.getLogger().setLevel(LOG_LEVEL)
 for _noisy in ("botocore", "boto3", "urllib3", "s3transfer"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+def _invariants() -> list:
+    """Safety properties from POLICY_INVARIANTS (JSON list); none when unset or unreadable.
+
+    Each is ``{"name", "device_type", "conditions"}`` and means: in every
+    context matching ``conditions``, ``device_type`` must be blocked from
+    switching on. An unreadable value is logged rather than raised -- a typo in
+    an optional setting must not stop every rule from being authored.
+    """
+    raw = os.environ.get("POLICY_INVARIANTS", "").strip()
+    if not raw:
+        return []
+    try:
+        return [Invariant.from_dict(d) for d in json.loads(raw)]
+    except (ValueError, KeyError, TypeError) as exc:
+        logger.error("POLICY_INVARIANTS is not a valid invariant list (ignored): %s", exc)
+        return []
 
 
 def _json_default(value: Any) -> Any:
@@ -162,7 +186,29 @@ def _route_author(event: Dict[str, Any]) -> Dict[str, Any]:
             },
         )
 
-    # --- Step 3: DynamoDB persistence ------------------------------------------
+    # --- Step 3: Rule-set analysis --------------------------------------------
+    # The validator judged the rule alone. Here it is judged with the rules it
+    # will live beside: a rule that can never fire is refused, a stated safety
+    # invariant with a counterexample is refused, and conflicts are returned so
+    # the author sees that, e.g., an existing block overrides their allow.
+    existing = list_policies(device_type=validated["scope"]["device_type"], limit=100)
+    findings = [f.to_dict() for f in check_new_rule(validated, existing, _invariants())]
+    errors = [f for f in findings if f["severity"] == "error"]
+    if errors:
+        logger.info("Policy refused by rule-set analysis for rule=%r: %s", rule_text, errors)
+        return _error(
+            422,
+            errors[0]["message"],
+            extra={
+                "rule": rule_text,
+                "rejection_stage": "rule_set_analysis",
+                "confidence_threshold": CONFIDENCE_THRESHOLD,
+                "llm_raw_output": raw,
+                "analysis": findings,
+            },
+        )
+
+    # --- Step 4: DynamoDB persistence ------------------------------------------
     try:
         stored = save_policy(validated["rule_id"], validated, rule_text)
     except Exception as exc:
@@ -177,7 +223,7 @@ def _route_author(event: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "statusCode": 201,
         "headers": {"Content-Type": "application/json"},
-        "body": _json_dumps(_policy_view(stored)),
+        "body": _json_dumps({**_policy_view(stored), "analysis": findings}),
     }
 
 
