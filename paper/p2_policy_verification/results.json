@@ -1,0 +1,49 @@
+{
+ "agreement": {
+  "sets": 1000,
+  "identical": 1000,
+  "finding_counts": {
+   "unsatisfiable": 544,
+   "invariant_violated": 966,
+   "conflict_modify": 122,
+   "conflict_block_allow": 265,
+   "redundant": 101,
+   "shadowed": 61
+  },
+  "witness_replays": 1231,
+  "witness_replays_confirmed": 1231
+ },
+ "timing": {
+  "5": {
+   "interval_ms": 0.35,
+   "z3_ms": 16.78
+  },
+  "10": {
+   "interval_ms": 1.75,
+   "z3_ms": 44.98
+  },
+  "20": {
+   "interval_ms": 6.63,
+   "z3_ms": 124.74
+  },
+  "40": {
+   "interval_ms": 21.71,
+   "z3_ms": 398.26
+  },
+  "80": {
+   "interval_ms": 118.14,
+   "z3_ms": 1162.72
+  }
+ },
+ "benchmark": {
+  "n": 380,
+  "by_category": {
+   "single": 200,
+   "modify": 20,
+   "conjunction": 120,
+   "reject": 20,
+   "contradiction": 20
+  },
+  "contradictions_passing_validator_if_compiled_faithfully": "20/20"
+ }
+}

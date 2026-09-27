@@ -1,0 +1,175 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{xcolor}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newcommand{\pend}[1]{\textcolor{red!70!black}{[#1]}}
+\newcommand{\M}{\mathcal{M}}
+
+\begin{document}
+
+\title{Catching Conflicts Before They Reach the Door Lock:\\ Solver-Verified Compilation of Natural-Language Smart-Home Policies}
+
+\author{\IEEEauthorblockN{Tarun Raja}
+\IEEEauthorblockA{\pend{Affiliation} \\ \pend{email}}}
+
+\maketitle
+
+\begin{abstract}
+Smart-home platforms increasingly let people write automation policies in plain English, which a large language model (LLM) compiles into a rule language. Validation then happens one rule at a time: the output is well-formed, typed, and above a confidence threshold. Per-rule validation cannot see a rule that contradicts itself, a \emph{modify} that a \emph{block} always overrides, two modifiers that disagree about the same moment, or a safety property that no rule actually guarantees. We formalize the rule language of DeviceWeave and show that, because every condition constrains one context field, the set of contexts a rule matches is a finite union of axis-aligned boxes. Satisfiability, shadowing, conflict, redundancy and invariant coverage are then decidable \emph{exactly} by interval arithmetic, with a concrete witness context for every finding (Theorems~\ref{thm:exact} and~\ref{thm:witness}) and a polynomial bound for a fixed number of fields (Proposition~\ref{prop:complexity}). On 1{,}000 random rule sets, the checker's findings match an independent Z3 encoding exactly, and all 1{,}231 witnesses reproduce the finding when replayed through the production evaluator. The checker runs 10--48$\times$ faster than Z3. It now gates policy authoring in production. We also release a 380-rule benchmark that scores compiled rules by semantic equivalence rather than by string match. All 20 of its self-contradictory rules, compiled faithfully, pass the per-rule validator.
+\end{abstract}
+
+\begin{IEEEkeywords}
+smart home, policy verification, LLM compilation, satisfiability modulo theories, interval analysis
+\end{IEEEkeywords}
+
+\section{Introduction}
+In DeviceWeave~\cite{prior-device}, a person writes ``don't run the heater when nobody is home''. An LLM compiles it to a policy in a small domain-specific language (DSL), and a validator checks the result's structure before it is stored and enforced. The validator answers one question: is this rule well-formed? It does not answer whether the \emph{set} of rules means what their authors intended. Four failure modes are invisible to it:
+\begin{itemize}
+\item a rule whose conditions cannot all hold (``above 80 and below 60 degrees''), which can never fire;
+\item a \emph{modify} (e.g., dim the lights) inside a region that a \emph{block} covers, so it never applies;
+\item two modifiers setting different parameters in overlapping regions, where the newest silently wins;
+\item a stated safety property (``the heater is always blocked when nobody is home'') with a gap that no rule covers.
+\end{itemize}
+Each one is a valid rule that goes live and silently does something other than what was asked. This paper contributes:
+\begin{enumerate}
+\item formal semantics for the DSL, mirroring the production evaluator, and a proof that all five questions above are decidable exactly by interval arithmetic, with witnesses and a complexity bound (Section~\ref{sec:theory});
+\item an implementation that gates policy authoring. Unsatisfiable rules and invariant counterexamples are refused; conflicts are returned as warnings with a witness (Section~\ref{sec:system});
+\item cross-validation against an independent SMT encoding in Z3~\cite{demoura2008}, and replay of every witness through the real evaluator (Section~\ref{sec:eval});
+\item a 380-rule benchmark for LLM policy compilation, scored by semantic equivalence (Section~\ref{sec:bench}).
+\end{enumerate}
+
+\section{Related Work}
+Conflict detection among home-automation rules has been studied for trigger-action programming. Examples include IFTTT-style rule analysis and model checking of SmartThings apps~\cite{celik2018,nguyen2018}, which typically compile to a model checker or SMT solver. Firewall-policy analysis addresses the same shadowing and redundancy questions over header fields~\cite{alshaer2004}. Our contribution is observing that DeviceWeave's DSL is in the fragment where each constraint is \emph{unary}, which makes these questions solvable exactly without a solver in the serving path. We still cross-check against one. LLM compilation to formal specifications has been evaluated mostly by syntactic match. We score by semantic equivalence instead.
+
+\section{Semantics and Exact Analysis}\label{sec:theory}
+\subsection{The DSL}
+The context has fields $F$ with domains: temperature $[-80,150]$\,\textdegree F, humidity and cloud cover $[0,100]$, hour $\{0,\dots,23\}$, and two booleans ($\mathit{is\_home}$, $\mathit{is\_overcast}$). Let $d=|F|=6$ and $\mathcal D=\prod_{f\in F}D_f$. An \emph{atom} is $(f,\mathit{op},v)$ with $\mathit{op}\in\{<,\le,>,\ge,=,\ne\}$ for numeric $f$, and $\{=,\ne\}$ for boolean $f$. A \emph{rule} $r$ has a device type, a conjunction of atoms $A_r$, an action type $\in\{\mathit{block},\mathit{modify},\mathit{allow}\}$ and parameters. Its \emph{match set} is $\M(r)=\{x\in\mathcal D: x\models a\ \forall a\in A_r\}$.
+
+\begin{definition}[Evaluator semantics]\label{def:sem}
+For device $\delta$, context $x$, and rules ordered newest first, the verdict for switching on is: \emph{block} if some block rule of $\delta$ has $x\in\M(r)$; otherwise \emph{modify} with the parameters of the newest matching modifier, if one exists; otherwise \emph{allow}. Allow rules never override a block.
+\end{definition}
+
+This is exactly the behaviour of the production evaluator when every field is present in $x$. A missing field makes an atom false, which can only prevent a rule from matching.
+
+\subsection{Boxes}
+A \emph{box} is $B=\prod_{f}I_f$, where each $I_f\subseteq D_f$ is an interval (open, closed or half-open; integer-valued for hour) or a subset of $\{\top,\bot\}$ for booleans.
+
+\begin{lemma}[Match sets are finite unions of boxes]\label{lem:boxes}
+For every rule $r$ with $k$ atoms, $\M(r)$ is a union of at most $2^k$ pairwise disjoint boxes.
+\end{lemma}
+\begin{proof}
+Each numeric atom's satisfying set in $D_f$ is one interval, or two disjoint intervals for $\ne$. Each boolean atom's is one subset of $\{\top,\bot\}$. An atom on $f$ leaves the other fields unconstrained, so its satisfying set in $\mathcal D$ is a union of at most two disjoint boxes. Intersecting a union of disjoint boxes with another such union gives the union of pairwise intersections. These are again disjoint, and the intersection of two boxes is a box, computed fieldwise because interval intersection is an interval. The count at most doubles per atom.
+\end{proof}
+
+\begin{lemma}[Exact box difference]\label{lem:diff}
+For boxes $A,B$, the procedure that splits $A$ along each field in turn, keeping the parts of $A_f$ outside $B_f$ and narrowing the rest to $A_f\cap B_f$, returns at most $2d$ pairwise disjoint boxes whose union is exactly $A\setminus B$.
+\end{lemma}
+\begin{proof}
+Process fields $f_1,\dots,f_d$ in order and maintain a remainder box $R_0=A$. At step $j$, $R_{j-1}\setminus B_{f_j}$ splits into at most two intervals. For booleans it is a single set difference; for intervals, the part below and the part above $B_{f_j}$, with endpoints flipped between open and closed so no point is lost or duplicated. These give at most two output pieces, $R_{j-1}$ with its $f_j$-coordinate replaced, and then $R_j$ is $R_{j-1}$ with $f_j$ narrowed to $A_{f_j}\cap B_{f_j}$. A point $x\in A$ lies outside $B$ iff it fails some coordinate. Let $j$ be the first such coordinate: then $x$ belongs to exactly the piece emitted at step $j$, since earlier steps narrowed to coordinates $x$ satisfies. A point in $A\cap B$ reaches $R_d$ and is never emitted. So the pieces are disjoint and cover exactly $A\setminus B$.
+\end{proof}
+
+\subsection{Findings as set predicates}
+For device $\delta$, let $\mathcal B$ be the union of its block rules' match sets, and for a modifier $r$ let $\mathcal N(r)$ be the union of its newer modifiers' match sets.
+\begin{itemize}
+\item \emph{unsatisfiable}($r$): $\M(r)=\emptyset$.
+\item \emph{shadowed}($r$), for $r$ a modifier: $\M(r)\subseteq\mathcal B\cup\mathcal N(r)$.
+\item \emph{conflict\_block\_allow}($a,b$): $\M(a)\cap\M(b)\ne\emptyset$ for an allow $a$ and block $b$.
+\item \emph{conflict\_modify}($m',m$): $(\M(m')\cap\M(m))\setminus\mathcal B\ne\emptyset$ for $m'$ newer than $m$ with different parameters.
+\item \emph{redundant}($r$): $\M(r)\subseteq\bigcup\{\M(r'):r'\ne r$ has the same action (and parameters)$\}$.
+\item \emph{invariant\_violated}($I$) for $I=(\delta,A_I)$: $\M(I)\setminus\mathcal B\neq\emptyset$.
+\end{itemize}
+
+\begin{theorem}[Exactness]\label{thm:exact}
+The checker reports each finding if and only if its set predicate holds.
+\end{theorem}
+\begin{proof}
+By Lemma~\ref{lem:boxes}, every match set is represented exactly as a finite union of boxes. Emptiness of a box is decided exactly per field: an interval is empty iff its bounds cross, or they touch with an open end; for integers, iff it contains no integer (computed by rounding the bounds inward); a boolean set is empty iff it has no element. Intersection is exact fieldwise. The differences $X\setminus\bigcup_j Y_j$ are computed by iterating Lemma~\ref{lem:diff} over each $Y_j$ and each remaining piece, which is exact by induction on $j$. Each predicate is either a non-emptiness of an intersection or difference, or a containment $X\subseteq Y\iff X\setminus Y=\emptyset$. All are therefore decided exactly.
+\end{proof}
+
+\begin{theorem}[Witness soundness]\label{thm:witness}
+For every reported conflict or invariant violation, the witness $w$ returned lies in the corresponding non-empty set. The evaluator of Definition~\ref{def:sem} on $w$ returns \emph{block} for a block/allow conflict; the newer modifier's parameters for a modifier conflict; and not \emph{block} for an invariant violation.
+\end{theorem}
+\begin{proof}
+The witness is built fieldwise from a non-empty box. For an interval it returns a preferred value clamped into the interval: an interior point, a closed endpoint, or, for an open endpoint, a point strictly inside. For integers, the rounded preference is clamped into the non-empty integer range. For booleans, an element of the set. So $w$ lies in the box, and hence in the set. For a block/allow conflict, $w\in\M(b)$ for a block $b$, so Definition~\ref{def:sem} returns block. For a modifier conflict, $w\notin\mathcal B$ and $w\in\M(m')$ with $m'$ newer than $m$. No block matches, so the newest matching modifier applies; it is $m'$ or an even newer one, but never $m$. For an invariant, $w\notin\mathcal B$, so no block rule of $\delta$ matches.
+\end{proof}
+
+\begin{proposition}[Complexity]\label{prop:complexity}
+Let a device have $m$ rules with at most $k$ atoms each. Every box that arises during the analysis is a union of cells of a grid with at most $2mk+3$ cells per field. Hence the number of pairwise disjoint boxes representing any intermediate set is at most $(2mk+3)^d$, and each finding is decided in time polynomial in $m$ for fixed $d$ and $k$.
+\end{proposition}
+\begin{proof}
+All interval endpoints come from atom thresholds or the two domain bounds, so each field has at most $mk+2$ distinct endpoints. $n$ points on a line cut it into $n$ singletons and at most $n-1$ open segments between them, so $D_f$ splits into at most $2(mk+2)-1=2mk+3$ elementary pieces. Every box produced by intersection or by Lemma~\ref{lem:diff} has endpoints among these thresholds, so it is a union of product cells. Disjoint boxes, each containing at least one cell, number at most the cell count, $(2mk+3)^d$. Each step of Lemma~\ref{lem:diff} is $O(d)$, which gives the polynomial bound.
+\end{proof}
+
+With $d=6$ the bound is loose. In practice rule sets are small and most rules touch one or two fields (Section~\ref{sec:eval}).
+
+\section{System}\label{sec:system}
+The checker (\texttt{rule\_set\_checker.py}) has no dependencies and runs inside the authoring Lambda. After the LLM compiler and the per-rule validator, the new rule is analysed as the newest member of its device's active policies:
+\begin{itemize}
+\item an \emph{unsatisfiable} rule, or an \emph{invariant} violation (invariants are configured as a list of $(\delta,A_I)$ pairs), returns HTTP 422 and the rule is not stored;
+\item conflicts, shadowing and redundancy are stored and returned under \texttt{analysis}, each with its witness context, so the author sees, for example, that an existing block overrides their new allow.
+\end{itemize}
+Witnesses prefer typical values (70\,\textdegree F, noon) when the region permits, so a counterexample reads as a plausible afternoon rather than $-80$\,\textdegree F at midnight.
+
+\textbf{Independent SMT encoding.} A separate script encodes the same predicates in Z3: fields are Real/Int/Bool variables with domain constraints, rules are conjunctions, and the evaluator's priority is spelled out as formulas. It is not in the serving path. It exists so that the interval implementation is checked against a solver rather than against its author's reading of it. If the DSL gains a cross-field condition, the box argument stops holding, and this encoding is the one to keep.
+
+\section{Evaluation}\label{sec:eval}
+\textbf{Agreement.} We generated 1{,}000 random rule sets of 1--6 rules over two devices. Thresholds were drawn to include boundary cases (hour 24, humidity 101, equal and not-equal on the same value), with a heater-when-away invariant. The findings, compared as (kind, rules) pairs, were \emph{identical} between the interval checker and Z3 on all 1{,}000 sets. The sets produced 544 unsatisfiable rules, 966 invariant violations, 265 block/allow conflicts, 122 modifier conflicts, 101 redundancies and 61 shadowed modifiers.
+
+\textbf{Witness replay.} All 1{,}231 witnesses for block/allow conflicts and invariant violations were replayed through the \emph{production} evaluator, and all 1{,}231 reproduced the finding. A mutation that made $>$ inclusive failed both the agreement test and the replay test.
+
+\begin{table}[t]
+\centering
+\caption{Median analysis time (ms) per rule set, single device.}
+\label{tab:time}
+\begin{tabular}{rrrr}
+\toprule
+Rules & Interval checker & Z3 encoding & Speed-up\\
+\midrule
+5 & 0.35 & 16.8 & $48\times$\\
+10 & 1.75 & 45.0 & $26\times$\\
+20 & 6.63 & 124.7 & $19\times$\\
+40 & 21.7 & 398.3 & $18\times$\\
+80 & 118.1 & 1162.7 & $10\times$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Cost.} Table~\ref{tab:time}: the checker analyses a realistic household (5--20 rules per device) in under 7\,ms, and 80 rules in about 0.1\,s, 10--48$\times$ faster than the Z3 encoding. Growth is superlinear, as Proposition~\ref{prop:complexity} allows, but far below the bound.
+
+\section{A Benchmark for LLM Policy Compilation}\label{sec:bench}
+The analysis catches errors \emph{between} rules. The remaining question is how often the compiler gets a single rule wrong in a way the validator accepts. We release 380 plain-English rules with gold policies:
+\begin{itemize}
+\item 200 single-condition rules (20 condition phrasings $\times$ 5 action phrasings $\times$ 2 devices), including explicit numbers and the semantic shorthands the compiler's prompt defines;
+\item 120 two-condition conjunctions;
+\item 20 modify rules;
+\item 20 rules that must be refused (unsupported devices or conditions, vague requests);
+\item 20 self-contradictions.
+\end{itemize}
+Scoring is by \emph{meaning}: a compiled rule is correct iff it has the gold device and action, and $\M(\text{compiled})=\M(\text{gold})$. That equality is decided by Theorem~\ref{thm:exact} as two empty differences, so $\mathit{hour}\ge22$ and $\mathit{hour}>21$ score as equal, and $>85$ vs.\ $\ge85$ as different. The headline metric is the \emph{silent error rate}: among compiled rules the validator accepts, the fraction that mean something else.
+
+\textbf{The validator's blind spot, measured.} Compiled faithfully, all 20 self-contradictions (20/20) pass the per-rule validator. They are well-formed, typed and confident, and only the set-level analysis rejects them.
+
+\pend{LLM results pending: accuracy and silent error rate for the deployed compiler (Claude on Bedrock) and for other models require model access not available in this environment. The harness (\texttt{scripts/policy\_compile\_bench.py run}) is complete; \texttt{--responses} scores saved outputs offline.}
+
+\section{Limitations}
+The analysis assumes every context field is present. A missing field can only stop a rule matching, so a block may fail to fire, and the evaluator treats that as no match. Invariants are user-supplied; the system checks them but does not infer them. The benchmark's phrasings are templated from the compiler's own semantic reference. It therefore measures fidelity to that reference, not robustness to free paraphrase, which a human-written split would test.
+
+\section{Conclusion}
+Because the policy language is unary per field, whole-rule-set verification is exact, fast and dependency-free. Every finding comes with a witness the production evaluator confirms, and an independent SMT encoding agrees on 1{,}000 random sets. The check now stands between an LLM's compilation and a policy going live.
+
+\begin{thebibliography}{99}
+\bibitem{prior-device} T.~Raja, \pend{title of the DeviceWeave device-control paper}, \pend{venue, year}.
+\bibitem{demoura2008} L.~de~Moura and N.~Bj{\o}rner, ``Z3: An efficient SMT solver,'' in \emph{Proc. TACAS}, 2008, pp.~337--340.
+\bibitem{celik2018} Z.~B. Celik, P.~McDaniel, and G.~Tan, ``Soteria: Automated IoT safety and security analysis,'' in \emph{Proc. USENIX ATC}, 2018.
+\bibitem{nguyen2018} D.~T. Nguyen, C.~Song, Z.~Qian, S.~V. Krishnamurthy, E.~J.~M. Colbert, and P.~McDaniel, ``IoTSan: Fortifying the safety of IoT systems,'' in \emph{Proc. CoNEXT}, 2018.
+\bibitem{alshaer2004} E.~S. Al-Shaer and H.~H. Hamed, ``Discovery of policy anomalies in distributed firewalls,'' in \emph{Proc. IEEE INFOCOM}, 2004.
+\end{thebibliography}
+\end{document}
