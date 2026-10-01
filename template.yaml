@@ -83,10 +83,24 @@ Parameters:
   LambdaPublicSubnetIds:
     Type: CommaDelimitedList
     Description: >
-      Public subnet IDs for Lambda direct internet access to Gemini API.
-      Lambda is placed in public subnets with direct IGW route.
-      Example: subnet-12345678,subnet-87654321
+      Optional override of LambdaSubnetIds for every function. Leave this
+      empty (the default) so Lambdas stay in the private subnets. Public
+      subnets have no DynamoDB/AWS-service egress and need NAT or
+      endpoints: a Lambda ENI is not assigned a public IP, so an internet
+      gateway route does not provide egress, and the DynamoDB gateway
+      endpoint is on the private route table only. A non-empty list is
+      ignored unless LambdaUsePublicSubnets is also "true".
     Default: ""
+
+  LambdaUsePublicSubnets:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >
+      Set to "true" only to place every Lambda in LambdaPublicSubnetIds.
+      Leave "false" (the default) so functions stay in LambdaSubnetIds.
+      Public subnets have no DynamoDB/AWS-service egress and need NAT or
+      endpoints. Do not enable this for default-VPC public subnets.
 
   LambdaIpv6DualStack:
     Type: String
@@ -1006,7 +1020,14 @@ Resources:
 Conditions:
   HasObservatoryTable: !Not [!Equals [!Ref ObservatoryMetricsTableName, ""]]
   HasMemgraphSecret: !Not [!Equals [!Ref MemgraphSecretArn, ""]]
-  HasPublicSubnets: !Not [!Equals [!Join ["", !Ref LambdaPublicSubnetIds], ""]]
+  # A non-empty LambdaPublicSubnetIds used to replace the private subnets
+  # on its own. That path is not safe: public subnets have no
+  # DynamoDB/AWS-service egress and need NAT or endpoints. Both the list
+  # and an explicit LambdaUsePublicSubnets=true are required. The default
+  # (empty list, flag false) keeps LambdaSubnetIds.
+  HasPublicSubnets: !And
+    - !Not [!Equals [!Join ["", !Ref LambdaPublicSubnetIds], ""]]
+    - !Equals [!Ref LambdaUsePublicSubnets, "true"]
   LambdaDualStack: !Equals [!Ref LambdaIpv6DualStack, "true"]
 
 Outputs:

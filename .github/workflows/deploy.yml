@@ -124,46 +124,22 @@ jobs:
           echo "Resolved VpcId=$VPC_ID from subnets=$SUBNET_IDS"
 
       # ----------------------------------------------------------------
-      # 5b. Discover public subnets in VPC for Gemini API access
-      #
-      #     Public subnets have map-public-ip-on-launch=true.
-      #     Filter for dual-stack enabled subnets (IPv6 CIDR blocks assigned).
-      #     If no public subnets exist, this will be empty (and SAM will use
-      #     LambdaSubnetIds instead — Lambda stays in private subnets).
-      # ----------------------------------------------------------------
-      - name: Discover public subnets for Gemini API access
-        id: public_subnets
-        run: |
-          PUBLIC_SUBNETS=$(aws ec2 describe-subnets \
-            --filters "Name=vpc-id,Values=${{ steps.vpc.outputs.vpc_id }}" \
-                      "Name=map-public-ip-on-launch,Values=true" \
-            --region "$AWS_REGION" \
-            --query "Subnets[?Ipv6CidrBlockAssociationSet[0]].SubnetId" \
-            --output text | tr '\t' ',')
-
-          echo "public_subnet_ids=$PUBLIC_SUBNETS" >> "$GITHUB_OUTPUT"
-
-          if [ -z "$PUBLIC_SUBNETS" ]; then
-            echo "No dual-stack public subnets found — Lambda will use private subnets (Gemini API access requires explicit config)"
-          else
-            echo "Discovered dual-stack public subnets: $PUBLIC_SUBNETS"
-          fi
-
-      # ----------------------------------------------------------------
-      # 5c. Can the Lambdas be dual-stack?
+      # 5b. Can the Lambdas be dual-stack?
       #
       #     Ipv6AllowedForDualStack is rejected unless every subnet the
-      #     function is placed in has an IPv6 CIDR, so check the subnets
-      #     the template will actually use (public if any were found,
-      #     else private). The association's state lives at
-      #     Ipv6CidrBlockState.State -- a top-level State filter matches
-      #     nothing and would silently report "no IPv6".
+      #     function is placed in has an IPv6 CIDR. Functions stay in the
+      #     private LambdaSubnetIds — do not discover or check public
+      #     subnets. Public subnets have no DynamoDB/AWS-service egress
+      #     and need NAT or endpoints (a Lambda ENI gets no public IP, and
+      #     the DynamoDB gateway endpoint is on the private route table).
+      #     The association's state lives at Ipv6CidrBlockState.State --
+      #     a top-level State filter matches nothing and would silently
+      #     report "no IPv6".
       # ----------------------------------------------------------------
-      - name: Check subnets for IPv6 (Lambda dual-stack)
+      - name: Check private subnets for IPv6 (Lambda dual-stack)
         id: dualstack
         run: |
-          SUBNETS="${{ steps.public_subnets.outputs.public_subnet_ids }}"
-          [ -z "$SUBNETS" ] && SUBNETS="${{ steps.vpc.outputs.subnet_ids }}"
+          SUBNETS="${{ steps.vpc.outputs.subnet_ids }}"
 
           MISSING=""
           for SUBNET in $(echo "$SUBNETS" | tr ',' ' '); do
@@ -285,6 +261,13 @@ jobs:
 
       # ----------------------------------------------------------------
       # 10. SAM deploy — passes all cross-stack resolved parameters
+      #
+      #     LambdaPublicSubnetIds must be passed as an empty value. On
+      #     stack update, omitting a parameter keeps its previous value, so
+      #     dropping the override would leave public subnet IDs in place.
+      #     LambdaUsePublicSubnets=false keeps HasPublicSubnets false even
+      #     if a non-empty list is still stored. Public subnets have no
+      #     DynamoDB/AWS-service egress and need NAT or endpoints.
       # ----------------------------------------------------------------
       - name: SAM deploy
         run: |
@@ -299,7 +282,8 @@ jobs:
               StageName="$STAGE" \
               VpcId="${{ steps.vpc.outputs.vpc_id }}" \
               "LambdaSubnetIds=${{ steps.vpc.outputs.subnet_ids }}" \
-              "LambdaPublicSubnetIds=${{ steps.public_subnets.outputs.public_subnet_ids }}" \
+              "LambdaPublicSubnetIds=" \
+              LambdaUsePublicSubnets=false \
               "LambdaIpv6DualStack=${{ steps.dualstack.outputs.dual_stack || 'false' }}" \
               AgentProvider=gemini \
               LLMProvider=gemini \
