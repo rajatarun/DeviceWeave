@@ -150,6 +150,42 @@ jobs:
           fi
 
       # ----------------------------------------------------------------
+      # 5c. Can the Lambdas be dual-stack?
+      #
+      #     Ipv6AllowedForDualStack is rejected unless every subnet the
+      #     function is placed in has an IPv6 CIDR, so check the subnets
+      #     the template will actually use (public if any were found,
+      #     else private). The association's state lives at
+      #     Ipv6CidrBlockState.State -- a top-level State filter matches
+      #     nothing and would silently report "no IPv6".
+      # ----------------------------------------------------------------
+      - name: Check subnets for IPv6 (Lambda dual-stack)
+        id: dualstack
+        run: |
+          SUBNETS="${{ steps.public_subnets.outputs.public_subnet_ids }}"
+          [ -z "$SUBNETS" ] && SUBNETS="${{ steps.vpc.outputs.subnet_ids }}"
+
+          MISSING=""
+          for SUBNET in $(echo "$SUBNETS" | tr ',' ' '); do
+            CIDR=$(aws ec2 describe-subnets \
+              --subnet-ids "$SUBNET" \
+              --region "$AWS_REGION" \
+              --query "Subnets[0].Ipv6CidrBlockAssociationSet[?Ipv6CidrBlockState.State=='associated'] | [0].Ipv6CidrBlock" \
+              --output text)
+            if [ -z "$CIDR" ] || [ "$CIDR" = "None" ]; then
+              MISSING="$MISSING $SUBNET"
+            fi
+          done
+
+          if [ -z "$MISSING" ]; then
+            echo "dual_stack=true" >> "$GITHUB_OUTPUT"
+            echo "All Lambda subnets have IPv6 -- deploying Lambdas dual-stack"
+          else
+            echo "dual_stack=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Lambdas deployed IPv4-only: no associated IPv6 CIDR on subnet(s):$MISSING"
+          fi
+
+      # ----------------------------------------------------------------
       # 6. Resolve Observatory metrics table parameters from shared stack
       #
       #    Stack: tarun-teamweave-shared
@@ -264,6 +300,7 @@ jobs:
               VpcId="${{ steps.vpc.outputs.vpc_id }}" \
               "LambdaSubnetIds=${{ steps.vpc.outputs.subnet_ids }}" \
               "LambdaPublicSubnetIds=${{ steps.public_subnets.outputs.public_subnet_ids }}" \
+              "LambdaIpv6DualStack=${{ steps.dualstack.outputs.dual_stack || 'false' }}" \
               AgentProvider=gemini \
               LLMProvider=gemini \
               GeminiModelId=gemini-3.8-flash \

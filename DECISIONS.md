@@ -391,3 +391,18 @@ Every DSL condition constrains one field and a rule ANDs its conditions, so a ru
 On authoring: an `unsatisfiable` rule, or an `invariant_violated` against `POLICY_INVARIANTS` (optional JSON list of `{name, device_type, conditions}` meaning "must be blocked from switching on there"), is a 422 with `rejection_stage: "rule_set_analysis"` and is not stored. Conflicts, shadowing and redundancy are warnings returned with the stored policy under `analysis`, each with a witness context. The analysis assumes every context field is present; a missing field can only stop a block firing, which the evaluator already treats as no match.
 
 `scripts/policy_compile_bench.py` measures the compiler that feeds all of this: 380 plain-English rules with gold policies (single conditions, conjunctions, modifiers, 20 that must be refused, 20 self-contradictions). It scores by *meaning* — two rules are equal when they match exactly the same contexts — and reports the silent error rate: rules the validator accepted that mean something else.
+
+## 34. Compile fidelity measured on AutoTap Study 1, referenced rather than vendored
+
+**Chosen**: `scripts/compile_fidelity.py` reads AutoTap's Study 1 spreadsheet (Zhang, He et al., ICSE 2019, <https://ieeexplore.ieee.org/abstract/document/8811900>, <https://github.com/zlfben/autotap>) from a local, git-ignored path at run time. It scores each statement through the real compiler, validator and rule-set checker, and compares against position-keyed labels in `benchmarks/autotap/labels.json`.
+**Rejected**: copying the data or paraphrased rules into the repository; a spreadsheet library dependency; a live model call in tests.
+
+The generated benchmark (decision 33) only contains phrasings the compiler prompt was written for. Study 1 is 690 statements people wrote about their own homes, so it shows what the DSL is *asked* for. Most of them are obligations ("should always") or involve devices the DSL does not know about (`docs/autotap-gap-analysis.md`).
+
+The AutoTap repository is GPL-3.0, and no separate data licence was found. So:
+- the file is fetched (pinned commit, sha256-checked) into a cache that `.gitignore` excludes twice;
+- labels are keyed by sheet, row and statement slot, and refuse free-text fields that repeat the statement;
+- reports leave the text out unless asked;
+- a test fails if any spreadsheet is ever tracked.
+
+The `.xlsx` is read with the stdlib zip/XML parser, because the format is three XML parts. The compiler mode is explicit: `--responses` scores saved outputs offline, and `--live` is an opt-in paid call that sends the statements to the configured provider. Unlabelled statements are reported as `unlabeled`, never as failures, so the harness is useful before anyone has labelled anything.

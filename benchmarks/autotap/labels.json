@@ -1,0 +1,10 @@
+{
+  "format": "deviceweave-compile-fidelity-labels/1",
+  "about": "Expected compiled policies for AutoTap Study 1 statements, keyed by spreadsheet position (study1:<sheet>:row<r>:stmt<k>). Never put a participant's text here, in a note or anywhere else. See benchmarks/autotap/README.md.",
+  "dataset": {
+    "name": "AutoTap Study 1",
+    "source": "https://github.com/zlfben/autotap/blob/fe0fdd638a1b170b1ac71b0f2921ab54d547893b/data/Data%20-%20User%20Study%201.xlsx",
+    "sha256": "29c85b0081eb4e2c6c4590c6c87838b4bb1c114315b5c2f004142ab3d967728e"
+  },
+  "labels": {}
+}

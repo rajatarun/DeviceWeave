@@ -88,6 +88,15 @@ Parameters:
       Example: subnet-12345678,subnet-87654321
     Default: ""
 
+  LambdaIpv6DualStack:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: >
+      Set Ipv6AllowedForDualStack on every function's VpcConfig. Lambda
+      rejects it unless every subnet the function uses has an IPv6 CIDR,
+      so the deploy workflow passes "false" (with a warning) when one does not.
+
   # -----------------------------------------------------------------------
   # Confidence thresholds — one gate each, all defaulting to
   # CONFIDENCE_THRESHOLD when left blank.
@@ -331,6 +340,12 @@ Resources:
           - HasPublicSubnets
           - !Ref LambdaPublicSubnetIds
           - !Ref LambdaSubnetIds
+        # Dual-stack: lets the function use IPv6 egress (Egress-Only IGW) for
+        # AWS and third-party APIs, so it no longer depends on the NAT
+        # instance for them. Requires an IPv6 CIDR on every subnet; the
+        # deploy workflow checks that and passes LambdaIpv6DualStack=false
+        # otherwise.
+        Ipv6AllowedForDualStack: !If [LambdaDualStack, true, false]
       Policies:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
@@ -511,6 +526,12 @@ Resources:
           - HasPublicSubnets
           - !Ref LambdaPublicSubnetIds
           - !Ref LambdaSubnetIds
+        # Dual-stack: lets the function use IPv6 egress (Egress-Only IGW) for
+        # AWS and third-party APIs, so it no longer depends on the NAT
+        # instance for them. Requires an IPv6 CIDR on every subnet; the
+        # deploy workflow checks that and passes LambdaIpv6DualStack=false
+        # otherwise.
+        Ipv6AllowedForDualStack: !If [LambdaDualStack, true, false]
       Environment:
         Variables:
           KASA_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials"
@@ -625,6 +646,12 @@ Resources:
           - HasPublicSubnets
           - !Ref LambdaPublicSubnetIds
           - !Ref LambdaSubnetIds
+        # Dual-stack: lets the function use IPv6 egress (Egress-Only IGW) for
+        # AWS and third-party APIs, so it no longer depends on the NAT
+        # instance for them. Requires an IPv6 CIDR on every subnet; the
+        # deploy workflow checks that and passes LambdaIpv6DualStack=false
+        # otherwise.
+        Ipv6AllowedForDualStack: !If [LambdaDualStack, true, false]
       Policies:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
@@ -747,6 +774,12 @@ Resources:
           - HasPublicSubnets
           - !Ref LambdaPublicSubnetIds
           - !Ref LambdaSubnetIds
+        # Dual-stack: lets the function use IPv6 egress (Egress-Only IGW) for
+        # AWS and third-party APIs, so it no longer depends on the NAT
+        # instance for them. Requires an IPv6 CIDR on every subnet; the
+        # deploy workflow checks that and passes LambdaIpv6DualStack=false
+        # otherwise.
+        Ipv6AllowedForDualStack: !If [LambdaDualStack, true, false]
       Policies:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
@@ -974,6 +1007,7 @@ Conditions:
   HasObservatoryTable: !Not [!Equals [!Ref ObservatoryMetricsTableName, ""]]
   HasMemgraphSecret: !Not [!Equals [!Ref MemgraphSecretArn, ""]]
   HasPublicSubnets: !Not [!Equals [!Join ["", !Ref LambdaPublicSubnetIds], ""]]
+  LambdaDualStack: !Equals [!Ref LambdaIpv6DualStack, "true"]
 
 Outputs:
   ApiBaseUrl:
