@@ -262,12 +262,15 @@ jobs:
       # ----------------------------------------------------------------
       # 10. SAM deploy — passes all cross-stack resolved parameters
       #
-      #     LambdaPublicSubnetIds must be passed as an empty value. On
-      #     stack update, omitting a parameter keeps its previous value, so
-      #     dropping the override would leave public subnet IDs in place.
-      #     LambdaUsePublicSubnets=false keeps HasPublicSubnets false even
-      #     if a non-empty list is still stored. Public subnets have no
-      #     DynamoDB/AWS-service egress and need NAT or endpoints.
+      #     LambdaPublicSubnetIds must be overwritten with an empty value
+      #     on every deploy. Omitting it on stack update keeps the previous
+      #     subnet list. SAM CLI rejects a bare LambdaPublicSubnetIds=
+      #     (CfnParameterOverridesType requires a non-empty unquoted value).
+      #     The form it accepts is ParameterKey=...,ParameterValue="".
+      #     LambdaUsePublicSubnets=false keeps HasPublicSubnets false, so
+      #     VpcConfig SubnetIds stays on LambdaSubnetIds even if a list is
+      #     still stored. Public subnets have no DynamoDB/AWS-service
+      #     egress and need NAT or endpoints.
       # ----------------------------------------------------------------
       - name: SAM deploy
         run: |
@@ -282,7 +285,7 @@ jobs:
               StageName="$STAGE" \
               VpcId="${{ steps.vpc.outputs.vpc_id }}" \
               "LambdaSubnetIds=${{ steps.vpc.outputs.subnet_ids }}" \
-              "LambdaPublicSubnetIds=" \
+              'ParameterKey=LambdaPublicSubnetIds,ParameterValue=""' \
               LambdaUsePublicSubnets=false \
               "LambdaIpv6DualStack=${{ steps.dualstack.outputs.dual_stack || 'false' }}" \
               AgentProvider=gemini \
