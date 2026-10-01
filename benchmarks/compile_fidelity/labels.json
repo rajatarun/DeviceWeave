@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "description": "Expected DeviceWeave policies for AutoTap Study 1 statements. Keys are study1:<sheet>:<excel-row>:s<statement> (header row is 1, the question-text row is 2, the first participant row is 3). Do not store the original rule text. Unlabeled ids are reported as unlabeled, not as failures. See docs/autotap-study1.md.",
+  "labels": {}
+}

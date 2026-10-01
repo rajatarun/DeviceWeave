@@ -11,3 +11,10 @@ __pycache__/
 # Local env
 .env
 .env.*
+
+# AutoTap Study 1 workbook and compile-fidelity reports.
+# Fetched locally only. The upstream repo is GPL-3.0 and no separate
+# data licence was found, so the workbook is not part of this tree.
+.cache/
+*.xlsx
+*.xlsx.partial
