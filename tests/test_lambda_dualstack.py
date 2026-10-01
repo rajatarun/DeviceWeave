@@ -1,6 +1,7 @@
 """VPC Lambdas stay on the private subnets, and are dual-stack when those subnets allow it."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -85,11 +86,58 @@ def test_deploy_clears_public_subnets_and_does_not_discover_them():
     assert "map-public-ip-on-launch" not in wf
     assert "id: public_subnets" not in wf
     assert "LambdaPublicSubnetIds=${{" not in wf
-    assert re.search(r'"LambdaPublicSubnetIds="', wf)
+    # SAM rejects a bare Key= with an empty value. The quoted long form is
+    # what CfnParameterOverridesType accepts for an empty override.
+    assert 'ParameterKey=LambdaPublicSubnetIds,ParameterValue=""' in wf
     assert "LambdaUsePublicSubnets=false" in wf
     step = next(s for s in yaml.safe_load(wf)["jobs"]["deploy"]["steps"] if s.get("id") == "dualstack")
     assert "public_subnet" not in step["run"]
     assert "steps.vpc.outputs.subnet_ids" in step["run"]
+
+
+def _sam_deploy_argv(tmp_path) -> list[str]:
+    """Shell-split the workflow's sam deploy line the way Actions will."""
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    step = next(s for s in wf["jobs"]["deploy"]["steps"] if s.get("name") == "SAM deploy")
+    script = re.sub(r"\$\{\{.*?\}\}", "gha-value", step["run"])
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    out = tmp_path / "argv"
+    (fake / "sam").write_text("#!/bin/bash\n" f'printf "%s\\0" "$@" > "{out}"\n')
+    (fake / "sam").chmod(0o755)
+    env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}",
+           "STAGE": "prod", "STACK_NAME": "deviceweave-prod", "AWS_REGION": "us-east-1"}
+    proc = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    args = [a.decode() for a in out.read_bytes().split(b"\0") if a]
+    assert args[0] == "deploy", args
+    return args
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_sam_parameter_overrides_parser_accepts_the_workflow_string(tmp_path):
+    """Run SAM CLI 1.x CfnParameterOverridesType on the exact argv bash produces."""
+    pytest.importorskip("samcli")
+    import click
+    from click.testing import CliRunner
+    from samcli.commands._utils.options import parameter_override_click_option
+
+    argv = _sam_deploy_argv(tmp_path)
+    overrides = argv[argv.index("--parameter-overrides") + 1:]
+    assert 'ParameterKey=LambdaPublicSubnetIds,ParameterValue=""' in overrides
+    assert "LambdaPublicSubnetIds=" not in overrides
+
+    @click.command()
+    @parameter_override_click_option()
+    def _cmd(parameter_overrides):
+        click.echo(json.dumps(parameter_overrides))
+
+    result = CliRunner().invoke(_cmd, ["--parameter-overrides", *overrides])
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.output)
+    assert parsed["LambdaPublicSubnetIds"] == ""
+    assert parsed["LambdaUsePublicSubnets"] == "false"
+    assert parsed["LambdaSubnetIds"] == "gha-value"
 
 
 def _check_step_script() -> str:

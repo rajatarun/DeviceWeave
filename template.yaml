@@ -89,7 +89,11 @@ Parameters:
       endpoints: a Lambda ENI is not assigned a public IP, so an internet
       gateway route does not provide egress, and the DynamoDB gateway
       endpoint is on the private route table only. A non-empty list is
-      ignored unless LambdaUsePublicSubnets is also "true".
+      ignored unless LambdaUsePublicSubnets is also "true". sam deploy
+      must pass an empty value as
+      ParameterKey=LambdaPublicSubnetIds,ParameterValue="" — a bare
+      LambdaPublicSubnetIds= is rejected, and omitting the parameter on
+      stack update keeps any previously stored subnet IDs.
     Default: ""
 
   LambdaUsePublicSubnets:
@@ -1024,7 +1028,9 @@ Conditions:
   # on its own. That path is not safe: public subnets have no
   # DynamoDB/AWS-service egress and need NAT or endpoints. Both the list
   # and an explicit LambdaUsePublicSubnets=true are required. The default
-  # (empty list, flag false) keeps LambdaSubnetIds.
+  # (empty list, flag false) keeps LambdaSubnetIds. Deploys overwrite a
+  # stored list with ParameterValue="" ; HasPublicSubnets stays false, so
+  # VpcConfig SubnetIds never receives that empty value.
   HasPublicSubnets: !And
     - !Not [!Equals [!Join ["", !Ref LambdaPublicSubnetIds], ""]]
     - !Equals [!Ref LambdaUsePublicSubnets, "true"]

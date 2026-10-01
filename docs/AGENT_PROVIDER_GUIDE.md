@@ -131,9 +131,13 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
    sam deploy --parameter-overrides \
      AgentProvider=gemini \
      LLMProvider=gemini \
-     "LambdaPublicSubnetIds=" \
+     'ParameterKey=LambdaPublicSubnetIds,ParameterValue=""' \
      LambdaUsePublicSubnets=false
    ```
+
+   SAM rejects a bare `LambdaPublicSubnetIds=` (empty unquoted value). The
+   single-quoted `ParameterKey=...,ParameterValue=""` form is what the CLI
+   accepts, and it clears a subnet list already stored on the stack.
 
    **Update existing stack (CloudFormation CLI)**:
 
