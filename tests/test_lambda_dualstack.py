@@ -1,7 +1,8 @@
-"""Every VPC Lambda is dual-stack when its subnets allow it, and the deploy decides that from the subnets."""
+"""VPC Lambdas stay on the private subnets, and are dual-stack when those subnets allow it."""
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -53,22 +54,60 @@ def test_deploy_passes_the_parameter_from_the_subnet_check():
     assert "id: dualstack" in wf
 
 
+def test_public_subnet_override_is_opt_in_and_defaults_to_private():
+    """Empty LambdaPublicSubnetIds keeps the private subnets. A non-empty list
+    does not move functions unless LambdaUsePublicSubnets is also true."""
+    t = _template()
+    public = t["Parameters"]["LambdaPublicSubnetIds"]
+    flag = t["Parameters"]["LambdaUsePublicSubnets"]
+    assert public["Default"] == ""
+    assert flag["Default"] == "false"
+    assert flag["AllowedValues"] == ["true", "false"]
+    for text in (public["Description"], flag["Description"]):
+        assert "Public subnets have no DynamoDB/AWS-service egress and need NAT or endpoints" in text
+    assert t["Conditions"]["HasPublicSubnets"] == {
+        "!And": [
+            {"!Not": [{"!Equals": [{"!Join": ["", {"!Ref": "LambdaPublicSubnetIds"}]}, ""]}]},
+            {"!Equals": [{"!Ref": "LambdaUsePublicSubnets"}, "true"]},
+        ]
+    }
+    for name, resource in t["Resources"].items():
+        cfg = resource.get("Properties", {}).get("VpcConfig")
+        if not cfg:
+            continue
+        assert cfg["SubnetIds"] == {
+            "!If": ["HasPublicSubnets", {"!Ref": "LambdaPublicSubnetIds"}, {"!Ref": "LambdaSubnetIds"}]
+        }, name
+
+
+def test_deploy_clears_public_subnets_and_does_not_discover_them():
+    wf = WORKFLOW.read_text()
+    assert "map-public-ip-on-launch" not in wf
+    assert "id: public_subnets" not in wf
+    assert "LambdaPublicSubnetIds=${{" not in wf
+    assert re.search(r'"LambdaPublicSubnetIds="', wf)
+    assert "LambdaUsePublicSubnets=false" in wf
+    step = next(s for s in yaml.safe_load(wf)["jobs"]["deploy"]["steps"] if s.get("id") == "dualstack")
+    assert "public_subnet" not in step["run"]
+    assert "steps.vpc.outputs.subnet_ids" in step["run"]
+
+
 def _check_step_script() -> str:
     wf = yaml.safe_load(WORKFLOW.read_text())
     step = next(s for s in wf["jobs"]["deploy"]["steps"] if s.get("id") == "dualstack")
-    return (step["run"]
-            .replace("${{ steps.public_subnets.outputs.public_subnet_ids }}", "${PUBLIC}")
-            .replace("${{ steps.vpc.outputs.subnet_ids }}", "${PRIVATE}"))
+    script = step["run"].replace("${{ steps.vpc.outputs.subnet_ids }}", "${PRIVATE}")
+    assert "${{" not in script, script
+    return script
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
-@pytest.mark.parametrize("public,private,ipv6,expected", [
-    ("", "subnet-a,subnet-b", {"subnet-a", "subnet-b"}, "true"),
-    ("", "subnet-a,subnet-b", {"subnet-a"}, "false"),
-    ("subnet-p", "subnet-a", {"subnet-p"}, "true"),          # public subnets are the ones used
-    ("subnet-p", "subnet-a", {"subnet-a"}, "false"),
+@pytest.mark.parametrize("private,ipv6,expected", [
+    ("subnet-a,subnet-b", {"subnet-a", "subnet-b"}, "true"),
+    ("subnet-a,subnet-b", {"subnet-a"}, "false"),
+    ("subnet-a", {"subnet-a"}, "true"),
+    ("subnet-a", set(), "false"),
 ])
-def test_subnet_check_step_runs_under_bash_e(tmp_path, public, private, ipv6, expected):
+def test_subnet_check_step_runs_under_bash_e(tmp_path, private, ipv6, expected):
     fake = tmp_path / "bin"
     fake.mkdir()
     # Fake `aws ec2 describe-subnets --subnet-ids X ...`: prints a CIDR when X has IPv6, else None.
@@ -80,7 +119,7 @@ def test_subnet_check_step_runs_under_bash_e(tmp_path, public, private, ipv6, ex
     (fake / "aws").chmod(0o755)
     out = tmp_path / "out"
     env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "GITHUB_OUTPUT": str(out),
-           "AWS_REGION": "us-east-1", "PUBLIC": public, "PRIVATE": private}
+           "AWS_REGION": "us-east-1", "PRIVATE": private}
     proc = subprocess.run(["bash", "-e", "-c", _check_step_script()], env=env, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     assert f"dual_stack={expected}" in out.read_text()

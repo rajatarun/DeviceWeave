@@ -108,34 +108,37 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
      --secret-string '{"api_key": "YOUR_API_KEY"}'
    ```
 
-3. **Configure Network Access to Gemini (Use Public Subnets)**
-   
-   Lambda needs outbound internet access via public subnets for Gemini API calls.
-   
-   Find your VPC's public subnets:
-   ```bash
-   # List public subnets in your VPC
-   aws ec2 describe-subnets \
-     --filters "Name=vpc-id,Values=vpc-xxxxx" \
-                "Name=map-public-ip-on-launch,Values=true" \
-     --query 'Subnets[].SubnetId' \
-     --output text
-   ```
-   
-   Copy the subnet IDs (you'll need these for deployment in step 4)
+3. **Keep Lambdas in the private subnets**
 
-4. **Deploy with Gemini (Public Subnets)**
-   
+   Gemini calls leave the VPC through the NAT instance on the private subnets
+   (`LambdaSubnetIds`), or over IPv6 when those subnets have a CIDR and
+   `LambdaIpv6DualStack` is true. DynamoDB does not use that path: the gateway
+   endpoint on the private route table serves it.
+
+   Do not pass public subnet IDs in `LambdaPublicSubnetIds`. Public subnets
+   have no DynamoDB/AWS-service egress and need NAT or endpoints. A Lambda ENI
+   is not assigned a public IP, so an internet gateway route does not give it
+   egress, and the DynamoDB gateway endpoint is only on the private route
+   table. A non-empty `LambdaPublicSubnetIds` used to replace
+   `LambdaSubnetIds` for every function and timed out connecting to DynamoDB.
+   The template ignores a non-empty list unless `LambdaUsePublicSubnets` is
+   also `true`. Leave the list empty and the flag `false`.
+
+4. **Deploy with Gemini**
+
    **Initial deployment (SAM)**:
    ```bash
    sam deploy --parameter-overrides \
      AgentProvider=gemini \
      LLMProvider=gemini \
-     "LambdaPublicSubnetIds=subnet-12345678,subnet-87654321"
+     "LambdaPublicSubnetIds=" \
+     LambdaUsePublicSubnets=false
    ```
-   Replace `subnet-12345678,subnet-87654321` with your public subnet IDs.
-   
+
    **Update existing stack (CloudFormation CLI)**:
+
+   Pass an empty `LambdaPublicSubnetIds`. Omitting the parameter on update
+   keeps whatever subnet IDs the stack already stored.
    ```bash
    aws cloudformation update-stack \
      --stack-name deviceweave-prod \
@@ -143,12 +146,13 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
      --parameters \
        ParameterKey=AgentProvider,ParameterValue=gemini \
        ParameterKey=LLMProvider,ParameterValue=gemini \
-       ParameterKey=LambdaPublicSubnetIds,ParameterValue="subnet-12345678,subnet-87654321" \
+       ParameterKey=LambdaPublicSubnetIds,ParameterValue="" \
+       ParameterKey=LambdaUsePublicSubnets,ParameterValue=false \
        ParameterKey=StageName,UsePreviousValue=true \
        ParameterKey=VpcId,UsePreviousValue=true \
        ParameterKey=LambdaSubnetIds,UsePreviousValue=true
    ```
-   
+
    **Update via AWS Console**:
    1. Go to CloudFormation → DeviceWeave stack
    2. Click "Update"
@@ -156,7 +160,8 @@ LLM_PROVIDER: gemini          # Device resolution cheaper via Gemini
    4. Set parameters:
       - `AgentProvider`: gemini
       - `LLMProvider`: gemini
-      - `LambdaPublicSubnetIds`: subnet-12345678,subnet-87654321
+      - `LambdaPublicSubnetIds`: (leave empty)
+      - `LambdaUsePublicSubnets`: false
    5. Review and submit
 
 ### For Bedrock Agent (Default)
@@ -219,33 +224,26 @@ Both agents:
 
 ## Network Configuration
 
-Lambda uses public subnets for direct internet access to Gemini API.
+Lambdas run in the private subnets (`LambdaSubnetIds`).
 
 **Architecture**:
 ```
-Internet Gateway (IGW)
-    ↓
-Public Subnet
-    ↓
-Lambda
-    ↓
-HTTPS Port 443 → Gemini API (direct)
+Private subnet
+    ├── DynamoDB gateway endpoint → dynamodb.<region>.amazonaws.com
+    └── NAT instance → internet (Gemini, Bedrock, other AWS APIs)
 ```
 
-**Benefits**:
-- ✅ Direct path, low latency (<50ms)
-- ✅ No additional costs ($0/month)
-- ✅ Simple configuration
-- ✅ Reliable Gemini API access
+When the private subnets have an IPv6 CIDR, `LambdaIpv6DualStack=true` also
+allows egress through the egress-only internet gateway.
 
-**Find your public subnets**:
-```bash
-aws ec2 describe-subnets \
-  --filters "Name=vpc-id,Values=vpc-xxxxx" \
-            "Name=map-public-ip-on-launch,Values=true" \
-  --query 'Subnets[].[SubnetId,Tags[?Key==`Name`].Value|[0]]' \
-  --output table
-```
+**Do not place Lambdas in public subnets.** Public subnets have no
+DynamoDB/AWS-service egress and need NAT or endpoints. A Lambda ENI is not
+given a public IP, so the internet gateway does not carry its traffic, and
+the default-VPC public route table has neither a NAT nor the DynamoDB
+gateway endpoint. Leave `LambdaPublicSubnetIds` empty and
+`LambdaUsePublicSubnets` set to `false`. Internet egress for Gemini then
+depends on the NAT instance (or IPv6), which is the working private-subnet
+path.
 
 ## Error Handling
 

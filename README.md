@@ -804,7 +804,7 @@ The `ExecuteEndpoint` URL is in the stack outputs.
 
 ### GitHub Actions
 
-Push to `main` or use `workflow_dispatch` (with a `stage` selector). The pipeline installs `aws-sam-cli` explicitly via pip, validates the template, builds with `--use-container`, and deploys with `--no-confirm-changeset`.
+Push to `main` or use `workflow_dispatch` (with a `stage` selector). The pipeline installs `aws-sam-cli` explicitly via pip, validates the template, builds with `--use-container`, and deploys with `--no-confirm-changeset`. It passes an empty `LambdaPublicSubnetIds` and `LambdaUsePublicSubnets=false`, so the functions stay in the private `LambdaSubnetIds`. Public subnets have no DynamoDB/AWS-service egress and need NAT or endpoints. On a stack update, omitting `LambdaPublicSubnetIds` would keep a previously saved list, so the workflow always sends the empty value.
 
 ---
 
