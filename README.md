@@ -405,6 +405,42 @@ curl -X POST $API_URL/presence -H "Content-Type: application/json" -d '{"is_home
 
 Defaults to `true` when not set — avoids accidental lockout from "nobody home" policies.
 
+### Compile-fidelity harness (AutoTap Study 1)
+
+The harness measures how faithfully a natural-language household rule compiles
+into the Policy DSL: compiler result, `validate_policy`, and — when a label
+exists — an exact match and a structural match (`rule_set_checker` region
+equality, the same comparison as `scripts/policy_compile_bench.py`). Rules
+with no label are `unlabeled`, not failures. It does not change runtime
+precedence (BLOCK over MODIFY over ALLOW).
+
+The corpus is AutoTap Study 1: Weijia He et al. (Lefan Zhang, Weijia He,
+Jesse Martinez, Noah Brackenbury, Shan Lu, and Blase Ur), *AutoTap:
+Synthesizing and Repairing Trigger-Action Programs Using LTL Properties*,
+IEEE/ACM ICSE 2019,
+<https://ieeexplore.ieee.org/abstract/document/8811900>.
+Artifact: <https://github.com/zlfben/autotap> (branch `master`),
+`data/Data - User Study 1.xlsx`.
+
+That workbook is **not** in this repository. The AutoTap repo is GPL-3.0 and
+no separate licence was found for the files in `data/`, so the dataset and
+participant text are not redistributed with this Apache-2.0 tree. Fetch a
+local copy into the git-ignored cache, then run the harness offline against
+saved compiler output, or opt in to the live compiler:
+
+```bash
+python3 scripts/fetch_autotap_study1.py
+python3 scripts/compile_fidelity.py --responses path/to/saved.jsonl
+python3 scripts/compile_fidelity.py --live   # opt-in; calls compile_rule
+```
+
+`AUTOTAP_STUDY1_XLSX` overrides the workbook path. Expected policies live in
+`benchmarks/compile_fidelity/labels.json` (keys are `study1:<sheet>:<row>:s<n>`,
+with no source text). Reports are written to `.cache/compile_fidelity/` and
+are git-ignored. Sheet layout, the 690-rule `Result` sheet, label format, and
+the fetch guard are documented in `docs/autotap-study1.md`. Which Study 1
+patterns the DSL already covers is in `docs/autotap-gap-analysis.md`.
+
 ---
 
 ## Devices
