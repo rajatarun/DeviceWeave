@@ -368,6 +368,68 @@ DynamoDB PolicyTable  (versioned — each update creates a new version row;
 
 Rules with `confidence < 0.85` are rejected — the LLM is instructed to emit an explicit rejection object rather than guess.
 
+### Compile fidelity against AutoTap Study 1
+
+`scripts/policy_compile_bench.py` tests the compiler on rules built from
+DeviceWeave's own vocabulary. `scripts/compile_fidelity.py` tests it on
+household rules that real people wrote without seeing DeviceWeave's schema.
+These come from Study 1 of **AutoTap**:
+
+> Lefan Zhang, Weijia He, Jesse Martinez, Noah Brackenbury, Shan Lu, Blase Ur.
+> *AutoTap: Synthesizing and Repairing Trigger-Action Programs Using LTL
+> Properties.* ICSE 2019. <https://ieeexplore.ieee.org/abstract/document/8811900>
+> · code and data: <https://github.com/zlfben/autotap>
+
+In Study 1, 69 participants (in the released data) each wrote ten statements
+about what should always or never happen in their home: 690 statements in
+all.
+
+**The dataset is not redistributed here.** The AutoTap repository is GPL-3.0,
+and no separate licence for its `data/` files was found. DeviceWeave is
+Apache-2.0, so it copies neither the spreadsheet, nor any participant's
+words, nor any AutoTap code.
+
+The harness downloads the file at run time into a git-ignored cache. The
+download is pinned to an AutoTap commit and checked against its sha256.
+`.gitignore` excludes the cache, the output directory and every `*.xlsx`, and
+a test fails if a spreadsheet is ever tracked.
+
+```bash
+python scripts/compile_fidelity.py fetch    # -> benchmarks/autotap/_cache/autotap-study1.xlsx
+# or download it yourself from
+#   https://github.com/zlfben/autotap/blob/master/data/Data%20-%20User%20Study%201.xlsx
+# and point at it:  --xlsx PATH   or   AUTOTAP_STUDY1_XLSX=PATH
+
+python scripts/compile_fidelity.py list                         # counts only, no compiler
+python scripts/compile_fidelity.py run --responses saved.jsonl  # score saved outputs, offline
+LLM_PROVIDER=bedrock python scripts/compile_fidelity.py run --live --limit 20
+```
+
+**`--live` is opt-in.** It calls the configured LLM provider through
+`llm_compiler.compile_rule`, which costs money and sends each statement's text
+to that provider. Raw outputs are appended to
+`benchmarks/autotap/_out/responses.jsonl`, so you can re-score them later with
+`--responses`.
+
+For each rule, the run records:
+
+- whether it compiled or was refused, and the reason, with a coarse category;
+- whether `validator.validate_policy` accepts it;
+- whether the rule-set checker finds it unsatisfiable (the authoring API
+  rejects those too);
+- when `benchmarks/autotap/labels.json` has an expected policy for it, an
+  exact and a meaning-level match.
+
+Unlabelled rules are reported as `unlabeled`, never as failures. Output goes
+to the git-ignored `benchmarks/autotap/_out/` as `summary.json`, `rows.jsonl`
+and `report.txt`. Rule text is left out of every output unless you pass
+`--include-text`.
+
+The labels format is described in
+[`benchmarks/autotap/README.md`](benchmarks/autotap/README.md). What
+real-world rules ask for that the DSL cannot say is in
+[`docs/autotap-gap-analysis.md`](docs/autotap-gap-analysis.md).
+
 ### Runtime enforcement (Policy Engine)
 
 On every `/execute` call the Policy Engine fires **after** device resolution and **before** any device I/O:
