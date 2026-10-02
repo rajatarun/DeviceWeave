@@ -119,13 +119,22 @@ UNENFORCEABLE = "UNENFORCEABLE"
 # The plant was over the caller's state cap or time budget. Not a class of the language.
 NOT_COMPUTED = "not_computed"
 
-# Authoring (check_new_rule) uses these. A four-field plant of four blocks is
-# about 1,250 states and ~0.1 s here; five such blocks are ~2,600 states and
-# ~0.4 s, and the cost then grows like |Q|^2. 2,048 states keeps the request
-# path well under a second. The 0.5 s budget is a backstop inside the fixpoint.
-# enforceability() and compile_fidelity.py enforceability pass no cap.
-REQUEST_MAX_STATES = 2048
-REQUEST_TIME_BUDGET_S = 0.5
+# Authoring (check_new_rule) uses these. REQUEST_MAX_STATES is the gate that
+# decides the class: the same rule set is classified or not_computed on every
+# host. PolicyAuthoringFunction sets no MemorySize, so it inherits the global
+# 256 MB, about 1/7 of a vCPU and roughly 7x slower than a full vCPU. A
+# full-context plant of 2048 states takes about 0.4 s on a full vCPU, which
+# is about 3 s at 256 MB and would cross a short clock budget, so the class
+# would depend on warm start and neighbours. 1400 states keeps that plant
+# around 0.2 s on a full vCPU and around 1–2 s at 256 MB, well under API
+# Gateway's ~30 s. Four-condition blocks reach 1400 states at about five
+# rules on one device (four such blocks are about 1250 states).
+# REQUEST_TIME_BUDGET_S is only a backstop for a runaway fixpoint under the
+# cap. 2.5 s is above the 256 MB estimate for every plant the cap allows, so
+# the clock does not decide the class. enforceability() and
+# compile_fidelity.py enforceability pass no cap.
+REQUEST_MAX_STATES = 1400
+REQUEST_TIME_BUDGET_S = 2.5
 
 
 class PlantTooLarge(Exception):

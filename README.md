@@ -448,7 +448,7 @@ The offline checker adds one `enforceability` finding per device. It does not ch
 | `UNENFORCEABLE` | An uncontrollable event reaches a forbidden state and nothing can preempt it. |
 | `not_computed` | The authoring plant exceeded its state cap or time budget. The rule is still stored. |
 
-Authoring runs this check only when the new rule is a satisfiable block, and only for that device, with a cap of 2048 states and a 0.5 s budget. The response witness is the classification, summary counts, and one trace. The full supervisor listing is offline:
+Authoring runs this check only when the new rule is a satisfiable block, and only for that device. The deterministic gate is 1400 states. The authoring function runs at 256 MB (about 1/7 of a vCPU); a plant under that cap stays around 1–2 s there, and a 2.5 s clock is only a backstop. With four-condition blocks the cap is about five rules on a device, so authoring usually reports `not_computed` and the classification comes from the offline command. The response witness is the classification, summary counts, and one trace. The full supervisor listing is offline:
 
 ```bash
 python scripts/compile_fidelity.py enforceability --policies policies.json

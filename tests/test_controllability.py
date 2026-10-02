@@ -524,12 +524,39 @@ def test_state_cap_and_time_budget_return_not_computed():
     assert capped.classification == C.NOT_COMPUTED
     assert capped.counts["estimated_states"] > 1
     assert capped.witness_trace == []
+    # A non-positive budget returns before the plant is built.
     timed = C.enforceability(AWAY, time_budget_s=0)[0]
     assert timed.classification == C.NOT_COMPUTED
     # The same language with no cap is the obligation the other tests describe.
     assert C.enforceability(AWAY)[0].classification == NEEDS_OBLIGATION
     # A cap the plant fits under still classifies it.
     assert C.enforceability(AWAY, max_states=C.REQUEST_MAX_STATES)[0].classification == NEEDS_OBLIGATION
+
+
+def test_fixpoint_timeout_is_not_computed_and_passes_the_deadline(monkeypatch):
+    """The clock fires inside _synthesize, on the forcing pass.
+
+    ``time_budget_s=0`` returns before ``supcon``. This budget is long enough
+    for the away plant, and ``monotonic`` jumps forward only while
+    ``supcon_forcing`` is on the stack, so the result is ``not_computed`` only
+    because that call receives the deadline and the fixpoint raises
+    ``SynthesisTimeout``.
+    """
+    import inspect
+    import time as time_mod
+    real = time_mod.monotonic
+
+    def stalled():
+        if any(frame.function == "supcon_forcing" for frame in inspect.stack()):
+            return real() + 100.0
+        return real()
+
+    monkeypatch.setattr(time_mod, "monotonic", stalled)
+    result = C.enforceability(AWAY, time_budget_s=30)[0]
+    assert result.classification == C.NOT_COMPUTED
+    assert result.witness_trace == []
+    assert result.witness()["trace"] == []
+    assert result.counts["time_budget_s"] == 30
 
 
 def test_summary_witness_omits_the_supervisor_listing():

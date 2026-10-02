@@ -5,8 +5,8 @@ in the current context, and it never fires an actuator by itself. Supervisory
 control theory says when that guard is enough for a safety rule, when a forced
 action is required, and when neither exists.
 
-The check lives in `src/policy_authoring/controllability.py` and is reported by
-`rule_set_checker.analyze` as an `enforceability` finding. It does not change
+The check lives in `src/policy_authoring/controllability.py`. Authoring reports
+it from `rule_set_checker.check_new_rule` as an `enforceability` finding. It does not change
 `evaluator.py`, the DSL, or BLOCK > MODIFY > ALLOW.
 
 ## What a rule is, as a language
@@ -62,13 +62,23 @@ the rule. The runtime does not install the synthesized supervisor.
 `analyze` does not build a plant. `check_new_rule` does, and only when the
 rule being authored is a satisfiable block, and only for that device. Allow
 and modify rules, and invariants of other devices, do not pay for it. The
-request path refuses a plant of more than `REQUEST_MAX_STATES` (2048) states
-or a fixpoint that runs longer than `REQUEST_TIME_BUDGET_S` (0.5 s), and
-returns classification `not_computed` with an empty trace. Those limits were
-chosen from this machine: a four-field plant of four blocks is about 1,250
-states and 0.1 s; five such blocks are about 2,600 states and 0.4 s, and the
-cost then grows like `|Q|²`. 2048 states stays well under a second. The
-offline command and `enforceability()` with no `max_states` have no cap.
+request path refuses a plant of more than `REQUEST_MAX_STATES` (1400) states
+and returns classification `not_computed` with an empty trace. That cap is
+what decides the class: the same rule set is classified or `not_computed` on
+every host. `PolicyAuthoringFunction` sets no memory size, so it inherits the
+global 256 MB, about 1/7 of a vCPU. A plant under 1400 states is around 1–2 s
+at that share of a CPU, well under API Gateway's 30 s limit.
+`REQUEST_TIME_BUDGET_S` (2.5 s) is only a backstop for a runaway fixpoint.
+It sits above that 256 MB estimate, so it is not what chooses between a class
+and `not_computed`.
+
+With blocks that each constrain four numeric fields, the cap is reached at
+about five rules on a device. Four such blocks are about 1250 states and
+still classify; five are about 2600 and do not. For a realistic rule set,
+authoring will usually report `not_computed`, and the classification comes
+from the offline `compile_fidelity.py enforceability` command (no state cap
+unless `--max-states` is passed) or from `enforceability()` with no
+`max_states`.
 
 The authoring witness has three fields: `classification`, `counts`, and
 `trace` (one path). `witness(full=True)` and
