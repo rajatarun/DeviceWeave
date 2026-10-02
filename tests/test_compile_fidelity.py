@@ -10,6 +10,7 @@ LLM provider, so nothing touches the network.
 """
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import io
 import json
@@ -898,6 +899,115 @@ def test_service_unavailable_code_is_transient():
     with pytest.raises(CF.InfraExhausted):
         CF.call_with_retries(fn, max_attempts=2, sleep=lambda _s: None)
     assert calls["n"] == 2
+
+
+# Invented refusal reasons. None of these is a Study 1 statement.
+_BOTH = (
+    "The thermostat is not a supported device, and the condition cannot be mapped "
+    "to any allowed field. Allowed device types are fan, light, ac, plug, heater."
+)
+_CONDITION_ONLY = (
+    "The condition cannot be mapped to any allowed field. "
+    "Allowed device types are fan, light, ac, plug, and heater."
+)
+_AMBIGUOUS = "Multiple valid interpretations exist, so the wording is ambiguous."
+_LOW_CONF = "Confidence would be below 0.85, so this was refused."
+
+
+def test_refusal_labels_ignore_allow_list_boilerplate_and_stack():
+    primary, labels = CF.classify_refusal(_BOTH)
+    assert primary == "unsupported_device"
+    assert labels == ["unsupported_device", "unsupported_condition"]
+
+    primary, labels = CF.classify_refusal(_CONDITION_ONLY)
+    assert primary == "unsupported_condition"
+    assert labels == ["unsupported_condition"]
+
+    primary, labels = CF.classify_refusal(_AMBIGUOUS)
+    assert primary == "ambiguous"
+    assert labels == ["ambiguous"]
+
+    primary, labels = CF.classify_refusal(_LOW_CONF)
+    assert primary == "below_confidence"
+    assert labels == ["below_confidence"]
+
+    # The allow-list sentence on its own is not an unsupported device.
+    assert CF.classify_refusal(
+        "Allowed device types are fan, light, ac, plug, heater."
+    ) == ("other", ["other"])
+
+
+def test_refusal_rows_keep_a_primary_and_count_every_label():
+    reasons = (_BOTH, _CONDITION_ONLY, _AMBIGUOUS, _LOW_CONF)
+    rules = [
+        CF.SourceRule(
+            rule_id=f"study1:Result:row9:stmt{i}", sheet="Result", row=9, slot=i,
+            cell=f"C{i}", text="invented fixture", category="always", has_exception=False,
+        )
+        for i in range(1, 5)
+    ]
+    results = [
+        CF.score_rule(rule, {"rejected": True, "reason": reason, "confidence": 0.0})
+        for rule, reason in zip(rules, reasons)
+    ]
+    assert [r.failure_category for r in results] == [
+        "refused_unsupported_device",
+        "refused_unsupported_condition",
+        "refused_ambiguous",
+        "refused_below_confidence",
+    ]
+    assert results[0].refusal_labels == ["unsupported_device", "unsupported_condition"]
+    summary = CF.summarize(results)
+    assert summary["failureCategories"]["refused_unsupported_device"] == 1
+    assert summary["refusalLabelCounts"]["unsupported_device"] == 1
+    assert summary["refusalLabelCounts"]["unsupported_condition"] == 2
+    assert summary["refusalLabelCounts"]["ambiguous"] == 1
+    assert summary["refusalLabelCounts"]["below_confidence"] == 1
+    table = CF.format_table(summary)
+    assert "refused_unsupported_device" in table
+    assert "unsupported_condition" in table
+    # The statement text is not on the row. The model reason is, and that is
+    # why rows.jsonl stays in the git-ignored output directory.
+    blob = json.dumps([dataclasses.asdict(r) for r in results])
+    assert "invented fixture" not in blob
+    assert _CONDITION_ONLY in blob
+
+
+def test_low_confidence_label_still_matches_below_confidence():
+    rule = CF.SourceRule(
+        rule_id="study1:Result:row9:stmt1", sheet="Result", row=9, slot=1,
+        cell="C9", text="invented fixture", category="never", has_exception=False,
+    )
+    res = CF.score_rule(
+        rule, {"rejected": True, "reason": _LOW_CONF, "confidence": 0.0},
+        {"expect": "reject", "reason_category": "low_confidence"},
+    )
+    assert res.reason_category_match is True
+    assert res.label == "reject_expected_ok"
+
+
+def test_sample_is_a_deterministic_subset_in_sheet_order(study_xlsx, capsys):
+    rules = CF.load_rules(study_xlsx)
+    full = [r.rule_id for r in rules]
+    first = [r.rule_id for r in CF.sample_rules(rules, 3, 1)]
+    again = [r.rule_id for r in CF.sample_rules(rules, 3, 1)]
+    other = [r.rule_id for r in CF.sample_rules(rules, 3, 99)]
+    assert first == again
+    assert first != other
+    assert first == [i for i in full if i in set(first)]
+    assert len(first) == 3
+    assert first != full[:3]
+
+    assert CF.main(["list", "--xlsx", str(study_xlsx), "--sample", "4", "--seed", "1"]) == 0
+    captured = capsys.readouterr()
+    listed = json.loads(captured.out)
+    assert listed["rules"] == 4 and listed["sample"] == 4 and listed["seed"] == 1
+    assert R_HEATER not in captured.out and R_PORCH not in captured.out
+
+    rc = CF.main(["list", "--xlsx", str(study_xlsx), "--sample", "2", "--limit", "2"])
+    assert rc == 2 and "--sample" in capsys.readouterr().err
+    with pytest.raises(CF.FidelityError, match="larger than"):
+        CF.sample_rules(rules, 50, 0)
 
 
 @needs_git

@@ -63,7 +63,7 @@ Usage
       --input-usd-per-million PRICE --output-usd-per-million PRICE
   python scripts/compile_fidelity.py run --live --provider bedrock \\
       --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 \\
-      --temperature 0 --reps 5 --concurrency 4 --limit 20 \\
+      --temperature 0 --reps 5 --concurrency 4 --sample 20 --seed 1 \\
       --out benchmarks/autotap/_out
   python scripts/compile_fidelity.py run --live --provider bedrock \\
       --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 \\
@@ -406,7 +406,7 @@ def fetch(ref: str = AUTOTAP_COMMIT, dest: Path = CACHE_FILE,
 LABEL_KEYS = frozenset({"expect", "policies", "reason_category", "note"})
 REASON_CATEGORIES = frozenset({
     "unsupported_device", "unsupported_condition", "ambiguous", "low_confidence",
-    "unsatisfiable", "other",
+    "below_confidence", "unsatisfiable", "other",
 })
 
 
@@ -548,8 +548,10 @@ def tag_patterns(text: str, category: Optional[str] = None, has_exception: Optio
 # Scoring one rule
 # ─────────────────────────────────────────────────────────────────────────────
 
-# First match wins. Validator messages are fixed strings (validator.py); model
-# refusal reasons are free text, so their categories are keyword guesses.
+# Validator messages are fixed strings (validator.py). Model refusal reasons
+# are free text, so their categories are keyword guesses. A refusal can match
+# more than one keyword. The primary label is the first hit in
+# REFUSAL_PRIORITY; the others are kept on the row.
 _VALIDATION_CATEGORIES: Sequence[Tuple[str, str]] = (
     ("low_confidence", r"below the required threshold|confidence"),
     ("invalid_device_type", r"scope\.device_type|'scope'"),
@@ -561,13 +563,40 @@ _VALIDATION_CATEGORIES: Sequence[Tuple[str, str]] = (
     ("schema_extra_fields", r"disallowed fields"),
     ("schema_missing_field", r"Missing required field|missing required field"),
 )
+# Highest priority first. ``below_confidence`` is the refusal bucket for
+# "confidence would be below 0.85". Label files may still say ``low_confidence``.
+REFUSAL_PRIORITY: Tuple[str, ...] = (
+    "unsupported_device",
+    "unsupported_condition",
+    "ambiguous",
+    "below_confidence",
+    "empty",
+    "other",
+)
 _REFUSAL_CATEGORIES: Sequence[Tuple[str, str]] = (
-    ("unsupported_device", r"device|appliance|not one of|dishwasher|tv|thermostat|lock|door|window|camera"),
+    ("unsupported_device", r"device|appliance|not one of|dishwasher|\btv\b|thermostat|lock|door|window|camera"),
     ("unsupported_condition", r"condition|field|sensor|trigger|state|event|duration|schedule|day"),
     ("ambiguous", r"ambigu|unclear|vague|multiple (valid )?interpretations|semantically empty"),
-    ("low_confidence", r"confiden"),
-    ("empty", r"empty"),
+    ("below_confidence", r"confiden|below\s+0\.85"),
+    ("empty", r"(?<!semantically )empty"),
 )
+# The model often restates the schema allow-list. "Allowed device types are
+# fan, light, ac, plug, heater" contains "device" and must not count.
+_DEVICE_LIST = r"(?:fan|light|ac|plug|heater|and|or|,|\s)+"
+_FIELD_LIST = (
+    r"(?:temperature|humidity|time_hour|cloud_cover_pct|is_home|is_overcast|and|or|,|\s)+"
+)
+_REFUSAL_BOILERPLATE = (
+    re.compile(rf"allowed device types?\s*(?:are|:)\s*{_DEVICE_LIST}", re.I),
+    re.compile(rf"allowed devices?\s*(?:are|:)\s*{_DEVICE_LIST}", re.I),
+    re.compile(
+        rf"(?:target\s+)?devices?(?:\s+types?)?\s+(?:must|should|has to)\s+be\s+one of\s*:?\s*{_DEVICE_LIST}",
+        re.I,
+    ),
+    re.compile(rf"not one of\s*:\s*{_DEVICE_LIST}", re.I),
+    re.compile(rf"allowed (?:condition )?fields?\s*(?:are|:)\s*{_FIELD_LIST}", re.I),
+)
+_CONFIDENCE_LABELS = frozenset({"low_confidence", "below_confidence"})
 
 
 def categorize(reason: str, table: Sequence[Tuple[str, str]], default: str) -> str:
@@ -575,6 +604,51 @@ def categorize(reason: str, table: Sequence[Tuple[str, str]], default: str) -> s
         if re.search(rx, reason, re.I):
             return name
     return default
+
+
+def _boilerplate_spans(reason: str) -> List[Tuple[int, int]]:
+    return [m.span() for rx in _REFUSAL_BOILERPLATE for m in rx.finditer(reason)]
+
+
+def _overlaps_boilerplate(start: int, end: int, spans: Sequence[Tuple[int, int]]) -> bool:
+    return any(start < stop and end > begin for begin, stop in spans)
+
+
+def classify_refusal(reason: str) -> Tuple[str, List[str]]:
+    """Return ``(primary, labels)`` for a model refusal reason.
+
+    Boilerplate allow-list phrases are ignored. Every matching label is
+    returned, ordered by ``REFUSAL_PRIORITY``. ``primary`` is the first of
+    those. ``other`` is used only when nothing else matches.
+    """
+    spans = _boilerplate_spans(reason or "")
+    found: List[str] = []
+    for name, rx in _REFUSAL_CATEGORIES:
+        for match in re.finditer(rx, reason or "", re.I):
+            if not _overlaps_boilerplate(match.start(), match.end(), spans):
+                found.append(name)
+                break
+    if not found:
+        found = ["other"]
+    found.sort(key=REFUSAL_PRIORITY.index)
+    return found[0], found
+
+
+def reason_category_matches(failure_category: Optional[str], labels: Sequence[str],
+                            expected: str) -> bool:
+    """True when ``expected`` is the primary refusal, any refusal label, or a suffix.
+
+    ``low_confidence`` and ``below_confidence`` match each other. Validator
+    categories such as ``unsatisfiable`` still match by suffix, as before.
+    """
+    names = set(labels)
+    if failure_category and failure_category.startswith("refused_"):
+        names.add(failure_category[len("refused_"):])
+    if expected in names:
+        return True
+    if expected in _CONFIDENCE_LABELS and names & _CONFIDENCE_LABELS:
+        return True
+    return bool(failure_category and failure_category.endswith(expected))
 
 
 def _canonical_value(v: Any) -> Any:
@@ -630,7 +704,8 @@ class RuleResult:
     satisfiable: Optional[bool] = None  # rule-set checker: matches at least one context
     accepted: bool = False              # what POST /policies/author would store
     reason: Optional[str] = None        # refusal reason or validation/analysis message
-    failure_category: Optional[str] = None
+    failure_category: Optional[str] = None  # primary label; refused_<name> for a model refusal
+    refusal_labels: List[str] = field(default_factory=list)  # every refusal label, priority order
     policy: Optional[Dict[str, Any]] = None
     label: str = "unlabeled"
     mismatch: List[str] = field(default_factory=list)
@@ -667,7 +742,9 @@ def score_rule(rule: SourceRule, compiled: Any, label: Optional[Dict[str, Any]] 
     elif isinstance(compiled, dict) and compiled.get("rejected") is True:
         res.compile = "refused"
         res.reason = str(compiled.get("reason") or "")
-        res.failure_category = "refused_" + categorize(res.reason, _REFUSAL_CATEGORIES, "other")
+        primary, labels = classify_refusal(res.reason)
+        res.failure_category = "refused_" + primary
+        res.refusal_labels = labels
     else:
         try:
             # Round-trip through JSON so the validator sees what the API would.
@@ -695,7 +772,8 @@ def _apply_label(res: RuleResult, label: Dict[str, Any]) -> None:
         res.label = "reject_expected_but_compiled" if res.accepted else "reject_expected_ok"
         rc = label.get("reason_category")
         if rc and not res.accepted and res.failure_category:
-            res.reason_category_match = res.failure_category.endswith(rc)
+            res.reason_category_match = reason_category_matches(
+                res.failure_category, res.refusal_labels, rc)
         return
     if not res.accepted or res.policy is None:
         res.label = "policy_expected_but_refused"
@@ -771,6 +849,13 @@ def summarize(results: Sequence[RuleResult]) -> Dict[str, Any]:
         },
         "failureCategories": dict(Counter(
             r.failure_category for r in model if r.failure_category).most_common()),
+        # A refusal with two labels increments both. Primary counts stay in
+        # failureCategories, one per row, for the previous report shape.
+        "refusalLabelCounts": {
+            name: count for name, count in (
+                (name, sum(name in r.refusal_labels for r in model)) for name in REFUSAL_PRIORITY
+            ) if count
+        },
         "labels": {
             "counts": dict(labels),
             "labeled": n - labels.get("unlabeled", 0) if n else 0,
@@ -812,6 +897,12 @@ def format_table(summary: Dict[str, Any]) -> str:
     lines.append("  failure category                    count")
     for cat, count in summary["failureCategories"].items():
         lines.append(f"  {cat:<34}{count:>6}")
+    label_counts = summary.get("refusalLabelCounts") or {}
+    if label_counts:
+        lines += ["", "  refusal label (multi)               count"]
+        for name in REFUSAL_PRIORITY:
+            if label_counts.get(name):
+                lines.append(f"  {name:<34}{label_counts[name]:>6}")
     lines += ["", "  pattern                         n   accepted"]
     for name, g in sorted(summary["byPattern"].items(), key=lambda kv: -kv[1]["n"]):
         lines.append(f"  {name:<28}{g['n']:>5}   {pct(g['acceptanceRate'])}")
@@ -981,6 +1072,21 @@ def completed_pairs(path: Path) -> set:
         if record_succeeded(row):
             done.add((row["id"], int(row.get("rep", 1))))
     return done
+
+
+def sample_rules(rules: Sequence[SourceRule], n: int, seed: int) -> List[SourceRule]:
+    """A deterministic sample of ``n`` rules, returned in sheet order.
+
+    ``--limit`` keeps a prefix, which is the first participants. This draws
+    ``n`` indexes with ``random.Random(seed)`` and sorts them, so the same
+    seed always yields the same rules in the order they appear on the sheet.
+    """
+    if n < 1:
+        raise FidelityError("--sample must be >= 1")
+    if n > len(rules):
+        raise FidelityError(f"--sample {n} is larger than the {len(rules)} rules loaded")
+    indexes = sorted(random.Random(seed).sample(range(len(rules)), n))
+    return [rules[i] for i in indexes]
 
 
 def harness_git_commit() -> str:
@@ -1312,7 +1418,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         p.add_argument("--xlsx", default=None, help=f"path to the Study 1 .xlsx (else ${ENV_VAR}, else the cache)")
         p.add_argument("--sheet", action="append", default=None,
                        help="sheet to read (repeatable; default: Result)")
-        p.add_argument("--limit", type=int, default=None)
+        p.add_argument("--limit", type=int, default=None,
+                       help="keep the first N rules (a prefix of the sheet)")
+        p.add_argument("--sample", type=int, default=None,
+                       help="deterministic sample of N rules, then sheet order (not a prefix)")
+        p.add_argument("--seed", type=int, default=0,
+                       help="seed for --sample (default 0)")
     r = sub.choices["run"]
     mode = r.add_mutually_exclusive_group()
     mode.add_argument("--responses", default=None, help="JSONL of {id, compiled} to score (offline)")
@@ -1382,7 +1493,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         path = resolve_xlsx_path(args.xlsx)
         rules = load_rules(path, args.sheet or DEFAULT_SHEETS)
-        if args.limit:
+        if args.limit and args.sample:
+            raise FidelityError("pass only one of --limit and --sample")
+        if args.sample:
+            rules = sample_rules(rules, args.sample, args.seed)
+        elif args.limit:
             rules = rules[: args.limit]
         digest = sha256_of(path)
         if digest != STUDY1_SHA256:
@@ -1390,13 +1505,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                   f"rule ids may point at different statements than the labels expect", file=sys.stderr)
 
         if args.cmd == "list":
-            print(json.dumps({
+            listed = {
                 "file": path.name, "sha256": digest, "rules": len(rules),
                 "participants": len({(r.sheet, r.row) for r in rules}),
                 "byCategory": dict(Counter(r.category for r in rules)),
                 "withException": sum(bool(r.has_exception) for r in rules),
                 "patterns": dict(Counter(p for r in rules for p in tag_patterns(r.text, r.category, r.has_exception)).most_common()),
-            }, indent=2))
+            }
+            if args.sample:
+                listed["sample"] = args.sample
+                listed["seed"] = args.seed
+            print(json.dumps(listed, indent=2))
             return 0
 
         if args.reps < 1 or args.concurrency < 1:

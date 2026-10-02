@@ -1,7 +1,7 @@
 # DeviceWeave test suite
 
 ```
-python3 -m pytest -q     # 208 passed, 7 skipped, in a couple of seconds
+python3 -m pytest -q     # 212 passed, 7 skipped, in a couple of seconds
 ```
 
 `pytest.ini` sets `pythonpath = src` so every module under `src/` imports by
