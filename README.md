@@ -430,6 +430,33 @@ The labels format is described in
 real-world rules ask for that the DSL cannot say is in
 [`docs/autotap-gap-analysis.md`](docs/autotap-gap-analysis.md).
 
+### Enforceability of a compiled safety rule
+
+A block rule is a legal language: the device must not be on in the contexts the rule matches. The runtime guard can only refuse commands. `turn_off` and `get_status` are safe actions the guard never refuses, and presence, weather, and a physical switch change the world on their own. `src/policy_authoring/controllability.py` asks whether that guard can enforce the legal language, using supervisory control theory:
+
+- P. J. Ramadge and W. M. Wonham, *Supervisory Control of a Class of Discrete Event Processes*, SIAM J. Control Optim. 25(1):206–230, 1987. <https://doi.org/10.1137/0325013>
+- W. M. Wonham and P. J. Ramadge, *On the Supremal Controllable Sublanguage of a Given Language*, SIAM J. Control Optim. 25(3):637–659, 1987. <https://doi.org/10.1137/0325036>
+- P. J. Ramadge and W. M. Wonham, *The Control of Discrete Event Systems*, Proc. IEEE 77(1):81–98, 1989. <https://doi.org/10.1109/5.21072>
+- M. A. Reniers and K. Cai, *Supervisory Control Theory with Event Forcing*, arXiv:2404.08469, 2024. <https://arxiv.org/abs/2404.08469>
+
+The offline checker adds one `enforceability` finding per device. It does not change the evaluator, the DSL, or BLOCK > MODIFY > ALLOW.
+
+| Class | Meaning |
+|---|---|
+| `GUARD_ENFORCEABLE` | A BLOCK-only supervisor realizes the legal language. |
+| `NEEDS_OBLIGATION` | Blocking alone does not. A forced `turn_off` does (for example at a departure). |
+| `UNENFORCEABLE` | An uncontrollable event reaches a forbidden state and nothing can preempt it. |
+| `not_computed` | The authoring plant exceeded its state cap or time budget. The rule is still stored. |
+
+Authoring runs this check only when the new rule is a satisfiable block, and only for that device. The deterministic gate is 1400 states. The authoring function runs at 256 MB (about 1/7 of a vCPU); a plant under that cap stays around 1–2 s there, and a 2.5 s clock is only a backstop. With four-condition blocks the cap is about five rules on a device, so authoring usually reports `not_computed` and the classification comes from the offline command. The response witness is the classification, summary counts, and one trace. The full supervisor listing is offline:
+
+```bash
+python scripts/compile_fidelity.py enforceability --policies policies.json
+python scripts/compile_fidelity.py enforceability --policies policies.json --detail full
+```
+
+That command classifies policies you pass in, with no state cap unless you pass `--max-states`. It does not download Study 1 and it does not call a model. Feeding it compiled Study 1 policies is how the three shares would be computed for that corpus; this repository does not ship those policies or those shares. The model, the assumptions, and which theorem statements were checked against the papers are in [`docs/controllability.md`](docs/controllability.md).
+
 ### Runtime enforcement (Policy Engine)
 
 On every `/execute` call the Policy Engine fires **after** device resolution and **before** any device I/O:

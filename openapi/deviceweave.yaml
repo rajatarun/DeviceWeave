@@ -732,14 +732,23 @@ components:
       properties:
         kind:
           type: string
-          enum: [unsatisfiable, shadowed, conflict_block_allow, conflict_modify, redundant, invariant_violated]
+          enum: [unsatisfiable, shadowed, conflict_block_allow, conflict_modify, redundant, invariant_violated, enforceability]
         severity: { type: string, enum: [error, warning, info] }
         rule_ids: { type: array, items: { type: string } }
         device_type: { type: string }
         message: { type: string }
         witness:
           type: object
-          description: A context in which the finding is true (evaluate the rules against it to see it)
+          description: >
+            A context in which the finding is true. For kind enforceability the
+            object has exactly three fields: classification (GUARD_ENFORCEABLE,
+            NEEDS_OBLIGATION, UNENFORCEABLE, or not_computed), counts (summary
+            integers such as states, bad, reachable, disabled, forcing_states;
+            or estimated_states and state_cap when not_computed), and trace
+            (one shortest replayable path; empty when not_computed). The
+            supervisor listing is not part of this response. Evaluate a flat
+            context witness against the rules to see a conflict. An
+            enforceability trace is replayed on the controllability plant.
           additionalProperties: true
     Error:
       type: object
