@@ -430,6 +430,26 @@ The labels format is described in
 real-world rules ask for that the DSL cannot say is in
 [`docs/autotap-gap-analysis.md`](docs/autotap-gap-analysis.md).
 
+**Beyond this DSL.** `scripts/property_coding.py` supports a measurement
+that doesn't depend on DeviceWeave's vocabulary:
+
+- Two people code every Study 1 statement as an AutoTap-style property
+  ([`docs/paper/codebook.md`](docs/paper/codebook.md)). The tool computes
+  Cohen's κ, and disagreements are adjudicated.
+- Each coded property is classified by the same forcible supervisory-control
+  synthesis as above. This runs under five enforcement architectures (from
+  DeviceWeave's refusal-only guard to trigger-action automation) and four
+  assumption sets.
+
+Coder worksheets hold statement text and are written only to the git-ignored
+output directory. Code files hold enumerated fields keyed by rule id.
+
+The workshop-paper draft
+([`docs/paper/draft.md`](docs/paper/draft.md)) contains placeholders only;
+`property_coding.py render` fills them from the analysis. What is still
+missing before submission, starting with the human coding, is in
+[`docs/paper/SUBMISSION_CHECKLIST.md`](docs/paper/SUBMISSION_CHECKLIST.md).
+
 ### Enforceability of a compiled safety rule
 
 A block rule is a legal language: the device must not be on in the contexts the rule matches. The runtime guard can only refuse commands. `turn_off` and `get_status` are safe actions the guard never refuses, and presence, weather, and a physical switch change the world on their own. `src/policy_authoring/controllability.py` asks whether that guard can enforce the legal language, using supervisory control theory:
