@@ -36,6 +36,12 @@ Commands
             --live            call the configured LLM provider through
                               llm_compiler.compile_rule (opt-in: costs money
                               and sends participant text to that provider)
+  enforceability
+          classify compiled policies with the offline controllability check
+          (policy_authoring.controllability.benchmark_enforceability).
+          Reads --policies JSON or --responses JSONL. Does not open the
+          Study 1 workbook and does not call a model. The shares are for
+          the policies you pass in.
 
 Per rule it records whether the compiler produced a policy or refused, whether
 the repository's own validator accepts it, whether the rule-set checker finds it
@@ -50,6 +56,7 @@ Usage
   python scripts/compile_fidelity.py list
   python scripts/compile_fidelity.py run --responses saved.jsonl
   LLM_PROVIDER=bedrock python scripts/compile_fidelity.py run --live --limit 20
+  python scripts/compile_fidelity.py enforceability --policies policies.json
 
 The spreadsheet path is ``--xlsx PATH``, else ``$AUTOTAP_STUDY1_XLSX``, else
 the cache file ``fetch`` writes.
@@ -827,6 +834,38 @@ def _live_fn(save_to: Optional[Path]) -> Callable[[str, str], Any]:
     return run
 
 
+def _policies_for_enforceability(policies_path: Optional[str], responses_path: Optional[str]) -> List[Any]:
+    """Compiled policies from a JSON list and/or a JSONL of ``{id, compiled}``.
+
+    A missing or null ``compiled`` value counts as not compiled. This does
+    not read the Study 1 workbook.
+    """
+    if not policies_path and not responses_path:
+        raise FidelityError("enforceability needs --policies FILE or --responses FILE (offline; no LLM)")
+    items: List[Any] = []
+    if policies_path:
+        path = Path(policies_path)
+        if not path.is_file():
+            raise FidelityError(f"policies file not found: {path}")
+        data = json.loads(path.read_text())
+        if isinstance(data, dict):
+            data = data.get("policies", data.get("compiled"))
+        if not isinstance(data, list):
+            raise FidelityError("--policies must be a JSON list of compiled policies")
+        items.extend(data)
+    if responses_path:
+        path = Path(responses_path)
+        if not path.is_file():
+            raise FidelityError(f"responses file not found: {path}")
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            compiled = row.get("compiled")
+            items.append({"rejected": True} if compiled is None else compiled)
+    return items
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -850,6 +889,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--out-dir", default=str(OUT_DIR))
     r.add_argument("--include-text", action="store_true",
                    help="copy each rule's text into rows.jsonl (stays in the git-ignored output dir)")
+    e = sub.add_parser(
+        "enforceability",
+        help="classify compiled policies offline (no workbook, no model)",
+    )
+    e.add_argument("--policies", default=None,
+                   help="JSON list of compiled policies (or {policies: [...]})")
+    e.add_argument("--responses", default=None,
+                   help="JSONL of {id, compiled}; null compiled counts as not compiled")
+    e.add_argument("--manual-on", action="store_true",
+                   help="assume an uncontrollable physical switch-on in every context")
+    e.add_argument("--precursor", action="store_true",
+                   help="assume an uncontrollable depart event between home and away")
     args = ap.parse_args(argv)
 
     try:
@@ -857,6 +908,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(NOTICE, file=sys.stderr)
             dest = fetch(args.ref, Path(args.dest))
             print(f"saved {dest} (sha256 {sha256_of(dest)})")
+            return 0
+
+        if args.cmd == "enforceability":
+            from policy_authoring.controllability import benchmark_enforceability
+            policies = _policies_for_enforceability(args.policies, args.responses)
+            report = benchmark_enforceability(
+                policies, manual_on=args.manual_on, precursor=args.precursor)
+            print("caller-supplied policies; not an AutoTap Study 1 result", file=sys.stderr)
+            print(json.dumps(report, indent=2))
             return 0
 
         path = resolve_xlsx_path(args.xlsx)

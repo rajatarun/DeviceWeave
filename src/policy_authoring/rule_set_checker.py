@@ -43,6 +43,11 @@ Findings
   redundant            info     a rule adds nothing: others with the same effect
                                 already cover it
   invariant_violated   error    a stated safety property has a counterexample
+  enforceability       info/    whether the safety language of the blocks (and
+                       warning  invariants) is guard-enforceable, needs a forced
+                                action, or is unenforceable, with a witness trace.
+                                Informational: it does not refuse a rule. The
+                                evaluator is not involved.
 """
 from __future__ import annotations
 
@@ -383,7 +388,36 @@ def analyze(rules: Sequence[Dict[str, Any]], invariants: Sequence[Invariant] = (
                 "invariant_violated", "error", [], inv.device_type,
                 f"Invariant '{inv.name}' does not hold: in this context no rule blocks the "
                 f"{inv.device_type} from being switched on.", witness(gaps[0])))
+    findings.extend(_enforceability_findings(by_device, invariants))
     return findings
+
+
+def _enforceability_findings(by_device, invariants: Sequence[Invariant]) -> List[Finding]:
+    """One additive finding per device that has a block or an invariant.
+
+    Severity is info or warning, never error, so authoring still stores the
+    rule. The runtime guard is unchanged; this says whether that guard can
+    enforce the safety language the rules describe.
+    """
+    # Local import: controllability builds plants from this module's domains.
+    from policy_authoring.controllability import enforceability
+
+    devices = set(by_device)
+    for inv in invariants:
+        devices.add(inv.device_type)
+    severity = {"GUARD_ENFORCEABLE": "info", "NEEDS_OBLIGATION": "warning",
+                "UNENFORCEABLE": "warning"}
+    out: List[Finding] = []
+    for dev in sorted(devices):
+        rules = [rule for rule, _region in by_device.get(dev, ())]
+        invs = [inv for inv in invariants if inv.device_type == dev]
+        if not any(_atype(rule) == "block" for rule in rules) and not invs:
+            continue
+        for result in enforceability(rules, invs, device_types=(dev,)):
+            out.append(Finding(
+                "enforceability", severity[result.classification], list(result.rule_ids), dev,
+                result.message, result.witness()))
+    return out
 
 
 def check_new_rule(new_rule: Dict[str, Any], existing: Sequence[Dict[str, Any]],

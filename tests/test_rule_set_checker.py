@@ -59,7 +59,7 @@ def test_narrow_but_possible_rules_are_satisfiable(conds):
 def test_block_silently_overrides_an_allow_and_the_witness_proves_it():
     rules = [R("away", "light", [("is_home", "==", False)], "block"),
              R("night", "light", [("time_hour", ">=", 20)], "allow")]
-    [f] = C.analyze(rules)
+    [f] = [f for f in C.analyze(rules) if f.kind == "conflict_block_allow"]
     assert f.kind == "conflict_block_allow" and f.rule_ids == ["night", "away"]
     ctx = f.witness
     assert ctx["time_hour"] >= 20 and ctx["is_home"] is False
@@ -92,13 +92,13 @@ def test_duplicate_block_is_redundant_but_disjoint_blocks_are_not():
     assert ("redundant", ("b",)) in kinds(C.analyze(dup))
     apart = [R("a", "heater", [("temperature", ">", 80)], "block"),
              R("b", "heater", [("temperature", "<", 40)], "block")]
-    assert not C.analyze(apart)
+    assert not [f for f in C.analyze(apart) if f.kind != "enforceability"]
 
 
 def test_rules_on_different_devices_never_interact():
     rules = [R("f", "fan", [("is_home", "==", False)], "block"),
              R("l", "light", [("is_home", "==", False)], "allow")]
-    assert not C.analyze(rules)
+    assert not [f for f in C.analyze(rules) if f.kind != "enforceability"]
 
 
 # ── invariants ───────────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ AWAY = C.Invariant("heater off when away", "heater", ({"field": "is_home", "oper
 
 def test_invariant_counterexample_is_a_real_gap():
     rules = [R("h", "heater", [("is_home", "==", False), ("time_hour", "!=", 3)], "block")]
-    [f] = C.analyze(rules, [AWAY])
+    [f] = [f for f in C.analyze(rules, [AWAY]) if f.kind == "invariant_violated"]
     assert f.kind == "invariant_violated" and f.witness["time_hour"] == 3
     assert compute_verdict(rules, "heater", "turn_on", f.witness).verdict == "allow"
 
@@ -192,7 +192,8 @@ def test_interval_analysis_agrees_with_z3_on_random_rule_sets():
                  for i in range(rng.randint(1, 5))]
         inv = [{"name": "inv", "device_type": "heater",
                 "conditions": [{"field": "is_home", "operator": "==", "value": False}]}]
-        boxes = sorted(_key(f.kind, f.rule_ids) for f in C.analyze(rules, [C.Invariant.from_dict(inv[0])]))
+        boxes = sorted(_key(f.kind, f.rule_ids) for f in C.analyze(rules, [C.Invariant.from_dict(inv[0])])
+                       if f.kind != "enforceability")
         solver = sorted(_key(f["kind"], f["rule_ids"]) for f in smt.analyze(rules, inv))
         assert boxes == solver, (rules, boxes, solver)
 

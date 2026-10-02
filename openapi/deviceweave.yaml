@@ -732,14 +732,18 @@ components:
       properties:
         kind:
           type: string
-          enum: [unsatisfiable, shadowed, conflict_block_allow, conflict_modify, redundant, invariant_violated]
+          enum: [unsatisfiable, shadowed, conflict_block_allow, conflict_modify, redundant, invariant_violated, enforceability]
         severity: { type: string, enum: [error, warning, info] }
         rule_ids: { type: array, items: { type: string } }
         device_type: { type: string }
         message: { type: string }
         witness:
           type: object
-          description: A context in which the finding is true (evaluate the rules against it to see it)
+          description: >
+            A context in which the finding is true, or, for kind enforceability,
+            a trace, the classification and the synthesized supervisor. Evaluate
+            a flat context witness against the rules to see a conflict. An
+            enforceability trace is replayed on the controllability plant.
           additionalProperties: true
     Error:
       type: object
