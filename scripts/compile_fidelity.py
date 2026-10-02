@@ -33,9 +33,13 @@ Commands
   list    load the rules and print counts -- no compiler, no network
   run     compile every rule and score it:
             --responses FILE  score saved compiler outputs (offline)
-            --live            call the configured LLM provider through
-                              llm_compiler.compile_rule (opt-in: costs money
-                              and sends participant text to that provider)
+            --live            call the LLM (opt-in: costs money and sends
+                              participant text to that provider). Paper run:
+                              --provider bedrock --model-id ID --temperature 0
+                              --reps 5 --concurrency K --out DIR --resume
+            --dry-run-cost    print call count, estimated input tokens, and
+                              cost from --input-usd-per-million and
+                              --output-usd-per-million. No network call.
   enforceability
           classify compiled policies with the offline controllability check
           (policy_authoring.controllability.benchmark_enforceability).
@@ -55,8 +59,18 @@ Usage
   python scripts/compile_fidelity.py fetch
   python scripts/compile_fidelity.py list
   python scripts/compile_fidelity.py run --responses saved.jsonl
-  LLM_PROVIDER=bedrock python scripts/compile_fidelity.py run --live --limit 20
-  python scripts/compile_fidelity.py enforceability --policies policies.json
+  python scripts/compile_fidelity.py run --dry-run-cost --reps 5 \\
+      --input-usd-per-million PRICE --output-usd-per-million PRICE
+  python scripts/compile_fidelity.py run --live --provider bedrock \\
+      --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 \\
+      --temperature 0 --reps 5 --concurrency 4 --limit 20 \\
+      --out benchmarks/autotap/_out
+  python scripts/compile_fidelity.py run --live --provider bedrock \\
+      --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 \\
+      --temperature 0 --reps 5 --concurrency 4 --resume \\
+      --out benchmarks/autotap/_out
+  python scripts/compile_fidelity.py enforceability \\
+      --responses benchmarks/autotap/_out/responses.jsonl --detail summary
 
 The spreadsheet path is ``--xlsx PATH``, else ``$AUTOTAP_STUDY1_XLSX``, else
 the cache file ``fetch`` writes.
@@ -67,14 +81,19 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 import urllib.request
 import zipfile
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from xml.etree import ElementTree as ET
@@ -619,6 +638,13 @@ class RuleResult:
     text: Optional[str] = None          # only with --include-text
 
 
+class _ModelError:
+    """In-memory marker for a model response that is not a policy. Not written to disk."""
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+
 def score_rule(rule: SourceRule, compiled: Any, label: Optional[Dict[str, Any]] = None,
                no_response: bool = False) -> RuleResult:
     res = RuleResult(id=rule.rule_id, cell=rule.cell, category=rule.category,
@@ -627,8 +653,17 @@ def score_rule(rule: SourceRule, compiled: Any, label: Optional[Dict[str, Any]] 
     if no_response:
         res.compile, res.failure_category = "no_response", "no_response"
         return res
+    if isinstance(compiled, _ModelError):
+        res.compile = "model_error"
+        res.failure_category = compiled.kind
+        if label is not None:
+            _apply_label(res, label)
+        return res
     if compiled is None:
+        # Infrastructure: the model was not asked, or the call never returned.
+        # Leave the row unlabeled so a throttle is not a compile failure.
         res.compile, res.failure_category = "infra_error", "infra_error"
+        return res
     elif isinstance(compiled, dict) and compiled.get("rejected") is True:
         res.compile = "refused"
         res.reason = str(compiled.get("reason") or "")
@@ -696,7 +731,8 @@ def _rate(n: int, d: int) -> Optional[float]:
 
 
 def _group(results: Iterable[RuleResult]) -> Dict[str, Any]:
-    rs = [r for r in results if r.compile != "no_response"]
+    # infra_error is a transport outcome, not a model decision.
+    rs = [r for r in results if r.compile not in ("no_response", "infra_error")]
     return {"n": len(rs), "accepted": sum(r.accepted for r in rs),
             "acceptanceRate": _rate(sum(r.accepted for r in rs), len(rs))}
 
@@ -704,29 +740,37 @@ def _group(results: Iterable[RuleResult]) -> Dict[str, Any]:
 def summarize(results: Sequence[RuleResult]) -> Dict[str, Any]:
     scored = [r for r in results if r.compile != "no_response"]
     n = len(scored)
-    compiled = [r for r in scored if r.compile == "compiled"]
+    infra = [r for r in scored if r.compile == "infra_error"]
+    model = [r for r in scored if r.compile != "infra_error"]
+    model_n = len(model)
+    compiled = [r for r in model if r.compile == "compiled"]
     labels = Counter(r.label for r in results)
-    labeled_policy = [r for r in scored if r.label in ("match_exact", "match_equivalent", "mismatch",
-                                                         "policy_expected_but_refused")]
-    labeled_reject = [r for r in scored if r.label in ("reject_expected_ok", "reject_expected_but_compiled")]
+    labeled_policy = [r for r in model if r.label in ("match_exact", "match_equivalent", "mismatch",
+                                                       "policy_expected_but_refused")]
+    labeled_reject = [r for r in model if r.label in ("reject_expected_ok", "reject_expected_but_compiled")]
     by_pattern: Dict[str, List[RuleResult]] = {}
-    for r in scored:
+    for r in model:
         for p in r.patterns:
             by_pattern.setdefault(p, []).append(r)
     return {
         "n": n,
         "noResponse": len(results) - n,
+        "infraError": len(infra),
+        "modelN": model_n,
         "compile": dict(Counter(r.compile for r in scored)),
         "validatorAccepted": sum(r.valid for r in scored),
         "unsatisfiable": sum(r.satisfiable is False for r in scored),
         "accepted": sum(r.accepted for r in scored),
         "rates": {
-            "compiled": _rate(len(compiled), n),
-            "valid": _rate(sum(r.valid for r in scored), n),
-            "accepted": _rate(sum(r.accepted for r in scored), n),
+            # Denominator is model responses only. An exhausted retry is not a
+            # compile failure and does not move these rates.
+            "compiled": _rate(len(compiled), model_n),
+            "valid": _rate(sum(r.valid for r in model), model_n),
+            "accepted": _rate(sum(r.accepted for r in model), model_n),
             "validGivenCompiled": _rate(sum(r.valid for r in compiled), len(compiled)),
         },
-        "failureCategories": dict(Counter(r.failure_category for r in scored if r.failure_category).most_common()),
+        "failureCategories": dict(Counter(
+            r.failure_category for r in model if r.failure_category).most_common()),
         "labels": {
             "counts": dict(labels),
             "labeled": n - labels.get("unlabeled", 0) if n else 0,
@@ -749,8 +793,12 @@ def format_table(summary: Dict[str, Any]) -> str:
     def pct(x: Optional[float]) -> str:
         return "  n/a" if x is None else f"{x * 100:5.1f}%"
 
-    lines = [f"Compile fidelity -- {summary['n']} rules scored"
-             + (f" ({summary['noResponse']} without a saved response)" if summary["noResponse"] else ""), ""]
+    extra = ""
+    if summary["noResponse"]:
+        extra += f" ({summary['noResponse']} without a saved response)"
+    if summary.get("infraError"):
+        extra += f" ({summary['infraError']} infra errors excluded from rates)"
+    lines = [f"Compile fidelity -- {summary['n']} rules scored" + extra, ""]
     rates = summary["rates"]
     lines += [f"  {'compiled (not refused)':<34}{pct(rates['compiled'])}",
               f"  {'valid (validator)':<34}{pct(rates['valid'])}",
@@ -807,36 +855,420 @@ def write_report(result: Dict[str, Any], out_dir: Path, meta: Dict[str, Any]) ->
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _responses_fn(path: Path) -> Callable[[str, str], Any]:
-    saved: Dict[str, Any] = {}
+# Transient Bedrock failures. Matched on the exception class name and, for
+# botocore ClientError, on response["Error"]["Code"], so tests can raise a
+# same-named exception without importing botocore.
+LIVE_MAX_ATTEMPTS = 6
+LIVE_BACKOFF_BASE_S = 0.5
+LIVE_BACKOFF_CAP_S = 20.0
+_RETRYABLE_NAMES = frozenset({
+    "ThrottlingException",
+    "TooManyRequestsException",
+    "ServiceUnavailableException",
+    "ServiceUnavailable",
+    "ModelTimeoutException",
+    "ModelNotReadyException",
+    "TimeoutError",
+    "ReadTimeoutError",
+    "ConnectTimeoutError",
+    "EndpointConnectionError",
+    "ConnectionClosedError",
+    "RequestTimeout",
+    "RequestTimeoutException",
+})
+
+
+class InfraExhausted(Exception):
+    """A transient provider error that used every retry. Not a model failure."""
+
+    def __init__(self, last: BaseException, attempts: int) -> None:
+        super().__init__(f"{type(last).__name__} after {attempts} attempts")
+        self.last = last
+        self.attempts = attempts
+
+
+def _error_code(exc: BaseException) -> str:
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        code = response.get("Error", {}).get("Code", "")
+        return str(code or "")
+    return ""
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Throttling, service-unavailable, and timeouts. Other errors are not retried."""
+    seen = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (TimeoutError, ConnectionError)):
+            return True
+        name = type(cur).__name__
+        if name in _RETRYABLE_NAMES or "Timeout" in name:
+            return True
+        if _error_code(cur) in _RETRYABLE_NAMES:
+            return True
+        cur = cur.__cause__
+    return False
+
+
+def backoff_seconds(attempt: int, rng: Callable[[], float] = random.random) -> float:
+    """Full jitter in ``[0, min(cap, base * 2**attempt)]``. ``attempt`` is 0-based."""
+    cap = min(LIVE_BACKOFF_CAP_S, LIVE_BACKOFF_BASE_S * (2 ** attempt))
+    return rng() * cap
+
+
+def call_with_retries(fn: Callable[[], Any], *, max_attempts: int = LIVE_MAX_ATTEMPTS,
+                      sleep: Callable[[float], None] = time.sleep,
+                      rng: Callable[[], float] = random.random) -> Any:
+    """Call ``fn`` until it returns or a non-transient error escapes.
+
+    Transient errors sleep and retry. When the attempt budget is spent, raise
+    ``InfraExhausted`` so the caller can record an infra_error and move on.
+    """
+    last: Optional[BaseException] = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            if not is_transient(exc):
+                raise
+            last = exc
+            if attempt == max_attempts - 1:
+                raise InfraExhausted(exc, max_attempts) from exc
+            sleep(backoff_seconds(attempt, rng))
+    raise InfraExhausted(last or RuntimeError("no attempt"), max_attempts)
+
+
+def _is_envelope(compiled: Any) -> bool:
+    return (isinstance(compiled, dict) and "error_class" in compiled
+            and "parsed" in compiled and "raw" in compiled)
+
+
+def record_succeeded(row: Dict[str, Any]) -> bool:
+    """True when the model returned something. An infra_error is not done."""
+    compiled = row.get("compiled")
+    if _is_envelope(compiled):
+        return compiled.get("error_class") != "infra_error"
+    return compiled is not None
+
+
+def _compiled_for_scoring(row: Dict[str, Any]) -> Any:
+    compiled = row.get("compiled")
+    if _is_envelope(compiled):
+        if compiled.get("error_class") == "infra_error":
+            return None
+        if compiled.get("error_class"):
+            return _ModelError(str(compiled["error_class"]))
+        return compiled.get("parsed")
+    return compiled
+
+
+def _iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+    if not path.is_file():
+        return
     for line in path.read_text().splitlines():
         if line.strip():
-            row = json.loads(line)
-            saved[row["id"]] = row.get("compiled")
-    return lambda rid, _text: saved.get(rid, _NO_RESPONSE) if rid in saved else _NO_RESPONSE
+            yield json.loads(line)
 
 
-def _live_fn(save_to: Optional[Path]) -> Callable[[str, str], Any]:
-    from policy_authoring.llm_compiler import compile_rule
+def completed_pairs(path: Path) -> set:
+    """(id, rep) pairs that already have a successful model response."""
+    done = set()
+    for row in _iter_jsonl(path):
+        if "id" not in row:
+            continue
+        if record_succeeded(row):
+            done.add((row["id"], int(row.get("rep", 1))))
+    return done
 
-    fh = None
-    if save_to is not None:
-        assert_ignored(save_to.parent)
-        save_to.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(save_to, "a")
 
-    def run(rid: str, text: str) -> Any:
-        out = compile_rule(text)
-        if fh is not None:
-            fh.write(json.dumps({"id": rid, "compiled": out}) + "\n")
+def harness_git_commit() -> str:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        return out.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def usage_totals(records: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    incoming = outgoing = 0
+    for rec in records:
+        usage = rec.get("usage") or {}
+        if not isinstance(usage, dict):
+            continue
+        if usage.get("input_tokens") is not None:
+            incoming += int(usage["input_tokens"])
+        if usage.get("output_tokens") is not None:
+            outgoing += int(usage["output_tokens"])
+    return {"input_tokens": incoming, "output_tokens": outgoing}
+
+
+def latest_records(records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Last line per (id, rep). A later success replaces an earlier infra_error."""
+    order: List[Tuple[str, int]] = []
+    by: Dict[Tuple[str, int], Dict[str, Any]] = {}
+    for rec in records:
+        key = (rec["id"], int(rec.get("rep", 1)))
+        if key not in by:
+            order.append(key)
+        by[key] = rec
+    return [by[key] for key in order]
+
+
+def estimate_live_cost(rules: Sequence[SourceRule], *, reps: int, max_tokens: int,
+                       input_usd_per_million: float, output_usd_per_million: float,
+                       assumed_output_tokens: Optional[int] = None) -> Dict[str, Any]:
+    """Token and dollar estimate with no network call and no tokenizer.
+
+    Input tokens are ``ceil(character_count / 4)`` of the system prompt plus
+    the filled user message, summed over calls. Output tokens are
+    ``assumed_output_tokens`` per call when that is passed, otherwise
+    ``max_tokens`` per call as a ceiling, not a measured completion.
+    """
+    from policy_authoring.llm_compiler import compiler_system_prompt, render_user_message
+
+    system = compiler_system_prompt()
+    per_rule = [(len(system) + len(render_user_message(rule.text)) + 3) // 4 for rule in rules]
+    calls = len(rules) * reps
+    input_tokens = sum(per_rule) * reps
+    if assumed_output_tokens is None:
+        output_tokens = calls * max_tokens
+        output_basis = "ceiling: max_tokens per call, not a measured completion"
+    else:
+        output_tokens = calls * assumed_output_tokens
+        output_basis = "assumed_output_tokens per call"
+    input_usd = input_tokens / 1_000_000 * input_usd_per_million
+    output_usd = output_tokens / 1_000_000 * output_usd_per_million
+    return {
+        "calls": calls,
+        "rules": len(rules),
+        "reps": reps,
+        "input_tokens_estimate": input_tokens,
+        "output_tokens_estimate": output_tokens,
+        "estimation_method": (
+            "ceil(character_count/4) of the system prompt plus the filled user "
+            "message, summed over calls. Character heuristic only: no tokenizer "
+            "is loaded and no network call is made."
+        ),
+        "output_token_basis": output_basis,
+        "input_usd_per_million": input_usd_per_million,
+        "output_usd_per_million": output_usd_per_million,
+        "input_usd": input_usd,
+        "output_usd": output_usd,
+        "total_usd": input_usd + output_usd,
+        "max_tokens": max_tokens,
+    }
+
+
+def open_live_provider(provider: Optional[str], model_id: Optional[str]) -> Any:
+    """Open the live-run provider.
+
+    ``provider="bedrock"`` forces Bedrock. Construction failure is raised
+    here and is never turned into a Gemini client.
+    """
+    from llm_provider import get_llm_provider
+
+    try:
+        if provider == "bedrock":
+            return get_llm_provider("bedrock", model_id=model_id, reuse_client=True)
+        if provider is None:
+            llm = get_llm_provider()
+            if getattr(llm, "provider_name", None) == "bedrock":
+                return get_llm_provider(
+                    "bedrock",
+                    model_id=model_id or getattr(llm, "model_id", None),
+                    reuse_client=True,
+                )
+            return llm
+        raise FidelityError(
+            f"--provider {provider} is not supported for the live benchmark; pass bedrock")
+    except FidelityError:
+        raise
+    except Exception as exc:
+        raise FidelityError(
+            f"provider is unavailable ({type(exc).__name__}: {exc}). "
+            f"Refusing to fall back to another provider."
+        ) from exc
+
+
+def _provider_call(provider: Any, system: str, user: str, max_tokens: int,
+                   temperature: Optional[float]) -> Tuple[Any, int]:
+    from llm_provider.base import LLMResult
+
+    kwargs: Dict[str, Any] = {"max_tokens": max_tokens}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    started = time.perf_counter()
+    if hasattr(provider, "invoke_result"):
+        result = provider.invoke_result(system, user, **kwargs)
+    else:
+        text = provider.invoke(system, user, **kwargs)
+        usage = getattr(provider, "last_usage", None)
+        result = LLMResult(text=text, usage=usage if isinstance(usage, dict) else None)
+    latency_ms = int(round((time.perf_counter() - started) * 1000))
+    return result, latency_ms
+
+
+def execute_live(rules: Sequence[SourceRule], provider: Any, *, reps: int, concurrency: int,
+                 out_path: Path, resume: bool, temperature: Optional[float], model_id: str,
+                 provider_name: str, max_tokens: int,
+                 sleep: Callable[[float], None] = time.sleep,
+                 rng: Callable[[], float] = random.random,
+                 max_attempts: int = LIVE_MAX_ATTEMPTS) -> Dict[str, Any]:
+    """Compile ``rules`` × ``reps`` and append one JSONL record per finished call.
+
+    Records are keyed by id. The statement text is not written. Resume skips
+    (id, rep) pairs that already succeeded and retries infra_error pairs.
+    """
+    from policy_authoring.llm_compiler import (
+        compiler_system_prompt, parse_model_output, prompt_hash, render_user_message,
+    )
+
+    assert_ignored(out_path.parent if out_path.suffix else out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    system = compiler_system_prompt()
+    phash = prompt_hash()
+    done = completed_pairs(out_path) if resume else set()
+    pending = [(rule, rep) for rule in rules for rep in range(1, reps + 1)
+               if (rule.rule_id, rep) not in done]
+    lock = threading.Lock()
+    fh = open(out_path, "a")
+
+    def write_record(record: Dict[str, Any]) -> None:
+        line = json.dumps(record) + "\n"
+        with lock:
+            fh.write(line)
             fh.flush()
-        return out
+
+    def one(rule: SourceRule, rep: int) -> None:
+        user = render_user_message(rule.text)
+        latency_ms = 0
+
+        def attempt() -> Any:
+            nonlocal latency_ms
+            result, latency_ms = _provider_call(provider, system, user, max_tokens, temperature)
+            return result
+
+        try:
+            result = call_with_retries(attempt, max_attempts=max_attempts, sleep=sleep, rng=rng)
+        except InfraExhausted:
+            write_record({
+                "id": rule.rule_id,
+                "rep": rep,
+                "model_id": model_id,
+                "provider": provider_name,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "prompt_hash": phash,
+                "compiled": {"raw": None, "parsed": None, "error_class": "infra_error"},
+                "usage": None,
+                "latency_ms": latency_ms,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+            return
+        raw_text = getattr(result, "text", None)
+        usage = getattr(result, "usage", None)
+        try:
+            parsed: Any = parse_model_output(raw_text or "")
+            error_class = None
+        except json.JSONDecodeError:
+            parsed = None
+            error_class = "json_decode"
+        write_record({
+            "id": rule.rule_id,
+            "rep": rep,
+            "model_id": model_id,
+            "provider": provider_name,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "prompt_hash": phash,
+            "compiled": {"raw": raw_text, "parsed": parsed, "error_class": error_class},
+            "usage": usage if isinstance(usage, dict) else None,
+            "latency_ms": latency_ms,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+
+    try:
+        if not pending:
+            pass
+        elif concurrency <= 1:
+            for rule, rep in pending:
+                one(rule, rep)
+        else:
+            workers = min(concurrency, len(pending))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(one, rule, rep) for rule, rep in pending]
+                for fut in as_completed(futures):
+                    fut.result()
+    finally:
+        fh.close()
+
+    all_records = list(_iter_jsonl(out_path))
+    wanted = {rule.rule_id for rule in rules}
+    latest = [rec for rec in latest_records(all_records) if rec["id"] in wanted]
+    return {
+        "latest": latest,
+        "all_records": all_records,
+        "prompt_hash": phash,
+        "usage": usage_totals(all_records),
+        "calls_this_run": len(pending),
+    }
+
+
+def score_live_records(rules: Sequence[SourceRule], records: Sequence[Dict[str, Any]],
+                       labels: Optional[Dict[str, Dict[str, Any]]] = None,
+                       include_text: bool = False, reps: int = 1) -> Dict[str, Any]:
+    """Score the latest record per (id, rep). infra_error is not a model failure.
+
+    A pair with no record is ``no_response`` and is left out of the rates.
+    """
+    labels = labels or {}
+    by_key = {(rec["id"], int(rec.get("rep", 1))): rec for rec in records}
+    results: List[RuleResult] = []
+    rows: List[Dict[str, Any]] = []
+    for rule in rules:
+        for rep in range(1, reps + 1):
+            rec = by_key.get((rule.rule_id, rep))
+            if rec is None:
+                res = score_rule(rule, None, None, no_response=True)
+            else:
+                res = score_rule(rule, _compiled_for_scoring(rec), labels.get(rule.rule_id))
+            if include_text:
+                res.text = rule.text
+            results.append(res)
+            row = asdict(res)
+            row["rep"] = rep
+            rows.append(row)
+    return {"summary": summarize(results), "rows": rows}
+
+
+def _responses_fn(path: Path) -> Callable[[str, str], Any]:
+    saved: Dict[str, Any] = {}
+    success: Dict[str, Any] = {}
+    for row in _iter_jsonl(path):
+        rid = row["id"]
+        value = _compiled_for_scoring(row)
+        saved[rid] = value
+        if record_succeeded(row):
+            success[rid] = value
+    saved.update(success)
+
+    def run(rid: str, _text: str) -> Any:
+        if rid not in saved:
+            return _NO_RESPONSE
+        return saved[rid]
     return run
 
 
 def _policies_for_enforceability(policies_path: Optional[str], responses_path: Optional[str]) -> List[Any]:
     """Compiled policies from a JSON list and/or a JSONL of ``{id, compiled}``.
 
+    A live-run envelope contributes its parsed policy. An ``infra_error``
+    envelope is left out, so a throttle is not counted as "not compiled".
     A missing or null ``compiled`` value counts as not compiled. This does
     not read the Study 1 workbook.
     """
@@ -857,12 +1289,15 @@ def _policies_for_enforceability(policies_path: Optional[str], responses_path: O
         path = Path(responses_path)
         if not path.is_file():
             raise FidelityError(f"responses file not found: {path}")
-        for line in path.read_text().splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
+        for row in _iter_jsonl(path):
             compiled = row.get("compiled")
-            items.append({"rejected": True} if compiled is None else compiled)
+            if _is_envelope(compiled):
+                if compiled.get("error_class") == "infra_error":
+                    continue
+                parsed = compiled.get("parsed")
+                items.append({"rejected": True} if parsed is None else parsed)
+            else:
+                items.append({"rejected": True} if compiled is None else compiled)
     return items
 
 
@@ -882,11 +1317,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     mode = r.add_mutually_exclusive_group()
     mode.add_argument("--responses", default=None, help="JSONL of {id, compiled} to score (offline)")
     mode.add_argument("--live", action="store_true",
-                      help="call the configured LLM provider (costs money; sends rule text to it)")
+                      help="call the LLM provider (costs money; sends rule text to it)")
+    mode.add_argument("--dry-run-cost", action="store_true",
+                      help="print call count, estimated tokens, and cost; no network call")
+    r.add_argument("--provider", choices=("bedrock",), default=None,
+                   help="force this provider. bedrock does not fall back to Gemini")
+    r.add_argument("--model-id", default=None,
+                   help="Bedrock model id (default: LLM_MODEL_ID or Claude Haiku 4.5)")
+    r.add_argument("--temperature", type=float, default=0.0,
+                   help="live-run temperature (default 0). The authoring compiler omits "
+                        "temperature unless it is passed in")
+    r.add_argument("--reps", type=int, default=1, help="repetitions per statement (paper run: 5)")
+    r.add_argument("--concurrency", type=int, default=1,
+                   help="worker threads. Bedrock uses one shared client")
+    r.add_argument("--resume", action="store_true",
+                   help="skip (id, rep) pairs that already succeeded; retry infra_error")
+    r.add_argument("--input-usd-per-million", type=float, default=None,
+                   help="with --dry-run-cost: input price in USD per million tokens")
+    r.add_argument("--output-usd-per-million", type=float, default=None,
+                   help="with --dry-run-cost: output price in USD per million tokens")
+    r.add_argument("--assumed-output-tokens", type=int, default=None,
+                   help="with --dry-run-cost: output tokens per call (default: max_tokens ceiling)")
     r.add_argument("--save-responses", default=None,
                    help=f"with --live: append raw outputs here (default {OUT_DIR / 'responses.jsonl'})")
     r.add_argument("--labels", default=str(LABELS_PATH))
-    r.add_argument("--out-dir", default=str(OUT_DIR))
+    r.add_argument("--out-dir", "--out", dest="out_dir", default=str(OUT_DIR),
+                   help="report directory (default: benchmarks/autotap/_out, git-ignored)")
     r.add_argument("--include-text", action="store_true",
                    help="copy each rule's text into rows.jsonl (stays in the git-ignored output dir)")
     e = sub.add_parser(
@@ -943,25 +1399,81 @@ def main(argv: Optional[List[str]] = None) -> int:
             }, indent=2))
             return 0
 
+        if args.reps < 1 or args.concurrency < 1:
+            raise FidelityError("--reps and --concurrency must be >= 1")
+
+        if args.dry_run_cost:
+            if args.input_usd_per_million is None or args.output_usd_per_million is None:
+                raise FidelityError(
+                    "pass --input-usd-per-million and --output-usd-per-million "
+                    "(no prices are built in)")
+            from policy_authoring.llm_compiler import DEFAULT_MAX_TOKENS
+            print(json.dumps(estimate_live_cost(
+                rules, reps=args.reps, max_tokens=DEFAULT_MAX_TOKENS,
+                input_usd_per_million=args.input_usd_per_million,
+                output_usd_per_million=args.output_usd_per_million,
+                assumed_output_tokens=args.assumed_output_tokens,
+            ), indent=2))
+            return 0
+
         labels = load_labels(Path(args.labels))
         leaks = labels_leaking_text(rules, labels)
         if leaks:
             raise FidelityError(f"label notes contain the rule's own text: {leaks}; reword them")
         if args.responses:
             compile_fn, compiler = _responses_fn(Path(args.responses)), f"responses:{Path(args.responses).name}"
+            result = evaluate(rules, compile_fn, labels, include_text=args.include_text)
+            meta = {"dataset": "AutoTap Study 1", "file": path.name, "sha256": digest,
+                    "sheets": list(args.sheet or DEFAULT_SHEETS), "compiler": compiler,
+                    "labelsFile": Path(args.labels).name, "notice": NOTICE}
         elif args.live:
-            save = Path(args.save_responses) if args.save_responses else OUT_DIR / "responses.jsonl"
-            print(f"LIVE: compiling {len(rules)} rules with LLM_PROVIDER={os.environ.get('LLM_PROVIDER', 'auto')}. "
+            from policy_authoring.llm_compiler import DEFAULT_MAX_TOKENS
+            save = Path(args.save_responses) if args.save_responses else Path(args.out_dir) / "responses.jsonl"
+            provider = open_live_provider(args.provider, args.model_id)
+            if args.provider == "bedrock" and getattr(provider, "provider_name", None) not in (None, "bedrock"):
+                raise FidelityError(
+                    f"refusing to run: got {getattr(provider, 'provider_name', type(provider).__name__)}, "
+                    f"not bedrock")
+            model_id = args.model_id or getattr(provider, "model_id", None) or os.environ.get(
+                "LLM_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+            provider_name = getattr(provider, "provider_name", None) or (args.provider or "unknown")
+            print(f"LIVE: {len(rules)} rules x {args.reps} reps, provider={provider_name}, "
+                  f"model={model_id}, temperature={args.temperature}, concurrency={args.concurrency}. "
                   f"This calls a paid model and sends each rule's text to that provider. "
-                  f"Raw outputs are appended to {save}.", file=sys.stderr)
-            compile_fn, compiler = _live_fn(save), f"live:{os.environ.get('LLM_PROVIDER', 'auto')}"
+                  f"Records are appended to {save}.", file=sys.stderr)
+            if not args.resume and save.is_file() and save.stat().st_size:
+                print(f"warning: {save} already has records and --resume was not set; "
+                      f"those pairs will be called again", file=sys.stderr)
+            try:
+                live = execute_live(
+                    rules, provider, reps=args.reps, concurrency=args.concurrency, out_path=save,
+                    resume=args.resume, temperature=args.temperature, model_id=model_id,
+                    provider_name=provider_name, max_tokens=DEFAULT_MAX_TOKENS,
+                )
+            except FidelityError:
+                raise
+            except Exception as exc:
+                raise FidelityError(
+                    f"live run stopped on {type(exc).__name__}. Not recorded as a compile failure. "
+                    f"Re-run with --resume after the provider is available."
+                ) from exc
+            result = score_live_records(
+                rules, live["latest"], labels, include_text=args.include_text, reps=args.reps)
+            meta = {"dataset": "AutoTap Study 1", "file": path.name, "sha256": digest,
+                    "sheets": list(args.sheet or DEFAULT_SHEETS),
+                    "compiler": f"live:{provider_name}:{model_id}",
+                    "model_id": model_id, "provider": provider_name,
+                    "temperature": args.temperature, "reps": args.reps,
+                    "prompt_hash": live["prompt_hash"],
+                    "harness_git_commit": harness_git_commit(),
+                    "max_tokens": DEFAULT_MAX_TOKENS,
+                    "usage": live["usage"],
+                    "labelsFile": Path(args.labels).name, "notice": NOTICE}
         else:
-            raise FidelityError("choose --responses FILE (offline) or --live (calls the LLM provider)")
+            raise FidelityError(
+                "choose --responses FILE (offline), --live (calls the LLM provider), "
+                "or --dry-run-cost")
 
-        result = evaluate(rules, compile_fn, labels, include_text=args.include_text)
-        meta = {"dataset": "AutoTap Study 1", "file": path.name, "sha256": digest,
-                "sheets": list(args.sheet or DEFAULT_SHEETS), "compiler": compiler,
-                "labelsFile": Path(args.labels).name, "notice": NOTICE}
         paths = write_report(result, Path(args.out_dir), meta)
         print(format_table(result["summary"]))
         print(f"wrote {', '.join(str(p) for p in paths.values())}")

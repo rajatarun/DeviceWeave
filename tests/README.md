@@ -1,7 +1,7 @@
 # DeviceWeave test suite
 
 ```
-python3 -m pytest -q     # 169 passed, 5 skipped, in a couple of seconds
+python3 -m pytest -q     # 208 passed, 7 skipped, in a couple of seconds
 ```
 
 `pytest.ini` sets `pythonpath = src` so every module under `src/` imports by
@@ -29,7 +29,7 @@ push to `main`; it has no test job. Run the suite locally before merging.
 | `observatory_wrapper.observe_bedrock_converse` | falls through to the wrapped call when the wrapper is unavailable; telemetry-only (pre-gate) behaviour when the wrapper exposes no `invoke()`; and, on the gated path, REVIEW/BLOCK/missing-verdict refusals (`ObservatoryGateError`, span still pushed with `gate_decision`/`gate_reason`), the `gate_decision`/`gate_reason` annotation on ALLOW, a Bedrock failure propagating unchanged and un-retried, and gate-machinery failure refusing rather than re-invoking the model. Four tests run against the real `mcp-observatory` (`importorskip`): ALLOW, empty-output BLOCK, latency-budget REVIEW, and construction with no `MCP_OBSERVATORY_*` secrets set |
 | `app` confidence thresholds | per-gate override, fallback to `CONFIDENCE_THRESHOLD`, the shipped `0.4` default, non-numeric fallback, and one test per gate (scene / device / LLM) proving each is independent of the other two |
 | `app.handler` route dispatch | `GET /health` (registry configured and not), `POST /execute` happy path with the resolver and executor stubbed, unsupported-capability 422, missing/invalid body 400s, both-tiers-failed 422, and unknown-route/unknown-method 404s |
-| `scripts/compile_fidelity.py` | the stdlib `.xlsx` loader on an invented workbook in AutoTap Study 1's layout (cross-checked against openpyxl when installed), the real `llm_compiler.compile_rule` behind a fake provider, validator / rule-set outcomes and failure categories, label scoring (exact, meaning-level, multi-policy, rejects), label-file checks that keep participant text out, the report and CLI, the pinned-checksum `fetch` with a fake `urlopen`, and git guards that the cache, output and any `*.xlsx` are ignored and untracked |
+| `scripts/compile_fidelity.py` | the stdlib `.xlsx` loader on an invented workbook in AutoTap Study 1's layout (cross-checked against openpyxl when installed), the real `llm_compiler.compile_rule` behind a fake provider, validator / rule-set outcomes and failure categories, label scoring (exact, meaning-level, multi-policy, rejects), label-file checks that keep participant text out, the report and CLI, the pinned-checksum `fetch` with a fake `urlopen`, git guards that the cache, output and any `*.xlsx` are ignored and untracked, and the live harness (resume, infra retries, temperature and model id, concurrency, forced Bedrock, cost estimate) against a fake provider |
 | `aws_clients.get_dynamodb_resource` | resolves to the regional `dynamodb.<region>.amazonaws.com` endpoint the VPC Gateway endpoint serves, even with `AWS_USE_DUALSTACK_ENDPOINT` set; `AWS_ENDPOINT_URL_DYNAMODB` still wins; fail-fast timeouts |
 | `template.yaml` / deploy workflow (subnets, dual-stack) | every VPC function sets `Ipv6AllowedForDualStack` from `LambdaIpv6DualStack`; the workflow's private-subnet IPv6 check runs under `bash -e` against a fake `aws`; `LambdaPublicSubnetIds` defaults empty and is not enough to move functions (needs `LambdaUsePublicSubnets=true`); the deploy override is `ParameterKey=LambdaPublicSubnetIds,ParameterValue=""` (SAM rejects `Key=`) plus `LambdaUsePublicSubnets=false`, and that string is parsed by SAM's parameter-overrides type |
 

@@ -16,6 +16,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -458,12 +459,445 @@ needs_git = pytest.mark.skipif(shutil.which("git") is None or not (ROOT / ".git"
     "benchmarks/autotap/_cache/autotap-study1.xlsx",
     "benchmarks/autotap/_cache/anything-else.json",
     "benchmarks/autotap/_out/rows.jsonl",
+    "benchmarks/autotap/_out/paper-run/responses.jsonl",
     "Data - User Study 1.xlsx",
     "benchmarks/autotap/Data - User Study 1.xlsx",
     "tests/fixtures/whatever.xlsx",
 ])
 def test_cache_output_and_spreadsheets_are_git_ignored(path):
     assert _git("check-ignore", "-q", path).returncode == 0, f"{path} is not git-ignored"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live harness: resume, retries, temperature, concurrency, forced Bedrock
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ThrottlingException(Exception):
+    pass
+
+
+class _AccessDenied(Exception):
+    pass
+
+
+def _rejection(reason="no"):
+    return json.dumps({"rejected": True, "reason": reason, "confidence": 0.0})
+
+
+class RecordingProvider:
+    provider_name = "bedrock"
+    model_id = "unit-model"
+
+    def __init__(self, fn):
+        self.fn = fn
+        self.calls = []
+        self._lock = threading.Lock()
+
+    def invoke_result(self, system_prompt, user_message, max_tokens=512, temperature=None):
+        with self._lock:
+            self.calls.append({
+                "user": user_message, "temperature": temperature, "max_tokens": max_tokens,
+            })
+        return self.fn(system_prompt, user_message, max_tokens, temperature)
+
+
+def _llm_result(text, usage=None):
+    from llm_provider.base import LLMResult
+    return LLMResult(text=text, usage=usage if usage is not None else {"input_tokens": 10, "output_tokens": 2})
+
+
+def _rows_of(path):
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_compile_rule_forwards_temperature_only_when_set(monkeypatch):
+    from policy_authoring import llm_compiler
+
+    seen = []
+
+    class Bare:
+        model_id = "bare"
+
+        def invoke(self, system_prompt, user_message, max_tokens=512):
+            seen.append(("bare", max_tokens))
+            return _rejection()
+
+    monkeypatch.setattr(llm_compiler, "get_llm_provider", lambda: Bare())
+    assert llm_compiler.compile_rule("turn the fan off when nobody is home")["rejected"] is True
+    assert seen == [("bare", 512)]
+
+    class WithTemp:
+        model_id = "temp"
+
+        def invoke(self, system_prompt, user_message, max_tokens=512, temperature=None):
+            seen.append(("temp", temperature, max_tokens))
+            return _rejection()
+
+    monkeypatch.setattr(llm_compiler, "get_llm_provider", lambda: WithTemp())
+    llm_compiler.compile_rule("turn the fan off when nobody is home", temperature=0)
+    assert seen[-1] == ("temp", 0, 512)
+
+
+def test_resume_skips_done_pairs_and_retries_infra(study_xlsx, tmp_path):
+    rules = CF.load_rules(study_xlsx)[:2]
+    out = tmp_path / "out" / "responses.jsonl"
+    out.parent.mkdir()
+    done_id, retry_id = rules[0].rule_id, rules[1].rule_id
+    out.write_text(
+        json.dumps({
+            "id": done_id, "rep": 1, "compiled": {"raw": _rejection(), "parsed": {"rejected": True},
+                                                  "error_class": None},
+        }) + "\n"
+        + json.dumps({
+            "id": retry_id, "rep": 1,
+            "compiled": {"raw": None, "parsed": None, "error_class": "infra_error"},
+        }) + "\n"
+        + json.dumps({
+            "id": done_id, "rep": 2, "compiled": {"raw": _rejection("ok"),
+                                                  "parsed": {"rejected": True, "reason": "ok", "confidence": 0.0},
+                                                  "error_class": None},
+        }) + "\n"
+    )
+    provider = RecordingProvider(lambda *a: _llm_result(_rejection("retried")))
+    CF.execute_live(
+        rules, provider, reps=2, concurrency=1, out_path=out, resume=True,
+        temperature=0, model_id="unit-model", provider_name="bedrock", max_tokens=512,
+        sleep=lambda _s: None,
+    )
+    # (done, 1) and (done, 2) are finished. (retry, 1) is infra and is called
+    # again. (retry, 2) was never written, so it is called too.
+    assert len(provider.calls) == 2
+    assert all(rules[1].text in call["user"] for call in provider.calls)
+    assert all(rules[0].text not in call["user"] for call in provider.calls)
+    rows = _rows_of(out)
+    assert len(rows) == 5  # 3 seeded + 2 new
+    latest = {(r["id"], r["rep"]): r for r in CF.latest_records(rows)}
+    assert latest[(retry_id, 1)]["compiled"]["error_class"] is None
+    assert latest[(done_id, 1)]["compiled"]["raw"]  # the seeded success was not replaced
+    blob = out.read_text()
+    assert rules[0].text not in blob and rules[1].text not in blob
+
+
+def test_infra_error_is_not_a_compile_failure_and_is_retried(study_xlsx, tmp_path):
+    rules = CF.load_rules(study_xlsx)[:1]
+    out = tmp_path / "responses.jsonl"
+    attempts = {"n": 0}
+
+    def flaky(*_a):
+        attempts["n"] += 1
+        raise ThrottlingException("slow down")
+
+    provider = RecordingProvider(flaky)
+    slept = []
+    CF.execute_live(
+        rules, provider, reps=1, concurrency=1, out_path=out, resume=False,
+        temperature=0, model_id="unit-model", provider_name="bedrock", max_tokens=512,
+        sleep=slept.append, rng=lambda: 1.0, max_attempts=3,
+    )
+    assert attempts["n"] == 3
+    assert len(slept) == 2
+    assert slept[0] == pytest.approx(0.5) and slept[1] == pytest.approx(1.0)
+    rows = _rows_of(out)
+    assert rows[0]["compiled"]["error_class"] == "infra_error"
+    assert rows[0]["usage"] is None
+    scored = CF.score_live_records(rules, rows, reps=1)
+    assert scored["summary"]["infraError"] == 1
+    assert scored["summary"]["n"] == 1
+    assert "infra_error" not in scored["summary"]["failureCategories"]
+    assert scored["summary"]["rates"]["compiled"] is None  # no model response to fail
+    assert scored["summary"]["compile"]["infra_error"] == 1
+
+    # The same pair is pending again on resume, and a later success is what counts.
+    def ok(*_a):
+        return _llm_result(_rejection("back"), {"input_tokens": 4, "output_tokens": 1})
+
+    CF.execute_live(
+        rules, RecordingProvider(ok), reps=1, concurrency=1, out_path=out, resume=True,
+        temperature=0, model_id="unit-model", provider_name="bedrock", max_tokens=512,
+        sleep=lambda _s: None,
+    )
+    latest = CF.latest_records(_rows_of(out))
+    scored = CF.score_live_records(rules, latest, reps=1)
+    assert scored["summary"]["infraError"] == 0
+    assert scored["summary"]["compile"] == {"refused": 1}
+    assert scored["summary"]["rates"]["compiled"] == 0.0
+
+
+def test_live_records_temperature_model_and_omits_statement_text(study_xlsx, tmp_path):
+    rules = CF.load_rules(study_xlsx)[:1]
+    out = tmp_path / "responses.jsonl"
+    provider = RecordingProvider(lambda *a: _llm_result(_rejection("noted"),
+                                                        {"input_tokens": 12, "output_tokens": 3}))
+    result = CF.execute_live(
+        rules, provider, reps=1, concurrency=1, out_path=out, resume=False,
+        temperature=0, model_id="the-model", provider_name="bedrock", max_tokens=512,
+        sleep=lambda _s: None,
+    )
+    assert provider.calls[0]["temperature"] == 0
+    row = _rows_of(out)[0]
+    assert row["model_id"] == "the-model"
+    assert row["provider"] == "bedrock"
+    assert row["temperature"] == 0
+    assert row["max_tokens"] == 512
+    assert row["prompt_hash"] == result["prompt_hash"]
+    assert row["usage"] == {"input_tokens": 12, "output_tokens": 3}
+    assert row["compiled"]["error_class"] is None
+    assert row["compiled"]["parsed"]["rejected"] is True
+    assert "text" not in row
+    assert rules[0].text not in out.read_text()
+    from policy_authoring.llm_compiler import prompt_hash
+    assert row["prompt_hash"] == prompt_hash()
+    assert result["usage"] == {"input_tokens": 12, "output_tokens": 3}
+
+
+def test_concurrency_writes_one_record_per_id_and_rep(study_xlsx, tmp_path):
+    import time
+    rules = CF.load_rules(study_xlsx)[:4]
+    out = tmp_path / "responses.jsonl"
+
+    def slow(*_a):
+        time.sleep(0.01)
+        return _llm_result(_rejection("c"))
+
+    CF.execute_live(
+        rules, RecordingProvider(slow), reps=2, concurrency=4, out_path=out, resume=False,
+        temperature=0, model_id="the-model", provider_name="bedrock", max_tokens=512,
+        sleep=lambda _s: None,
+    )
+    rows = _rows_of(out)
+    keys = [(r["id"], r["rep"]) for r in rows]
+    assert len(keys) == len(set(keys)) == len(rules) * 2
+    assert {r["rep"] for r in rows} == {1, 2}
+
+
+def test_forced_bedrock_does_not_fall_back_to_gemini(monkeypatch):
+    import llm_provider
+    import llm_provider.bedrock as bedrock_mod
+    import llm_provider.gemini as gemini_mod
+
+    monkeypatch.setenv("LLM_PROVIDER", "auto")
+    probes = {"n": 0}
+
+    def probe():
+        probes["n"] += 1
+        return False
+
+    monkeypatch.setattr(llm_provider, "_is_nat_running", probe)
+    monkeypatch.setattr(llm_provider, "_bedrock", None)
+    monkeypatch.setattr(llm_provider, "_gemini", None)
+
+    class FakeBedrock:
+        provider_name = "bedrock"
+
+        def __init__(self, model_id, region="us-east-1", reuse_client=False):
+            self.model_id = model_id
+            self.reuse_client = reuse_client
+
+    class FakeGemini:
+        provider_name = "gemini"
+
+        def __init__(self, *a, **k):
+            raise AssertionError("fell back to Gemini")
+
+    monkeypatch.setattr(bedrock_mod, "BedrockLLMProvider", FakeBedrock)
+    monkeypatch.setattr(gemini_mod, "GeminiLLMProvider", FakeGemini)
+    forced = llm_provider.get_llm_provider(
+        "bedrock", model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0", reuse_client=True)
+    assert forced.provider_name == "bedrock"
+    assert forced.model_id == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert forced.reuse_client is True
+    assert probes["n"] == 0
+
+    # The unforced auto path still follows the probe. That is the behaviour
+    # the benchmark flag exists to avoid.
+    monkeypatch.setattr(gemini_mod, "GeminiLLMProvider", lambda *a, **k: FakeBedrock("gemini-stand-in"))
+    monkeypatch.setattr(llm_provider, "_gemini", None)
+    auto = llm_provider.get_llm_provider()
+    assert probes["n"] == 1
+    assert auto.model_id == "gemini-stand-in"
+
+
+def test_bedrock_shares_one_client_and_omits_temperature_unless_set(monkeypatch):
+    import sys
+    import threading
+    import types
+    import llm_provider.bedrock as bedrock
+
+    created = []
+    bodies = []
+
+    class Client:
+        def invoke_model(self, modelId, body):
+            bodies.append(json.loads(body))
+            payload = {"content": [{"text": " hello "}],
+                       "usage": {"input_tokens": 8, "output_tokens": 3}}
+            return {"body": io.BytesIO(json.dumps(payload).encode())}
+
+    def client(service, region_name=None):
+        assert service == "bedrock-runtime"
+        created.append(region_name)
+        return Client()
+
+    mod = types.ModuleType("boto3")
+    mod.client = client
+    monkeypatch.setitem(sys.modules, "boto3", mod)
+
+    plain = bedrock.BedrockLLMProvider("model-a")
+    assert plain.invoke("sys", "user") == "hello"
+    plain.invoke("sys", "user")
+    assert len(created) == 2
+    assert "temperature" not in bodies[0]
+
+    created.clear()
+    bodies.clear()
+    shared = bedrock.BedrockLLMProvider("model-b", reuse_client=True)
+    errors = []
+
+    def call():
+        try:
+            result = shared.invoke_result("sys", "user", temperature=0)
+            assert result.text == "hello"
+            assert result.usage == {"input_tokens": 8, "output_tokens": 3}
+        except Exception as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=call) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert len(created) == 1
+    assert [body["temperature"] for body in bodies] == [0, 0, 0, 0, 0, 0]
+
+
+def test_dry_run_cost_makes_no_network_call(monkeypatch, study_xlsx, capsys):
+    import urllib.request
+
+    def boom(*_a, **_k):
+        raise AssertionError("network or provider call")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    import socket
+    monkeypatch.setattr(socket, "create_connection", boom)
+    monkeypatch.setattr("llm_provider.get_llm_provider", boom)
+    rc = CF.main([
+        "run", "--xlsx", str(study_xlsx), "--dry-run-cost", "--limit", "2", "--reps", "5",
+        "--input-usd-per-million", "1.5", "--output-usd-per-million", "7.5",
+    ])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["calls"] == 10
+    assert payload["rules"] == 2 and payload["reps"] == 5
+    assert "character_count/4" in payload["estimation_method"]
+    assert "no network" in payload["estimation_method"]
+    assert payload["input_usd"] == pytest.approx(payload["input_tokens_estimate"] / 1_000_000 * 1.5)
+    assert payload["output_tokens_estimate"] == 10 * 512
+    assert payload["total_usd"] == pytest.approx(payload["input_usd"] + payload["output_usd"])
+    err = CF.main(["run", "--xlsx", str(study_xlsx), "--dry-run-cost", "--limit", "1"])
+    assert err == 2 and "no prices are built in" in capsys.readouterr().err
+
+
+def test_cli_live_forces_bedrock_and_records_meta(monkeypatch, study_xlsx, tmp_path, capsys):
+    from llm_provider.base import LLMResult
+
+    seen = {}
+
+    class Provider:
+        provider_name = "bedrock"
+        model_id = "from-provider"
+
+        def invoke_result(self, system_prompt, user_message, max_tokens=512, temperature=None):
+            return LLMResult(
+                text=_rejection("cli"),
+                usage={"input_tokens": 11, "output_tokens": 4},
+            )
+
+    def factory(provider=None, *, model_id=None, reuse_client=False):
+        seen["args"] = (provider, model_id, reuse_client)
+        assert provider == "bedrock"
+        return Provider()
+
+    monkeypatch.setattr("llm_provider.get_llm_provider", factory)
+    out = tmp_path / "out"
+    labels = _labels_file(tmp_path, {})
+    rc = CF.main([
+        "run", "--xlsx", str(study_xlsx), "--live", "--provider", "bedrock",
+        "--model-id", "the-model", "--temperature", "0", "--reps", "2",
+        "--concurrency", "3", "--limit", "2", "--out", str(out),
+        "--labels", str(labels),
+    ])
+    assert rc == 0, capsys.readouterr()
+    assert seen["args"] == ("bedrock", "the-model", True)
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["meta"]["model_id"] == "the-model"
+    assert summary["meta"]["provider"] == "bedrock"
+    assert summary["meta"]["temperature"] == 0
+    assert summary["meta"]["reps"] == 2
+    assert summary["meta"]["prompt_hash"]
+    assert len(summary["meta"]["harness_git_commit"]) >= 7
+    assert summary["meta"]["usage"] == {"input_tokens": 11 * 4, "output_tokens": 4 * 4}
+    assert summary["infraError"] == 0
+    rows = _rows_of(out / "responses.jsonl")
+    assert len({(r["id"], r["rep"]) for r in rows}) == 4
+    blob = "".join(p.read_text() for p in out.rglob("*") if p.is_file())
+    assert R_HEATER not in blob and R_PORCH not in blob
+
+
+def test_non_transient_provider_error_stops_the_run(monkeypatch, study_xlsx, tmp_path, capsys):
+    class Provider:
+        provider_name = "bedrock"
+        model_id = "m"
+
+        def invoke_result(self, *a, **k):
+            raise _AccessDenied("no")
+
+    monkeypatch.setattr("llm_provider.get_llm_provider", lambda *a, **k: Provider())
+    rc = CF.main([
+        "run", "--xlsx", str(study_xlsx), "--live", "--provider", "bedrock",
+        "--limit", "1", "--out", str(tmp_path / "out"),
+        "--labels", str(_labels_file(tmp_path, {})),
+    ])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "not recorded as a compile failure" in err.lower() or "Not recorded as a compile failure" in err
+    # No successful model record was written for the denied call.
+    responses = tmp_path / "out" / "responses.jsonl"
+    if responses.exists():
+        assert responses.read_text().strip() == ""
+
+
+def test_enforceability_skips_infra_envelopes(tmp_path):
+    path = tmp_path / "responses.jsonl"
+    policy = _policy("heater", [("is_home", "==", False)])
+    path.write_text(
+        json.dumps({"id": "a", "rep": 1, "compiled": {"raw": "{}", "parsed": policy, "error_class": None}}) + "\n"
+        + json.dumps({"id": "b", "rep": 1, "compiled": {"raw": None, "parsed": None, "error_class": "infra_error"}}) + "\n"
+        + json.dumps({"id": "c", "rep": 1, "compiled": policy}) + "\n"
+    )
+    items = CF._policies_for_enforceability(None, str(path))
+    assert len(items) == 2
+    assert all(item.get("scope", {}).get("device_type") == "heater" for item in items)
+
+
+def test_service_unavailable_code_is_transient():
+    class Other(Exception):
+        def __init__(self):
+            super().__init__("unavailable")
+            self.response = {"Error": {"Code": "ServiceUnavailable"}}
+
+    assert CF.is_transient(Other())
+    assert CF.is_transient(TimeoutError("timed out"))
+    assert not CF.is_transient(_AccessDenied("no"))
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise Other()
+
+    with pytest.raises(CF.InfraExhausted):
+        CF.call_with_retries(fn, max_attempts=2, sleep=lambda _s: None)
+    assert calls["n"] == 2
 
 
 @needs_git

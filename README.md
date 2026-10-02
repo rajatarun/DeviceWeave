@@ -402,14 +402,18 @@ python scripts/compile_fidelity.py fetch    # -> benchmarks/autotap/_cache/autot
 
 python scripts/compile_fidelity.py list                         # counts only, no compiler
 python scripts/compile_fidelity.py run --responses saved.jsonl  # score saved outputs, offline
-LLM_PROVIDER=bedrock python scripts/compile_fidelity.py run --live --limit 20
 ```
 
-**`--live` is opt-in.** It calls the configured LLM provider through
-`llm_compiler.compile_rule`, which costs money and sends each statement's text
-to that provider. Raw outputs are appended to
-`benchmarks/autotap/_out/responses.jsonl`, so you can re-score them later with
-`--responses`.
+The paper-grade live run (Claude Haiku 4.5, temperature 0, five repetitions,
+no Gemini fallback) is a 20-statement dry run and then the full 690×5 run.
+The exact commands, including `enforceability --detail summary` over the
+saved responses, are in [`benchmarks/autotap/README.md`](benchmarks/autotap/README.md).
+
+**`--live` is opt-in.** It calls the configured LLM, which costs money and
+sends each statement's text to that provider. One JSONL record per statement
+and repetition is appended to `benchmarks/autotap/_out/responses.jsonl`. The
+statement text is not written. Re-score later with `--responses`, or classify
+with `enforceability`.
 
 For each rule, the run records:
 

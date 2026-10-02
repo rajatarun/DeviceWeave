@@ -51,6 +51,7 @@ def _load_api_key(secret_name: str) -> str:
 
 
 class GeminiLLMProvider(BaseLLMProvider):
+    provider_name = "gemini"
     """
     Calls the Gemini generateContent endpoint with a system instruction and
     a single user turn.  Defaults to gemini-3.8-flash but is not hard-pinned
@@ -69,14 +70,18 @@ class GeminiLLMProvider(BaseLLMProvider):
     def model_id(self) -> str:
         return f"gemini/{self._model}"
 
-    def invoke(self, system_prompt: str, user_message: str, max_tokens: int = 512) -> str:
+    def invoke(self, system_prompt: str, user_message: str, max_tokens: int = 512,
+               temperature: Optional[float] = None) -> str:
         api_key = _load_api_key(self._secret_name)
         url = f"{_GEMINI_API_BASE}/{self._model}:generateContent?key={api_key}"
 
+        generation = {"maxOutputTokens": max_tokens}
+        if temperature is not None:
+            generation["temperature"] = temperature
         body = json.dumps({
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_message}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens},
+            "generationConfig": generation,
         }).encode()
 
         req = urllib.request.Request(

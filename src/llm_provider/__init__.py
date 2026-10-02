@@ -84,14 +84,21 @@ def _is_nat_running() -> bool:
     return result
 
 
+def _make_bedrock(model_id: Optional[str] = None, reuse_client: bool = False) -> BaseLLMProvider:
+    """Construct a Bedrock provider. Does not probe the network and does not fall back."""
+    from llm_provider.bedrock import BedrockLLMProvider
+
+    mid = model_id or os.environ.get("LLM_MODEL_ID", _DEFAULT_BEDROCK_MODEL)
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    provider = BedrockLLMProvider(model_id=mid, region=region, reuse_client=reuse_client)
+    logger.info("Bedrock provider initialised: %s", provider.model_id)
+    return provider
+
+
 def _get_bedrock() -> BaseLLMProvider:
     global _bedrock
     if _bedrock is None:
-        from llm_provider.bedrock import BedrockLLMProvider
-        model_id = os.environ.get("LLM_MODEL_ID", _DEFAULT_BEDROCK_MODEL)
-        region = os.environ.get("AWS_REGION", "us-east-1")
-        _bedrock = BedrockLLMProvider(model_id=model_id, region=region)
-        logger.info("Bedrock provider initialised: %s", _bedrock.model_id)
+        _bedrock = _make_bedrock()
     return _bedrock
 
 
@@ -115,14 +122,18 @@ def _get_ollama() -> BaseLLMProvider:
     return _ollama
 
 
-def get_llm_provider() -> BaseLLMProvider:
-    """Return the appropriate LLM provider based on LLM_PROVIDER env var."""
-    provider_type = os.environ.get("LLM_PROVIDER", "auto").lower()
-
+def _provider_for(provider_type: str, *, model_id: Optional[str] = None,
+                  reuse_client: bool = False, forced: bool = False) -> BaseLLMProvider:
     if provider_type == "auto":
         return _get_bedrock() if _is_nat_running() else _get_gemini()
 
     if provider_type == "bedrock":
+        # An explicit bedrock selection never consults the connectivity probe
+        # and never substitutes Gemini. A fresh instance is used when the
+        # caller pins a model id or asks for a shared client, so a benchmark
+        # process does not reuse a provider built for authoring.
+        if forced or model_id is not None or reuse_client:
+            return _make_bedrock(model_id, reuse_client)
         return _get_bedrock()
 
     if provider_type == "gemini":
@@ -134,3 +145,19 @@ def get_llm_provider() -> BaseLLMProvider:
     raise ValueError(
         f"Unknown LLM_PROVIDER={provider_type!r}. Supported: auto, bedrock, gemini, ollama"
     )
+
+
+def get_llm_provider(provider: Optional[str] = None, *, model_id: Optional[str] = None,
+                     reuse_client: bool = False) -> BaseLLMProvider:
+    """Return the LLM provider named by ``provider`` or the LLM_PROVIDER env var.
+
+    ``provider=None`` keeps the historical env-var selection, including the
+    ``auto`` probe. Passing ``provider="bedrock"`` forces Bedrock and does not
+    fall back when the probe would have chosen Gemini.
+    """
+    if provider is not None:
+        return _provider_for(provider.lower(), model_id=model_id,
+                             reuse_client=reuse_client, forced=True)
+    provider_type = os.environ.get("LLM_PROVIDER", "auto").lower()
+    return _provider_for(provider_type, model_id=model_id, reuse_client=reuse_client,
+                         forced=False)

@@ -20,6 +20,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from typing import Optional
 
 from llm_provider.base import BaseLLMProvider
 
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class OllamaLLMProvider(BaseLLMProvider):
+    provider_name = "ollama"
 
     def __init__(self, model: str = "mistral", base_url: str = "http://localhost:11434") -> None:
         self._model = model
@@ -36,7 +38,11 @@ class OllamaLLMProvider(BaseLLMProvider):
     def model_id(self) -> str:
         return f"ollama/{self._model}"
 
-    def invoke(self, system_prompt: str, user_message: str, max_tokens: int = 512) -> str:
+    def invoke(self, system_prompt: str, user_message: str, max_tokens: int = 512,
+               temperature: Optional[float] = None) -> str:
+        options = {"num_predict": max_tokens}
+        if temperature is not None:
+            options["temperature"] = temperature
         payload = {
             "model": self._model,
             "messages": [
@@ -44,7 +50,7 @@ class OllamaLLMProvider(BaseLLMProvider):
                 {"role": "user",   "content": user_message},
             ],
             "stream": False,
-            "options": {"num_predict": max_tokens},
+            "options": options,
         }
         data = json.dumps(payload).encode()
         req = urllib.request.Request(

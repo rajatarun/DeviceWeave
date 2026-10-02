@@ -19,6 +19,7 @@ Design decisions:
 Cost profile: ~300–500 tokens per rule at Sonnet 4.5 rates (~$0.003/call).
 """
 
+import hashlib
 import json
 import logging
 from typing import Any, Dict, Optional
@@ -26,6 +27,8 @@ from typing import Any, Dict, Optional
 from llm_provider import get_llm_provider
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_TOKENS = 512
 
 _SYSTEM_PROMPT = """\
 You are a Policy Compiler for DeviceWeave, an IoT home automation platform.
@@ -128,11 +131,60 @@ Reject when:
 - If confidence would be < 0.85, return the rejection format instead.
 """
 
+# Placeholder ``{rule}`` is the statement. The hash covers this template, not
+# a filled-in statement, so it identifies the prompt rather than the data.
+_USER_TEMPLATE = (
+    'Compile this IoT automation rule into Policy DSL JSON:\n\n'
+    '"{rule}"\n\n'
+    'Return only the raw JSON object — no markdown, no explanation.'
+)
 
-def compile_rule(natural_language_rule: str) -> Optional[Dict[str, Any]]:
+
+def compiler_system_prompt() -> str:
+    return _SYSTEM_PROMPT
+
+
+def render_user_message(natural_language_rule: str) -> str:
+    return _USER_TEMPLATE.format(rule=natural_language_rule.strip())
+
+
+def prompt_hash() -> str:
+    """sha256 of the system prompt plus the user template (placeholder intact)."""
+    material = _SYSTEM_PROMPT + "\n" + _USER_TEMPLATE
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def parse_model_output(text: str) -> Dict[str, Any]:
+    """Parse a compiler response. Raises ``json.JSONDecodeError`` on non-JSON."""
+    if text.startswith("```"):
+        lines = text.splitlines()
+        inner_lines = lines[1:]
+        if inner_lines and inner_lines[-1].strip() == "```":
+            inner_lines = inner_lines[:-1]
+        text = "\n".join(inner_lines).strip()
+
+    raw = json.loads(text)
+
+    # Haiku 4.5 quirk: emits params:{} at top level instead of inside action.
+    if isinstance(raw, dict) and "params" in raw and not raw.get("rejected") and isinstance(raw.get("action"), dict):
+        action = raw["action"]
+        if "params" not in action:
+            action["params"] = raw.pop("params")
+        else:
+            raw.pop("params")
+    if not isinstance(raw, dict):
+        raise json.JSONDecodeError("compiler output is not an object", text, 0)
+    return raw
+
+
+def compile_rule(natural_language_rule: str, *, temperature: Optional[float] = None,
+                 max_tokens: int = DEFAULT_MAX_TOKENS) -> Optional[Dict[str, Any]]:
     """
-    Invoke Claude Sonnet via Bedrock to compile a natural language rule into
+    Invoke the configured LLM to compile a natural language rule into
     Policy DSL JSON.
+
+    ``temperature`` is forwarded only when the caller sets it. The authoring
+    path leaves it unset, so the request body stays what it was before.
 
     Returns the raw parsed JSON dict from the model (not yet validated by the
     validator layer).  Returns None only on hard infrastructure failure
@@ -143,36 +195,16 @@ def compile_rule(natural_language_rule: str) -> Optional[Dict[str, Any]]:
     if not natural_language_rule or not natural_language_rule.strip():
         return {"rejected": True, "reason": "Empty rule text provided.", "confidence": 0.0}
 
-    user_message = (
-        f'Compile this IoT automation rule into Policy DSL JSON:\n\n'
-        f'"{natural_language_rule.strip()}"\n\n'
-        f'Return only the raw JSON object — no markdown, no explanation.'
-    )
+    user_message = render_user_message(natural_language_rule)
 
     try:
         llm = get_llm_provider()
         logger.debug("Policy compiler using provider: %s", llm.model_id)
-        text = llm.invoke(_SYSTEM_PROMPT, user_message, max_tokens=512)
-
-        # Defensively strip markdown code fences in case the model ignores
-        # the instruction (```json ... ``` or ``` ... ```).
-        if text.startswith("```"):
-            lines = text.splitlines()
-            # Drop the opening fence line and the closing fence line
-            inner_lines = lines[1:]
-            if inner_lines and inner_lines[-1].strip() == "```":
-                inner_lines = inner_lines[:-1]
-            text = "\n".join(inner_lines).strip()
-
-        raw = json.loads(text)
-
-        # Haiku 4.5 quirk: emits params:{} at top level instead of inside action.
-        if "params" in raw and not raw.get("rejected") and isinstance(raw.get("action"), dict):
-            action = raw["action"]
-            if "params" not in action:
-                action["params"] = raw.pop("params")
-            else:
-                raw.pop("params")
+        kwargs: Dict[str, Any] = {"max_tokens": max_tokens}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        text = llm.invoke(_SYSTEM_PROMPT, user_message, **kwargs)
+        raw = parse_model_output(text)
 
         logger.info(
             "LLM compiler response: rejected=%s confidence=%s device_type=%s",

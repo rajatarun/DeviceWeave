@@ -69,3 +69,58 @@ messages.
 | `mismatch` | Accepted, but different. `mismatch` lists `device` / `action` / `params` / `conditions` / `needs_multiple_policies` |
 | `policy_expected_but_refused` | A policy was expected, but the compiler, validator or rule-set check refused |
 | `reject_expected_ok` / `reject_expected_but_compiled` | Out-of-scope statement refused, or wrongly accepted |
+
+## Paper-grade live run
+
+Claude Haiku 4.5 on Amazon Bedrock, temperature 0, five repetitions of each
+statement. `--provider bedrock` does not fall back to Gemini. Outputs stay in
+git-ignored `_out/`. Records are keyed by statement id; the statement text is
+not written. An `infra_error` (throttling or a timeout that used every retry)
+is left out of the model-failure rates and is retried by `--resume`.
+
+Price the calls first. No model is contacted. Replace the two prices; none
+are built into the harness. Input tokens are `ceil(character_count/4)` of the
+system prompt plus the filled user message.
+
+```bash
+python scripts/compile_fidelity.py fetch
+
+python scripts/compile_fidelity.py run --dry-run-cost --reps 5 \
+  --input-usd-per-million 1 --output-usd-per-million 5
+```
+
+Twenty-statement dry run, then the full Result sheet (690 statements) at five
+repetitions. `--resume` keeps the twenty that already succeeded.
+
+```bash
+python scripts/compile_fidelity.py run --live \
+  --provider bedrock \
+  --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 \
+  --temperature 0 \
+  --reps 5 \
+  --concurrency 4 \
+  --limit 20 \
+  --out benchmarks/autotap/_out
+
+python scripts/compile_fidelity.py run --live \
+  --provider bedrock \
+  --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 \
+  --temperature 0 \
+  --reps 5 \
+  --concurrency 4 \
+  --resume \
+  --out benchmarks/autotap/_out
+```
+
+`summary.json` records the model id, provider, temperature, reps, `prompt_hash`
+(sha256 of the system prompt, a newline, and the user template with `{rule}`
+still unfilled), the harness git commit, and the summed input and output
+tokens from every record in `responses.jsonl`.
+
+Classify those responses offline. Infrastructure rows are omitted.
+
+```bash
+python scripts/compile_fidelity.py enforceability \
+  --responses benchmarks/autotap/_out/responses.jsonl \
+  --detail summary
+```
