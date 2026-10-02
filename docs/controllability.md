@@ -55,9 +55,29 @@ stay safe by also refusing `turn_on` in legal contexts. That weaker supervisor
 is reported (`blocking_supervisor_exists`, and `minimal_supervisor` on the
 witness). It is not the legal language, so the rule is not guard-enforceable.
 
-Severity on the finding is `info` for `GUARD_ENFORCEABLE` and `warning` for the
-other two. It is never `error`, so authoring still stores the rule. The runtime
-does not install the synthesized supervisor.
+Severity on the finding is `info` for `GUARD_ENFORCEABLE` and `not_computed`,
+and `warning` for the other two. It is never `error`, so authoring still stores
+the rule. The runtime does not install the synthesized supervisor.
+
+`analyze` does not build a plant. `check_new_rule` does, and only when the
+rule being authored is a satisfiable block, and only for that device. Allow
+and modify rules, and invariants of other devices, do not pay for it. The
+request path refuses a plant of more than `REQUEST_MAX_STATES` (2048) states
+or a fixpoint that runs longer than `REQUEST_TIME_BUDGET_S` (0.5 s), and
+returns classification `not_computed` with an empty trace. Those limits were
+chosen from this machine: a four-field plant of four blocks is about 1,250
+states and 0.1 s; five such blocks are about 2,600 states and 0.4 s, and the
+cost then grows like `|Q|²`. 2048 states stays well under a second. The
+offline command and `enforceability()` with no `max_states` have no cap.
+
+The authoring witness has three fields: `classification`, `counts`, and
+`trace` (one path). `witness(full=True)` and
+`compile_fidelity.py enforceability --detail full` add the reachable states
+and the refused events. That listing is not in the authoring response.
+
+An unsatisfiable block (`rule_region` empty, for example `humidity > 100`) is
+not a safety spec. It is omitted. A device left with no satisfiable block or
+invariant is `NO_SAFETY_SPEC` in the benchmark, not `GUARD_ENFORCEABLE`.
 
 ## The heater, under the four assumptions the tests fix
 
@@ -201,7 +221,9 @@ uncontrollable. Static coverage is not controllability.
 supply (`--policies` JSON, or `--responses` JSONL of `{id, compiled}`). It
 does not open the Study 1 workbook and does not call a model. `--live` on
 `run` is the opt-in path that calls the compiler; enforceability has no live
-mode.
+mode. `--detail full` adds each policy's supervisor listing. `--max-states`
+is an optional cap; the default is no cap. CI (`.github/workflows/deploy.yml`)
+does not run pytest.
 
 Shares are of the safety specs in that input (block rules, or policies that
 produce a forbidden state). Allow and modify rules with no forbidden state are

@@ -43,11 +43,16 @@ Findings
   redundant            info     a rule adds nothing: others with the same effect
                                 already cover it
   invariant_violated   error    a stated safety property has a counterexample
-  enforceability       info/    whether the safety language of the blocks (and
-                       warning  invariants) is guard-enforceable, needs a forced
-                                action, or is unenforceable, with a witness trace.
-                                Informational: it does not refuse a rule. The
-                                evaluator is not involved.
+
+``analyze`` does not run the controllability synthesis. ``check_new_rule`` adds
+one ``enforceability`` finding when the rule being authored is a satisfiable
+block, and only for that device. The plant is capped
+(``controllability.REQUEST_MAX_STATES`` / ``REQUEST_TIME_BUDGET_S``). Over the
+cap the finding's classification is ``not_computed`` (severity info) and the
+plant is not built. The uncapped check is ``controllability.enforceability``
+and ``scripts/compile_fidelity.py enforceability``. The finding is
+informational: it does not refuse a rule, and the evaluator is not involved.
+The authoring witness is the classification, summary counts, and one trace.
 """
 from __future__ import annotations
 
@@ -388,42 +393,39 @@ def analyze(rules: Sequence[Dict[str, Any]], invariants: Sequence[Invariant] = (
                 "invariant_violated", "error", [], inv.device_type,
                 f"Invariant '{inv.name}' does not hold: in this context no rule blocks the "
                 f"{inv.device_type} from being switched on.", witness(gaps[0])))
-    findings.extend(_enforceability_findings(by_device, invariants))
     return findings
-
-
-def _enforceability_findings(by_device, invariants: Sequence[Invariant]) -> List[Finding]:
-    """One additive finding per device that has a block or an invariant.
-
-    Severity is info or warning, never error, so authoring still stores the
-    rule. The runtime guard is unchanged; this says whether that guard can
-    enforce the safety language the rules describe.
-    """
-    # Local import: controllability builds plants from this module's domains.
-    from policy_authoring.controllability import enforceability
-
-    devices = set(by_device)
-    for inv in invariants:
-        devices.add(inv.device_type)
-    severity = {"GUARD_ENFORCEABLE": "info", "NEEDS_OBLIGATION": "warning",
-                "UNENFORCEABLE": "warning"}
-    out: List[Finding] = []
-    for dev in sorted(devices):
-        rules = [rule for rule, _region in by_device.get(dev, ())]
-        invs = [inv for inv in invariants if inv.device_type == dev]
-        if not any(_atype(rule) == "block" for rule in rules) and not invs:
-            continue
-        for result in enforceability(rules, invs, device_types=(dev,)):
-            out.append(Finding(
-                "enforceability", severity[result.classification], list(result.rule_ids), dev,
-                result.message, result.witness()))
-    return out
 
 
 def check_new_rule(new_rule: Dict[str, Any], existing: Sequence[Dict[str, Any]],
                    invariants: Sequence[Invariant] = ()) -> List[Finding]:
-    """Findings that involve ``new_rule`` when it is added (as the newest) to ``existing``."""
+    """Findings that involve ``new_rule`` when it is added (as the newest) to ``existing``.
+
+    Controllability runs only for a new satisfiable block, and only for that
+    block's device, under the request-path state cap and time budget. Allow
+    and modify rules do not build a plant. A plant over the cap yields one
+    ``enforceability`` finding whose classification is ``not_computed``.
+    """
     device = _device(new_rule)
     rules = [new_rule] + [r for r in existing if _device(r) == device and _rid(r) != _rid(new_rule)]
     rid = _rid(new_rule)
-    return [f for f in analyze(rules, invariants) if rid in f.rule_ids or f.kind == "invariant_violated"]
+    findings = [f for f in analyze(rules, invariants)
+                if rid in f.rule_ids or f.kind == "invariant_violated"]
+    if _atype(new_rule) != "block" or not rule_region(new_rule):
+        return findings
+    # Local import: controllability builds plants from this module's domains.
+    from policy_authoring.controllability import (
+        NOT_COMPUTED,
+        REQUEST_MAX_STATES,
+        REQUEST_TIME_BUDGET_S,
+        enforceability,
+    )
+    severity = {"GUARD_ENFORCEABLE": "info", "NEEDS_OBLIGATION": "warning",
+                "UNENFORCEABLE": "warning", NOT_COMPUTED: "info"}
+    invs = [inv for inv in invariants if inv.device_type == device]
+    for result in enforceability(
+            rules, invs, device_types=(device,),
+            max_states=REQUEST_MAX_STATES, time_budget_s=REQUEST_TIME_BUDGET_S):
+        findings.append(Finding(
+            "enforceability", severity[result.classification], list(result.rule_ids), device,
+            result.message, result.witness()))
+    return findings

@@ -184,11 +184,14 @@ def test_temperature_threshold_splits_the_domain_and_needs_an_obligation():
 
 def test_analyze_reports_enforceability_without_changing_verdicts():
     rules = [block("heater", [("is_home", "==", False)])]
-    findings = R.analyze(rules)
-    [enf] = [f for f in findings if f.kind == "enforceability"]
+    # analyze() itself does not synthesise. Authoring does, through check_new_rule.
+    assert not [f for f in R.analyze(rules) if f.kind == "enforceability"]
+    [enf] = [f for f in R.check_new_rule(rules[0], []) if f.kind == "enforceability"]
     assert enf.severity == "warning" and enf.rule_ids == ["h"]
+    assert set(enf.witness) == {"classification", "counts", "trace"}
     assert enf.witness["classification"] == NEEDS_OBLIGATION
     assert enf.witness["trace"][-1]["bad"] is True
+    assert "reachable" not in enf.witness and "minimal_supervisor" not in enf.witness
     home = {"temperature": 70, "humidity": 40, "time_hour": 12, "cloud_cover_pct": 10,
             "is_home": True, "is_overcast": False}
     away = dict(home, is_home=False)
@@ -480,3 +483,128 @@ def test_benchmark_shares_on_synthetic_policies_are_labeled_as_such(tmp_path):
     sys.modules["compile_fidelity"] = mod
     spec.loader.exec_module(mod)
     assert mod.main(["enforceability", "--policies", str(path)]) == 0
+
+
+# ── request-path cap, witness size, unsatisfiable blocks ────────────────────
+
+def _fat(n, device="heater", rid_prefix="b"):
+    """n blocks, four numeric conditions each, every threshold distinct."""
+    fields = ("temperature", "humidity", "cloud_cover_pct", "time_hour")
+    span = {"temperature": (-40.0, 110.0), "humidity": (5.0, 95.0),
+            "cloud_cover_pct": (5.0, 95.0), "time_hour": (1.0, 22.0)}
+    rules = []
+    for i in range(n):
+        conds = []
+        for field in fields:
+            lo, hi = span[field]
+            value = lo + (i + 1) * (hi - lo) / (n + 2)
+            if field == "time_hour":
+                value = 1 + (i % 22)
+            conds.append((field, ">", int(value) if field == "time_hour" else round(value, 3)))
+        rules.append(block(device, conds, f"{rid_prefix}{i}"))
+    return rules
+
+
+def test_unsatisfiable_block_is_not_a_safety_spec():
+    rules = [{"rule_id": "imp", "scope": {"device_type": "fan"},
+              "conditions": [{"field": "humidity", "operator": ">", "value": 100}],
+              "action": {"type": "block", "reason": "x", "params": {}}}]
+    assert C.enforceability(rules) == []
+    report = C.benchmark_enforceability(rules)
+    assert report["counts"]["NO_SAFETY_SPEC"] == 1
+    assert report["counts"][GUARD_ENFORCEABLE] == 0
+    # Authoring refuses it as unsatisfiable and does not synthesise.
+    findings = R.check_new_rule(rules[0], [])
+    assert findings[0].kind == "unsatisfiable"
+    assert not [f for f in findings if f.kind == "enforceability"]
+
+
+def test_state_cap_and_time_budget_return_not_computed():
+    capped = C.enforceability(AWAY, max_states=1)[0]
+    assert capped.classification == C.NOT_COMPUTED
+    assert capped.counts["estimated_states"] > 1
+    assert capped.witness_trace == []
+    timed = C.enforceability(AWAY, time_budget_s=0)[0]
+    assert timed.classification == C.NOT_COMPUTED
+    # The same language with no cap is the obligation the other tests describe.
+    assert C.enforceability(AWAY)[0].classification == NEEDS_OBLIGATION
+    # A cap the plant fits under still classifies it.
+    assert C.enforceability(AWAY, max_states=C.REQUEST_MAX_STATES)[0].classification == NEEDS_OBLIGATION
+
+
+def test_summary_witness_omits_the_supervisor_listing():
+    result = C.enforceability(AWAY)[0]
+    assert set(result.witness()) == {"classification", "counts", "trace"}
+    full = result.witness(full=True)
+    assert full["minimal_supervisor"]["reachable"]
+    assert len(full["minimal_supervisor"]["reachable"]) >= result.counts["reachable"]
+
+
+def test_authoring_twenty_blocks_is_not_computed_and_small(author):
+    import time
+    existing = _fat(20)
+    new = _fat(1, rid_prefix="new")[0]
+    new["confidence"] = 0.95
+    started = time.perf_counter()
+    findings = R.check_new_rule(new, existing)
+    elapsed = time.perf_counter() - started
+    [enf] = [f for f in findings if f.kind == "enforceability"]
+    assert enf.severity == "info"
+    assert enf.witness["classification"] == C.NOT_COMPUTED
+    assert enf.witness["counts"]["estimated_states"] > C.REQUEST_MAX_STATES
+    assert enf.witness["trace"] == []
+    assert elapsed < 1.0, elapsed
+    assert len(json.dumps(enf.to_dict())) < 4096
+    # The handler returns that finding, and the body stays small.
+    started = time.perf_counter()
+    status, body, saved = author(new, existing)
+    handler_s = time.perf_counter() - started
+    assert status == 201 and saved
+    assert handler_s < 1.0, handler_s
+    [posted] = [f for f in body["analysis"] if f["kind"] == "enforceability"]
+    assert posted["witness"]["classification"] == C.NOT_COMPUTED
+    assert len(json.dumps(posted)) < 4096
+
+
+def test_allow_against_many_blocks_does_not_synthesise():
+    import time
+    existing = _fat(20)
+    allow = block("heater", [("time_hour", ">=", 20)], "evening")
+    allow["action"] = {"type": "allow", "reason": "r", "params": {}}
+    started = time.perf_counter()
+    findings = R.check_new_rule(allow, existing)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, elapsed
+    assert not [f for f in findings if f.kind == "enforceability"]
+
+
+def test_authoring_does_not_synthesise_another_device():
+    import time
+    heater = _fat(20, device="heater")
+    light = block("light", [("is_home", "==", False)], "porch")
+    started = time.perf_counter()
+    findings = R.check_new_rule(light, heater)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, elapsed
+    [enf] = [f for f in findings if f.kind == "enforceability"]
+    assert enf.device_type == "light"
+    assert enf.witness["classification"] == NEEDS_OBLIGATION
+
+
+def test_computed_finding_stays_under_a_few_kilobytes():
+    rules = _fat(4)
+    findings = R.check_new_rule(rules[0], rules[1:])
+    [enf] = [f for f in findings if f.kind == "enforceability"]
+    assert enf.witness["classification"] != C.NOT_COMPUTED
+    assert enf.witness["trace"]
+    size = len(json.dumps(enf.to_dict()))
+    assert size < 4096, size
+
+
+def test_offline_detail_full_keeps_the_supervisor_listing():
+    policies = _fat(1)
+    summary = C.benchmark_enforceability(policies)
+    assert "policies" not in summary
+    full = C.benchmark_enforceability(policies, detail="full")
+    assert full["policies"][0]["minimal_supervisor"]["reachable"]
+    assert full["counts"]["not_computed"] == 0

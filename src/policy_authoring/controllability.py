@@ -96,6 +96,7 @@ Nothing here changes ``evaluator.py``, the DSL, or BLOCK > MODIFY > ALLOW.
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -107,6 +108,7 @@ from policy_authoring.rule_set_checker import (
     NUMERIC_DOMAINS,
     Interval,
     _TYPICAL,
+    rule_region,
 )
 from policy_engine.evaluator import _SAFE_ACTIONS, _all_conditions_match
 
@@ -114,6 +116,29 @@ from policy_engine.evaluator import _SAFE_ACTIONS, _all_conditions_match
 GUARD_ENFORCEABLE = "GUARD_ENFORCEABLE"
 NEEDS_OBLIGATION = "NEEDS_OBLIGATION"
 UNENFORCEABLE = "UNENFORCEABLE"
+# The plant was over the caller's state cap or time budget. Not a class of the language.
+NOT_COMPUTED = "not_computed"
+
+# Authoring (check_new_rule) uses these. A four-field plant of four blocks is
+# about 1,250 states and ~0.1 s here; five such blocks are ~2,600 states and
+# ~0.4 s, and the cost then grows like |Q|^2. 2,048 states keeps the request
+# path well under a second. The 0.5 s budget is a backstop inside the fixpoint.
+# enforceability() and compile_fidelity.py enforceability pass no cap.
+REQUEST_MAX_STATES = 2048
+REQUEST_TIME_BUDGET_S = 0.5
+
+
+class PlantTooLarge(Exception):
+    """The context product exceeds ``cap`` states. Raised before that product is built."""
+
+    def __init__(self, states: int, cap: int):
+        self.states = states
+        self.cap = cap
+        super().__init__(f"{states} states exceeds cap {cap}")
+
+
+class SynthesisTimeout(Exception):
+    """The safety fixpoint exceeded the caller's time budget."""
 
 # Standard names classified even when a particular plant does not use them.
 _CATALOGUE = (
@@ -237,21 +262,34 @@ class EnforceabilityResult:
     # True when supcon keeps the initial state (a weaker BLOCK supervisor
     # exists, possibly by refusing commands the legal language would allow).
     blocking_supervisor_exists: bool
+    counts: Dict[str, Any] = field(default_factory=dict)
 
-    def witness(self) -> Dict[str, Any]:
+    def witness(self, full: bool = False) -> Dict[str, Any]:
+        """Serialised finding.
+
+        The default is what authoring returns: the classification, summary
+        counts, and one replayable trace. ``full=True`` adds the supervisor
+        listing (every reachable state and every refused event). That listing
+        is for the offline tool and for library callers who ask for it. The
+        authoring response does not.
+        """
+        out: Dict[str, Any] = {
+            "classification": self.classification,
+            "counts": dict(self.counts),
+            "trace": self.witness_trace,
+        }
+        if not full:
+            return out
         bad_ctx = {}
         if self.witness_trace:
             bad_ctx = dict(self.witness_trace[-1].get("state") or {})
-        return {
-            "classification": self.classification,
-            "trace": self.witness_trace,
-            "counterexample_context": {
-                k: v for k, v in bad_ctx.items() if k not in self._devices()
-            },
-            "minimal_supervisor": self.minimal_supervisor,
-            "assumptions": self.assumptions,
-            "blocking_supervisor_exists": self.blocking_supervisor_exists,
+        out["counterexample_context"] = {
+            k: v for k, v in bad_ctx.items() if k not in self._devices()
         }
+        out["minimal_supervisor"] = self.minimal_supervisor
+        out["assumptions"] = self.assumptions
+        out["blocking_supervisor_exists"] = self.blocking_supervisor_exists
+        return out
 
     def _devices(self) -> set:
         return set(self.assumptions.get("device_types") or ())
@@ -311,10 +349,26 @@ def _num(value: Any) -> Optional[float]:
     return v if math.isfinite(v) else None
 
 
+def _satisfiable(conditions: Sequence[Mapping[str, Any]]) -> bool:
+    """False when the conditions match no context in the checker's domains.
+
+    ``rule_region`` is empty for a contradiction (``humidity > 100``) and for
+    an unknown field. A block with no conditions matches every context, and
+    that region is not empty.
+    """
+    return bool(rule_region({"conditions": list(conditions)}))
+
+
 def _spec_items(rules: Sequence[Mapping[str, Any]],
                 invariants: Sequence[Any],
                 device: str) -> List[Tuple[str, List[Dict[str, Any]]]]:
-    """(id, conditions) for every block and invariant of ``device``."""
+    """(id, conditions) for every satisfiable block and invariant of ``device``.
+
+    An unsatisfiable block matches nothing, so it forbids no state. Counting
+    it would report a guard-enforceable language that the rule can never
+    express. ``benchmark_enforceability`` then drops the device as
+    ``NO_SAFETY_SPEC`` when nothing satisfiable remains.
+    """
     items = []
     for rule in rules:
         scope = rule.get("scope") or {}
@@ -323,14 +377,20 @@ def _spec_items(rules: Sequence[Mapping[str, Any]],
             continue
         if str((rule.get("action") or {}).get("type")) != "block":
             continue
-        items.append((str(rule.get("rule_id", "?")), list(rule.get("conditions") or [])))
+        conds = list(rule.get("conditions") or [])
+        if not _satisfiable(conds):
+            continue
+        items.append((str(rule.get("rule_id", "?")), conds))
     for inv in invariants:
         dev = inv.device_type if hasattr(inv, "device_type") else inv.get("device_type")
         if dev != device:
             continue
         conds = inv.conditions if hasattr(inv, "conditions") else inv.get("conditions") or ()
+        conds = [dict(c) for c in conds]
+        if not _satisfiable(conds):
+            continue
         name = inv.name if hasattr(inv, "name") else inv.get("name", "invariant")
-        items.append((str(name), [dict(c) for c in conds]))
+        items.append((str(name), conds))
     return items
 
 
@@ -480,7 +540,8 @@ def build_plant(device_types: Sequence[str],
                 invariants: Sequence[Any] = (),
                 manual_on: bool = False,
                 precursor: bool = False,
-                initial_modes: Optional[Mapping[str, str]] = None) -> Plant:
+                initial_modes: Optional[Mapping[str, str]] = None,
+                max_states: Optional[int] = None) -> Plant:
     """Plant whose state is device mode × the spec's own context cells.
 
     ``domains`` defaults to ``rule_set_checker.NUMERIC_DOMAINS`` and
@@ -515,6 +576,11 @@ def build_plant(device_types: Sequence[str],
     all_items = [it for d in devices for it in items_by_device[d]] + cut_items
     fields = _fields_of(all_items)
     axes = tuple(_axis(f, all_items, precursor and f == "is_home") for f in fields)
+    n_states = 2 ** len(devices)
+    for axis in axes:
+        n_states *= max(1, len(axis))
+    if max_states is not None and n_states > max_states:
+        raise PlantTooLarge(n_states, max_states)
 
     # Context index space.
     if axes:
@@ -694,7 +760,8 @@ def state_dict(plant: Plant, state: State) -> Dict[str, Any]:
 # Synthesis — safety fixpoint (Algorithm 1, prefix-closed case)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _synthesize(plant: Plant, bad: Iterable[State], use_forcing: bool) -> Synthesis:
+def _synthesize(plant: Plant, bad: Iterable[State], use_forcing: bool,
+                deadline: Optional[float] = None) -> Synthesis:
     """Largest subset of the legal states that is safe under the mechanism.
 
     Legal states start as ``plant.states - bad``. A state is removed when
@@ -709,9 +776,13 @@ def _synthesize(plant: Plant, bad: Iterable[State], use_forcing: bool) -> Synthe
     Q = set(plant.states) - bad_set
     removed_because: Dict[State, Tuple[str, State]] = {}
     while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SynthesisTimeout()
         forced: Dict[State, Tuple[str, str]] = {}
         remove = []
         for q in Q:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise SynthesisTimeout()
             escapes = []
             for name, ev, tgt in plant.successors(q):
                 if ev.controllable:
@@ -808,20 +879,25 @@ def _reach(plant: Plant, initial: State, enabled: frozenset,
     return frozenset(seen), safe
 
 
-def supcon(plant: Plant, bad: Optional[Iterable[State]] = None) -> Synthesis:
+def supcon(plant: Plant, bad: Optional[Iterable[State]] = None,
+           deadline: Optional[float] = None) -> Synthesis:
     """Supremal controllable sublanguage for a prefix-closed safety spec.
 
     ``bad`` defaults to ``plant.bad``. Passing a larger set re-solves a
     tighter spec (used for monotonicity and idempotence). Forcing flags are
     ignored, which is Reniers and Cai, Remark 2: Algorithm 1 with an empty
-    forcible set is ordinary supervisory control.
+    forcible set is ordinary supervisory control. ``deadline`` is a
+    ``time.monotonic`` instant; passing it raises ``SynthesisTimeout``.
     """
-    return _synthesize(plant, set(plant.bad if bad is None else bad), use_forcing=False)
+    return _synthesize(plant, set(plant.bad if bad is None else bad), use_forcing=False,
+                       deadline=deadline)
 
 
-def supcon_forcing(plant: Plant, bad: Optional[Iterable[State]] = None) -> Synthesis:
+def supcon_forcing(plant: Plant, bad: Optional[Iterable[State]] = None,
+                   deadline: Optional[float] = None) -> Synthesis:
     """Supremal forcibly-controllable sublanguage, safety case of Algorithm 1."""
-    return _synthesize(plant, set(plant.bad if bad is None else bad), use_forcing=True)
+    return _synthesize(plant, set(plant.bad if bad is None else bad), use_forcing=True,
+                       deadline=deadline)
 
 
 def reaches_bad(plant: Plant, synthesis: Synthesis) -> bool:
@@ -1040,19 +1116,53 @@ def _presence_home(state: Mapping[str, Any]) -> bool:
     return home is True or home == "home"
 
 
+def _empty_synthesis() -> Synthesis:
+    return Synthesis(
+        good=frozenset(), forcing=frozenset(), enabled=frozenset(), disabled=frozenset(),
+        reachable=frozenset(), retains_legal=False, retains_initial=False, closed_loop_safe=False,
+    )
+
+
+def _limit_result(dev: str, rule_ids: Sequence[str], message: str,
+                  counts: Dict[str, Any], manual_on: bool, precursor: bool) -> EnforceabilityResult:
+    empty = _empty_synthesis()
+    return EnforceabilityResult(
+        classification=NOT_COMPUTED,
+        device_type=dev,
+        rule_ids=list(rule_ids),
+        witness_trace=[],
+        minimal_supervisor={},
+        message=message,
+        assumptions={"manual_on": manual_on, "precursor": precursor, "device_types": [dev]},
+        guard=empty,
+        forcing=empty,
+        blocking_supervisor_exists=False,
+        counts=counts,
+    )
+
+
 def enforceability(rule_set: Sequence[Mapping[str, Any]],
                    invariants: Sequence[Any] = (),
                    manual_on: bool = False,
                    precursor: bool = False,
                    device_types: Optional[Sequence[str]] = None,
                    discretisation: Optional[Mapping[str, Sequence[float]]] = None,
+                   *,
+                   max_states: Optional[int] = None,
+                   time_budget_s: Optional[float] = None,
                    ) -> List[EnforceabilityResult]:
     """Classify each device's safety language.
 
     A device is included when it has a satisfiable block in ``rule_set`` or
-    an invariant. Allow and modify rules do not define a forbidden state.
-    Returns one result per such device. Assumptions (``manual_on``,
-    ``precursor``) are part of the result: they are not DSL fields.
+    a satisfiable invariant. Allow and modify rules do not define a forbidden
+    state. An unsatisfiable block is skipped. Returns one result per such
+    device. Assumptions (``manual_on``, ``precursor``) are part of the result:
+    they are not DSL fields.
+
+    ``max_states`` and ``time_budget_s`` are optional. When either is hit the
+    result is ``not_computed`` and the plant is not finished. The authoring
+    path passes :data:`REQUEST_MAX_STATES` and :data:`REQUEST_TIME_BUDGET_S`.
+    The default, used by the offline tool, is no cap.
     """
     devices: List[str] = []
     if device_types:
@@ -1071,11 +1181,44 @@ def enforceability(rule_set: Sequence[Mapping[str, Any]],
         items = _spec_items(rule_set, invariants, dev)
         if not items:
             continue
-        plant = build_plant((dev,), rules=rule_set, invariants=invariants,
-                            discretisation=discretisation, manual_on=manual_on,
-                            precursor=precursor)
-        guard = supcon(plant)
-        forced = supcon_forcing(plant)
+        ids = [item_id for item_id, _conds in items]
+        if time_budget_s is not None and time_budget_s <= 0:
+            results.append(_limit_result(
+                dev, ids,
+                f"{dev}: not_computed. The request-path time budget is "
+                f"{time_budget_s}s, so the plant was not built. "
+                f"Run enforceability() or compile_fidelity.py enforceability with no budget.",
+                {"time_budget_s": time_budget_s, "state_cap": max_states},
+                manual_on, precursor,
+            ))
+            continue
+        try:
+            plant = build_plant((dev,), rules=rule_set, invariants=invariants,
+                                discretisation=discretisation, manual_on=manual_on,
+                                precursor=precursor, max_states=max_states)
+            deadline = None if time_budget_s is None else time.monotonic() + time_budget_s
+            guard = supcon(plant, deadline=deadline)
+            forced = supcon_forcing(plant, deadline=deadline)
+        except PlantTooLarge as exc:
+            results.append(_limit_result(
+                dev, ids,
+                f"{dev}: not_computed. The controllability plant has {exc.states} states, "
+                f"over the cap of {exc.cap}. The offline enforceability command runs this "
+                f"check with no cap.",
+                {"estimated_states": exc.states, "state_cap": exc.cap,
+                 "time_budget_s": time_budget_s},
+                manual_on, precursor,
+            ))
+            continue
+        except SynthesisTimeout:
+            results.append(_limit_result(
+                dev, ids,
+                f"{dev}: not_computed. Synthesis exceeded the time budget of {time_budget_s}s. "
+                f"The offline enforceability command runs this check with no budget.",
+                {"time_budget_s": time_budget_s, "state_cap": max_states},
+                manual_on, precursor,
+            ))
+            continue
         classification = _classify(guard, forced)
         # The supervisor we would actually ship: the guard when it realizes
         # the legal language, otherwise the forcing supervisor when that does,
@@ -1101,6 +1244,14 @@ def enforceability(rule_set: Sequence[Mapping[str, Any]],
             guard=guard,
             forcing=forced,
             blocking_supervisor_exists=bool(guard.retains_initial and guard.closed_loop_safe),
+            counts={
+                "states": len(plant.states),
+                "bad": len(plant.bad),
+                "legal": len(plant.states) - len(plant.bad),
+                "reachable": len(chosen.reachable),
+                "disabled": len(chosen.disabled),
+                "forcing_states": len(chosen.forcing),
+            },
         ))
     return results
 
@@ -1108,18 +1259,26 @@ def enforceability(rule_set: Sequence[Mapping[str, Any]],
 def benchmark_enforceability(policies: Sequence[Mapping[str, Any]],
                              *,
                              manual_on: bool = False,
-                             precursor: bool = False) -> Dict[str, Any]:
+                             precursor: bool = False,
+                             max_states: Optional[int] = None,
+                             time_budget_s: Optional[float] = None,
+                             detail: str = "summary") -> Dict[str, Any]:
     """Share of compiled policies in each enforceability class.
 
     Policies that are refusals, or that are allow/modify rules with no
-    forbidden state, are counted apart from the three classes. Shares of the
-    safety specs are the headline numbers. This function does not fetch or
-    read the AutoTap workbook and does not call a model.
+    forbidden state, are counted apart from the three classes. An
+    unsatisfiable block is ``NO_SAFETY_SPEC``. Shares of the safety specs are
+    the headline numbers. This function does not fetch or read the AutoTap
+    workbook and does not call a model.
+
+    There is no state cap unless ``max_states`` is passed. ``detail="full"``
+    adds each safety spec's supervisor listing; ``"summary"`` does not.
     """
     counts = {GUARD_ENFORCEABLE: 0, NEEDS_OBLIGATION: 0, UNENFORCEABLE: 0,
-              "NO_SAFETY_SPEC": 0, "NOT_COMPILED": 0}
+              NOT_COMPUTED: 0, "NO_SAFETY_SPEC": 0, "NOT_COMPILED": 0}
     blocking = 0
     safety = 0
+    rows: List[Dict[str, Any]] = []
     for policy in policies:
         if not isinstance(policy, Mapping) or policy.get("rejected") is True:
             counts["NOT_COMPILED"] += 1
@@ -1127,21 +1286,26 @@ def benchmark_enforceability(policies: Sequence[Mapping[str, Any]],
         if "scope" not in policy or "action" not in policy:
             counts["NOT_COMPILED"] += 1
             continue
-        results = enforceability([policy], manual_on=manual_on, precursor=precursor)
+        results = enforceability([policy], manual_on=manual_on, precursor=precursor,
+                                 max_states=max_states, time_budget_s=time_budget_s)
         if not results:
             counts["NO_SAFETY_SPEC"] += 1
             continue
         # One compiled policy has one device.
-        cls = results[0].classification
-        counts[cls] += 1
-        safety += 1
-        if results[0].blocking_supervisor_exists:
-            blocking += 1
+        result = results[0]
+        cls = result.classification
+        counts[cls] = counts.get(cls, 0) + 1
+        if cls != NOT_COMPUTED:
+            safety += 1
+            if result.blocking_supervisor_exists:
+                blocking += 1
+        if detail == "full":
+            rows.append({"rule_id": policy.get("rule_id"), **result.witness(full=True)})
 
     def share(n: int, d: int) -> Optional[float]:
         return round(n / d, 4) if d else None
 
-    return {
+    report = {
         "counts": counts,
         "safetySpecs": safety,
         "sharesOfSafetySpecs": {
@@ -1150,8 +1314,12 @@ def benchmark_enforceability(policies: Sequence[Mapping[str, Any]],
             UNENFORCEABLE: share(counts[UNENFORCEABLE], safety),
         },
         "blockingSupervisorAmongSafetySpecs": share(blocking, safety),
-        "assumptions": {"manual_on": manual_on, "precursor": precursor},
+        "assumptions": {"manual_on": manual_on, "precursor": precursor,
+                        "max_states": max_states, "time_budget_s": time_budget_s},
         "corpus": "caller-supplied policies",
         "note": ("Shares are computed from the policies passed in. They are not "
                  "AutoTap Study 1 results unless those compiled policies were supplied."),
     }
+    if detail == "full":
+        report["policies"] = rows
+    return report

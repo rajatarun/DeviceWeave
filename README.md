@@ -446,12 +446,16 @@ The offline checker adds one `enforceability` finding per device. It does not ch
 | `GUARD_ENFORCEABLE` | A BLOCK-only supervisor realizes the legal language. |
 | `NEEDS_OBLIGATION` | Blocking alone does not. A forced `turn_off` does (for example at a departure). |
 | `UNENFORCEABLE` | An uncontrollable event reaches a forbidden state and nothing can preempt it. |
+| `not_computed` | The authoring plant exceeded its state cap or time budget. The rule is still stored. |
+
+Authoring runs this check only when the new rule is a satisfiable block, and only for that device, with a cap of 2048 states and a 0.5 s budget. The response witness is the classification, summary counts, and one trace. The full supervisor listing is offline:
 
 ```bash
 python scripts/compile_fidelity.py enforceability --policies policies.json
+python scripts/compile_fidelity.py enforceability --policies policies.json --detail full
 ```
 
-That command classifies policies you pass in. It does not download Study 1 and it does not call a model. Feeding it compiled Study 1 policies is how the three shares would be computed for that corpus; this repository does not ship those policies or those shares. The model, the assumptions, and which theorem statements were checked against the papers are in [`docs/controllability.md`](docs/controllability.md).
+That command classifies policies you pass in, with no state cap unless you pass `--max-states`. It does not download Study 1 and it does not call a model. Feeding it compiled Study 1 policies is how the three shares would be computed for that corpus; this repository does not ship those policies or those shares. The model, the assumptions, and which theorem statements were checked against the papers are in [`docs/controllability.md`](docs/controllability.md).
 
 ### Runtime enforcement (Policy Engine)
 

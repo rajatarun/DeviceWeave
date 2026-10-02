@@ -8,8 +8,11 @@ python3 -m pytest -q     # 169 passed, 5 skipped, in a couple of seconds
 its bare name (`import app`, `import decision_engine`, …), exactly as the
 Lambda runtime sees it. No `pip install -r src/requirements.txt` is required
 to run the suite — `tests/conftest.py` stubs every network/AWS-touching
-dependency (see below), and `requirements-dev.txt` lists the only two
-packages actually needed (`pytest`, `boto3`).
+dependency (see below), and `requirements-dev.txt` lists the packages the
+suite imports (`pytest`, `boto3`, `hypothesis`).
+
+CI does not run pytest. `.github/workflows/deploy.yml` builds and deploys on
+push to `main`; it has no test job. Run the suite locally before merging.
 
 ## What's covered
 

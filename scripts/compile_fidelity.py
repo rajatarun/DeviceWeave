@@ -901,6 +901,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="assume an uncontrollable physical switch-on in every context")
     e.add_argument("--precursor", action="store_true",
                    help="assume an uncontrollable depart event between home and away")
+    e.add_argument("--detail", choices=("summary", "full"), default="summary",
+                   help="summary is class shares; full adds each policy's supervisor listing")
+    e.add_argument("--max-states", type=int, default=None,
+                   help="optional plant-size cap (default: none). Authoring uses its own smaller cap")
     args = ap.parse_args(argv)
 
     try:
@@ -914,7 +918,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             from policy_authoring.controllability import benchmark_enforceability
             policies = _policies_for_enforceability(args.policies, args.responses)
             report = benchmark_enforceability(
-                policies, manual_on=args.manual_on, precursor=args.precursor)
+                policies, manual_on=args.manual_on, precursor=args.precursor,
+                max_states=args.max_states, detail=args.detail)
             print("caller-supplied policies; not an AutoTap Study 1 result", file=sys.stderr)
             print(json.dumps(report, indent=2))
             return 0
