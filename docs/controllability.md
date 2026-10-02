@@ -231,9 +231,32 @@ uncontrollable. Static coverage is not controllability.
 supply (`--policies` JSON, or `--responses` JSONL of `{id, compiled}`). It
 does not open the Study 1 workbook and does not call a model. `--live` on
 `run` is the opt-in path that calls the compiler; enforceability has no live
-mode. `--detail full` adds each policy's supervisor listing. `--max-states`
-is an optional cap; the default is no cap. CI (`.github/workflows/deploy.yml`)
-does not run pytest.
+mode. `--detail summary` prints class shares; `--detail full` adds each
+policy's supervisor listing. `--max-states` is an optional cap; the default
+is no cap. CI (`.github/workflows/deploy.yml`) does not run pytest.
+
+A paper-grade Study 1 compile is Claude Haiku 4.5 on Bedrock, temperature 0,
+five repetitions. `--provider bedrock` does not fall back to another provider.
+Start with twenty statements, then the full 690 with `--resume` so those
+twenty are kept. Throttling that exhausts retries is an `infra_error`: it is
+not a compile failure, and `--resume` retries it.
+
+```bash
+python scripts/compile_fidelity.py run --live \
+  --provider bedrock \
+  --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 \
+  --temperature 0 --reps 5 --concurrency 4 --limit 20 \
+  --out benchmarks/autotap/_out
+
+python scripts/compile_fidelity.py run --live \
+  --provider bedrock \
+  --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 \
+  --temperature 0 --reps 5 --concurrency 4 --resume \
+  --out benchmarks/autotap/_out
+
+python scripts/compile_fidelity.py enforceability \
+  --responses benchmarks/autotap/_out/responses.jsonl --detail summary
+```
 
 Shares are of the safety specs in that input (block rules, or policies that
 produce a forbidden state). Allow and modify rules with no forbidden state are
