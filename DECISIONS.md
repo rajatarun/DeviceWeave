@@ -406,3 +406,17 @@ The AutoTap repository is GPL-3.0, and no separate data licence was found. So:
 - a test fails if any spreadsheet is ever tracked.
 
 The `.xlsx` is read with the stdlib zip/XML parser, because the format is three XML parts. The compiler mode is explicit: `--responses` scores saved outputs offline, and `--live` is an opt-in paid call that sends the statements to the configured provider. Unlabelled statements are reported as `unlabeled`, never as failures, so the harness is useful before anyone has labelled anything.
+
+## 35. Enforceability measured on hand-coded properties, not on compiled policies
+
+**Chosen**: two independent coders formalise each AutoTap Study 1 statement with a DSL-independent codebook built on AutoTap's own templates (`docs/paper/codebook.md`). `scripts/property_coding.py` turns each code into a small abstract plant and classifies it with `controllability.supcon_forcing`, under five enforcement architectures and four assumption sets.
+**Rejected**: computing enforceability shares from compiled policies (only the few statements the five-device DSL can express ever get that far); keyword tags as ground truth; an LLM standing in for either human coder.
+
+A share computed from compiled policies measures the compiler and the DSL, not what people ask for. The coded property is the only input independent of both.
+
+The abstraction is deliberate and stated in the codebook:
+- one boolean for the target and one for the condition;
+- a 0–2 duration counter;
+- one step of grace after an uncontrollable change ("reaction"), which can be switched off.
+
+Outcomes distinguish *exact* from *preemptive* (forcing before anything happened) and *over-restrictive* (safe only by refusing what the property allows). A refusal-only guard is never credited with a property it can only satisfy by also refusing commands the user allowed. The paper draft holds placeholders only, and a test fails if one names a key the analysis does not produce.
