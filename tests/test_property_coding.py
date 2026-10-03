@@ -55,6 +55,9 @@ ALARM_BY_WORLD = code(kind="event", modality="never", named_polarity="on",
 LOCK_AFTER_LEAVING = code(kind="event", modality="always", named_polarity="off", target_class="lock",
                           target_actor="system", condition="presence", condition_actor="world",
                           within_after=True)
+# A room drifts above the bound by itself; only something that can cool it repairs that.
+THERMOSTAT_CAP = code(kind="state", modality="never", named_polarity="on", target_class="thermostat",
+                      target_actor="mixed", condition="none")
 FRIDGE_ALWAYS_ON = code(kind="state", modality="always", named_polarity="on",
                         target_class="kitchen_appliance", target_actor="system", condition="none")
 NOT_A_PROPERTY = PC.validate_code({"scope": "not_a_property", "not_property_reason": "about_product"}, "t")
@@ -81,6 +84,7 @@ EXPECTED_DEFAULT = {
     "alarm_world": (ALARM_BY_WORLD, ("impossible",) * 5),
     "lock_after_leaving": (LOCK_AFTER_LEAVING, ("over_restrictive", "over_restrictive", "exact", "exact", "exact")),
     # Only a guard that may refuse turn-off keeps it on; DeviceWeave never refuses turn-off.
+    "thermostat_cap": (THERMOSTAT_CAP, ("impossible", "impossible", "exact", "exact", "exact")),
     "fridge_on": (FRIDGE_ALWAYS_ON, ("impossible", "exact", "impossible", "exact", "exact")),
 }
 
@@ -318,7 +322,9 @@ def test_the_draft_only_uses_keys_analyze_produces():
     b = {ids[0]: HEATER_AWAY, ids[1]: LOCKED_AWAY, ids[2]: NOT_A_PROPERTY}
     rows = {ids[0]: {"id": ids[0], "compile": "compiled", "valid": True, "accepted": True},
             ids[1]: {"id": ids[1], "compile": "refused", "valid": False, "accepted": False}}
-    res = PC.analyze(a, rows, total_statements=690, agreement_report=PC.agreement(a, b))
+    ver = PC.verification({rid: {"code": c, "blind": rid == ids[0]} for rid, c in a.items()}, b, [ids[0]])
+    res = PC.analyze(a, rows, total_statements=690, agreement_report=PC.agreement(a, b),
+                     verification_report=ver["verification"])
     _text, missing = PC.render((ROOT / "docs" / "paper" / "draft.md").read_text(), res)
     assert not missing, f"draft.md uses keys analyze does not produce: {sorted(set(missing))}"
 
@@ -334,3 +340,59 @@ def test_cli_analyze_and_render(tmp_path, capsys):
     rendered = tmp_path / "r.md"
     assert PC.main(["render", str(out), "--template", str(tpl), "--out", str(rendered)]) == 0
     assert rendered.read_text() == "guard misses 100.0%"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Human verification of LLM codes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _verification_fixture():
+    ids = _ids(4)
+    llm = {ids[0]: HEATER_AWAY, ids[1]: PORCH_DARK, ids[2]: LOCKED_AWAY, ids[3]: NOT_A_PROPERTY}
+    answers = {
+        ids[0]: {"code": HEATER_AWAY, "blind": True, "seconds": 20},                       # blind, agrees
+        ids[1]: {"code": {**PORCH_DARK, "condition": "weather"}, "blind": True, "seconds": 30},  # blind, differs
+        ids[2]: {"code": {**LOCKED_AWAY, "duration": True}, "blind": False, "seconds": 5},  # suggestion changed
+        ids[3]: {"code": NOT_A_PROPERTY, "blind": False, "seconds": 3},                    # suggestion kept
+    }
+    return ids, llm, answers
+
+
+def test_verification_gives_gold_blind_agreement_and_change_rates():
+    ids, llm, answers = _verification_fixture()
+    res = PC.verification(answers, llm, blind_ids=[ids[0], ids[1]])
+    assert res["gold"][ids[1]]["condition"] == "weather"          # the human's answer wins
+    ag = res["agreement"]
+    assert ag["n"] == 2 and ag["fields"]["condition"]["percentAgreement"] == 0.5
+    ver = res["verification"]
+    assert ver["blindAnswered"] == 2 and ver["suggestionsAnswered"] == 2
+    assert ver["suggestionsChanged"]["k"] == 1
+    assert ver["changedByField"]["duration"]["k"] == 1 and ver["changedByField"]["kind"]["k"] == 0
+
+
+def test_verification_refuses_a_blind_flag_that_disagrees_with_the_list():
+    ids, llm, answers = _verification_fixture()
+    with pytest.raises(PC.CodingError, match="blind"):
+        PC.verification(answers, llm, blind_ids=[ids[0]])
+
+
+def test_answers_load_from_an_export_directory_in_either_shape(tmp_path):
+    ids, _llm, answers = _verification_fixture()
+    d = tmp_path / "answers"
+    d.mkdir()
+    (d / f"{ids[0]}.json").write_text(json.dumps(answers[ids[0]]))                         # raw document
+    (d / "x.json").write_text(json.dumps({"id": ids[1], "version": 3, "data": answers[ids[1]]}))  # wrapped
+    loaded = PC.load_answers(d)
+    assert set(loaded) == {ids[0], ids[1]} and loaded[ids[1]]["blind"] is True
+    (d / "bad.json").write_text(json.dumps({"id": ids[2], "data": {"code": {"scope": "maybe"}}}))
+    with pytest.raises(PC.CodingError):
+        PC.load_answers(d)
+
+
+def test_frozen_llm_codes_cover_the_corpus_and_hold_no_text():
+    path = ROOT / "benchmarks" / "autotap" / "coding" / "llm.json"
+    loaded = PC.load_codes(path)
+    assert loaded["coder"] == "llm" and len(loaded["codes"]) == 690
+    blind = json.loads((ROOT / "benchmarks" / "autotap" / "coding" / "blind_ids.json").read_text())
+    assert len(blind["ids"]) == 138 and set(blind["ids"]) <= set(loaded["codes"])
+    assert all(set(c) <= PC.CODE_KEYS and "note" not in c for c in loaded["codes"].values())

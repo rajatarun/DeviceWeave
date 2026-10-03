@@ -1,4 +1,4 @@
-# Codebook: formalising AutoTap Study 1 statements (v1.0)
+# Codebook: formalising AutoTap Study 1 statements (v1.1)
 
 This codebook turns each Study 1 statement into a small formal property that
 does not depend on DeviceWeave's DSL. Two people code every statement
@@ -8,7 +8,8 @@ number in the paper comes from.
 
 Freeze this file before coding starts: record the commit hash in the paper. A
 change after the pilot creates a new version, and statements coded under the
-old version are re-checked.
+old version are re-checked. v1.1 added the `mixed` actor and the rule for
+regulated quantities, before any statement was coded.
 
 The dataset is Study 1 of AutoTap (Zhang, He, Martinez, Brackenbury, Lu, Ur,
 ICSE 2019, <https://ieeexplore.ieee.org/abstract/document/8811900>; data at
@@ -67,6 +68,12 @@ Every device state is classed by direction:
 - **on-direction**: on, open, unlocked, running, playing.
 - **off-direction**: off, closed, locked, stopped, idle.
 
+A regulated quantity (temperature, humidity, water level): the named state
+is the side of the bound the statement names, and "high" is on-direction.
+"Never above 80" names *above 80* → `on`, `never`. "Always above 15" names
+*above 15* → `on`, `always`. Its target is the regulating device
+(`thermostat`, `kitchen_appliance`, …) with `target_actor: mixed`.
+
 Security devices: "armed" counts as on-direction for an alarm or camera
 (arming is an activation). Code the polarity of the state *the statement
 names*. "Keep the side gate latched" → `off`. "The porch light should
@@ -84,7 +91,8 @@ be on after dark" → `on`.
 
 | Value | Meaning | Example |
 |---|---|---|
-| `system` | A smart-home system can command it | smart lock, smart plug, connected light |
+| `system` | A smart-home system can command it, and nothing else changes it | smart lock, smart plug, connected light |
+| `mixed` | The system can command it, and the world or a person also changes it on their own | room or fridge temperature, humidity, a smart faucet also turned by hand |
 | `human` | Only a person, by hand | an ordinary window, a non-smart door |
 | `world` | Nobody; it changes by itself | the temperature, a sensor reading |
 

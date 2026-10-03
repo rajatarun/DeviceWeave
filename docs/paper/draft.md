@@ -2,7 +2,8 @@
 Workshop-length draft. Every number is a double-brace placeholder filled by
 
     python scripts/property_coding.py analyze GOLD.json --rows ROWS.jsonl \
-        --agreement AGREEMENT.json --total 690
+        --agreement agreement.json \
+        --verification verification.json --total 690
     python scripts/property_coding.py render benchmarks/autotap/_out/coding/results.json
 
 Do not type a result into this file by hand. tests/test_property_coding.py fails
@@ -21,8 +22,10 @@ command, but it never acts by itself. We ask how much of what people actually
 want from their homes such a guard can enforce. We formalise the
 {{statementsTotal}} statements written by participants in AutoTap's first user
 study (Zhang et al., ICSE 2019) into a DSL-independent property language based
-on AutoTap's own templates, with two independent coders (Cohen's κ for the
-property kind {{agreement.fields.kind.kappa|f2}}). For each property we
+on AutoTap's own templates. An LLM coded every statement and a human
+verified every code; on a blind {{verification.blindAnswered}}-statement subset
+the human coded without seeing the LLM's answer (Cohen's κ for the property
+kind {{agreement.fields.kind.kappa|f2}}). For each property we
 compute, by supervisory control with event forcing, whether five enforcement
 architectures can guarantee it. Under our default assumptions, a refusal-only
 guard of the kind deployed in DeviceWeave exactly enforces only
@@ -48,8 +51,9 @@ nothing fails, nothing logs. -->
 Contributions:
 
 1. A DSL-independent coding of {{statementsCoded}} user-written smart-home
-   statements into AutoTap-style properties, with inter-coder reliability, released
-   as position-keyed codes (the statements themselves are not redistributed).
+   statements into AutoTap-style properties, LLM-coded and human-verified with a
+   blind reliability subset, released as position-keyed codes (the statements
+   themselves are not redistributed).
 2. An enforceability classification of every coded property under five
    enforcement architectures, computed with forcible supervisory control
    (Reniers and Cai) rather than argued case by case, with sensitivity to two
@@ -83,15 +87,22 @@ participant, each labelled by its author as something that should *always* or
 *never* happen, with a flag for exceptions. The file is fetched at a pinned
 commit and checked by SHA-256; it is not redistributed.
 
-**Coding.** Two coders independently code every statement with a codebook
-(`docs/paper/codebook.md`, v1.0, frozen at commit [COMMIT]) after a pilot of
-[N] statements. Fields: scope (property or not), kind (state, state pair,
+**Coding.** An LLM ([MODEL]) coded every statement with a codebook
+(`docs/paper/codebook.md`, v1.1); its codes were committed before any human
+saw them ([COMMIT]). One author then verified every code in a survey that
+shows one statement at a time. For a seeded random 20% the LLM's answer was
+hidden and the author coded from scratch; for the rest it was pre-selected and
+the author confirmed or changed each field. The verified codes are the ground
+truth. Fields: scope (property or not), kind (state, state pair,
 event), modality, the polarity of the named state, the target device class and
 who can change it (system, human, world), the condition and who can change it,
 and modifiers (duration, within-after, multiple conditions, an exception in the
-text, whether the statement fits one AutoTap template exactly). Disagreements
-are adjudicated by [ADJUDICATOR]. Agreement is reported per field and on the
-derived enforceability outcome.
+text, whether the statement fits one AutoTap template exactly). We report
+human–LLM agreement on the blind subset per field and on the derived
+enforceability outcome, and how often each pre-selected field was changed.
+Pre-selection anchors a verifier toward the suggestion, so the change rate is
+a lower bound on LLM error, and only the blind subset estimates it without
+that bias.
 
 **From a coded property to a plant.** Each property becomes a small plant: a
 boolean for the target being in its on-direction state, a boolean for the
@@ -127,13 +138,14 @@ and {{kind.event|pct}} an event; {{duration|pct}} bound a duration.
 {{fitsDeviceweaveDsl|pct}} {{fitsDeviceweaveDsl|ci}} could be stated in
 DeviceWeave's DSL at all.
 
-**Reliability.** Over {{agreement.n}} statements, κ = {{agreement.fields.scope.kappa|f2}}
-(scope), {{agreement.fields.kind.kappa|f2}} (kind),
-{{agreement.fields.modality.kappa|f2}} (modality),
+**Reliability.** On the blind subset ({{agreement.n}} statements), human–LLM
+κ = {{agreement.fields.scope.kappa|f2}} (scope), {{agreement.fields.kind.kappa|f2}}
+(kind), {{agreement.fields.modality.kappa|f2}} (modality),
 {{agreement.fields.target_actor.kappa|f2}} (target actor) and
-{{agreement.fields.condition_actor.kappa|f2}} (condition actor). On the derived
-`guard_dw` outcome, κ = {{agreement.derivedOutcomes.guard_dw.kappa|f2}};
-{{agreement.disagreements}} statements were adjudicated.
+{{agreement.fields.condition_actor.kappa|f2}} (condition actor); on the derived
+`guard_dw` outcome, κ = {{agreement.derivedOutcomes.guard_dw.kappa|f2}}. Of
+{{verification.suggestionsAnswered}} pre-selected codes the verifier changed
+{{verification.suggestionsChanged|pct}} {{verification.suggestionsChanged|ci}}.
 
 **Table 1.** Outcomes per architecture (reaction on, no manual switch), share of
 {{properties|int}} properties.
@@ -193,9 +205,11 @@ common to LLM policy gates cannot enforce most of them.
   would ship (for example keeping an alarm sounding so that it cannot start
   sounding later). These appear as *over-restrictive* or *preemptive*, never
   as *exact*.
-- **Coding.** Coders infer actors (is this door smart?) from text that rarely
-  says; the codebook fixes defaults, and agreement on the actor fields is
-  reported separately.
+- **Coding.** One verifier, and an LLM first coder. Pre-selection anchors the
+  verifier; the blind subset bounds that. Coders infer actors (is this door
+  smart?) from text that rarely says; the codebook fixes defaults, and agreement
+  on the actor fields is reported separately. A second independent human coder
+  on a sample would strengthen this.
 - **Corpus.** One study, {{statementsTotal}} statements from participants who
   opted in to release; a convenience sample, not a population estimate.
 - **Case study.** One model, one pass, one DSL; it illustrates the silent

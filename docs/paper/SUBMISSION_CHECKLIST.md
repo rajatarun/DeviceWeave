@@ -18,30 +18,28 @@ yet.
 | Shares with Wilson 95% intervals; DSL and template coverage; compile cross-tab | `analyze` | tests |
 | Placeholder-only draft that cannot reference a missing key | `draft.md`, `render` | test fails on any unfilled placeholder |
 
-## Critical path (people, in order)
+## Critical path (in order)
 
-1. **Freeze the plan.** Commit the codebook and this analysis plan, and
-   record the hash in the paper. Optionally pre-register it (OSF). From this
-   point the codebook changes only by a new version.
-2. **Pilot (about 2 hours per coder).** Each coder runs
-   `worksheet --coder A --sample 60` (and B), codes the sheet, and imports it.
-   Then run `agree`.
-   - If κ < 0.7 on `kind`, `modality`, `target_actor` or `condition_actor`,
-     revise the codebook (new version), recode the pilot, and repeat.
-   - Report the pilot κ.
-3. **Full coding (about 10–12 hours per coder, at roughly 1 minute per
-   statement).** Run `worksheet` without `--sample`. Code independently and
-   don't discuss cases.
-4. **Adjudication (about 2–4 hours).** A third person, or both coders together,
-   resolves every id that `agree` lists. Record who did it.
-5. **Analysis (minutes).**
-   `analyze gold.json --rows <live run rows.jsonl> --agreement agreement.json --total 690`,
-   then `render`. Read Table 2 before writing a word of the conclusion. If
-   the claim only holds under one assumption set, the paper says so.
-6. **Baseline.** Table 1 already compares five architectures on the same
-   properties. For an external baseline, also report the share that fits
-   AutoTap's template language (`fitsAutotapTemplate`), and, if time allows,
-   run AutoTap's own synthesiser on the properties that fit.
+1. **Freeze the LLM codes.** Done: `benchmarks/autotap/coding/llm.json` (all
+   690 statements, codebook v1.1) and the seeded 20% blind subset
+   (`blind_ids.json`) are committed *before* any human verification, so the
+   LLM rater cannot be tuned to the verifier. Record that commit hash in the
+   paper and name the model that produced the codes.
+2. **Verify (one author, about 2–3 hours).** Use the private survey page.
+   - On the 138 blind statements, code from scratch; no suggestion is shown.
+   - On the other 552, confirm Claude's pre-selected code or change any field.
+   - Answers save as you go.
+3. **Import.** Export the page's `answers` collection with `ArtifactData`
+   (`out_dir`), then run `property_coding.py verify <dir>`. That writes
+   `gold.json`, `agreement.json` (blind human vs LLM) and `verification.json`
+   (change rates).
+4. **Analyse.** Run `analyze gold.json --rows <live run rows.jsonl>
+   --agreement agreement.json --verification verification.json --total 690`,
+   then `render`. Read Table 2 before writing the conclusion. If the claim
+   holds only under one assumption set, the paper says so.
+5. **Optional, stronger.** Have a second person code a random 100 statements
+   blind with `worksheet --sample 100`, then compare with `agree`. That gives
+   human–human κ beside human–LLM κ.
 
 ## Citations and reading (before submission)
 
@@ -69,9 +67,10 @@ yet.
       according to the venue's policy. The authors must re-derive the canonical
       outcomes in `tests/test_property_coding.py` themselves, and understand
       every modelling choice in `codebook.md` § "How codes become plants".
-- [ ] **No human coding by models.** Do not substitute an LLM for either
-      coder. An LLM may be reported as a third, clearly labelled rater against
-      the adjudicated gold.
+- [ ] **Say exactly who coded what.** An LLM coded every statement; one
+      author verified every code; the blind subset is the only unanchored
+      human–LLM comparison. Never describe this as two independent human
+      coders.
 
 ## What it would take to go beyond a workshop paper
 

@@ -59,7 +59,7 @@ import compile_fidelity as cf  # noqa: E402
 from policy_authoring.controllability import Event, Plant, supcon_forcing  # noqa: E402
 
 CODES_FORMAT = "deviceweave-property-codes/1"
-CODEBOOK_VERSION = "1.0"
+CODEBOOK_VERSION = "1.1"
 CODING_OUT = cf.OUT_DIR / "coding"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ TARGET_CLASSES = (
     "garage", "blinds", "camera_security_alarm", "kitchen_appliance", "laundry_appliance",
     "cleaning_robot", "media_speaker", "sensor", "water_irrigation", "multiple", "other",
 )
-ACTORS = ("system", "human", "world")
+ACTORS = ("system", "mixed", "human", "world")
 CONDITIONS = ("none", "presence", "time_of_day", "day_date", "weather", "device_state",
               "sensor_event", "other")
 ENUMS: Dict[str, Tuple[str, ...]] = {
@@ -379,6 +379,12 @@ def _variable_events(prefix: str, actor: str, arch: Architecture, manual: bool) 
             evs += [(Event(f"{prefix}.manual_on", False, False, "manual"), 1),
                     (Event(f"{prefix}.manual_off", False, False, "manual"), 0)]
         return evs
+    if actor == "mixed":
+        # The system can command it, and the world or a person also changes it
+        # (a room's temperature, a faucet someone can turn by hand).
+        return _variable_events(prefix, "system", arch, manual) + [
+            (Event(f"{prefix}.world_on", False, False, "context"), 1),
+            (Event(f"{prefix}.world_off", False, False, "context"), 0)]
     kind = "manual" if actor == "human" else "context"
     return [(Event(f"{prefix}.{actor}_on", False, False, kind), 1),
             (Event(f"{prefix}.{actor}_off", False, False, kind), 0)]
@@ -555,7 +561,8 @@ def _accepted(row: Mapping[str, Any]) -> Optional[bool]:
 
 def analyze(gold: Mapping[str, Mapping[str, Any]], rows: Optional[Mapping[str, Mapping[str, Any]]] = None,
             total_statements: Optional[int] = None,
-            agreement_report: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+            agreement_report: Optional[Mapping[str, Any]] = None,
+            verification_report: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     rows = rows or {}
     ids = sorted(gold)
     props = [rid for rid in ids if gold[rid]["scope"] == "property"]
@@ -603,6 +610,8 @@ def analyze(gold: Mapping[str, Mapping[str, Any]], rows: Optional[Mapping[str, M
             "derivedOutcomes": agreement_report.get("derivedOutcomes"),
             "disagreements": len(agreement_report.get("disagreements") or ()),
         }
+    if verification_report is not None:
+        res["verification"] = dict(verification_report)
     if rows:
         # Compile coverage over every statement with a compile result, coded or not.
         all_rows = list(rows.values())
@@ -626,6 +635,62 @@ def analyze(gold: Mapping[str, Mapping[str, Any]], rows: Optional[Mapping[str, M
                                              for r in accepted)),
         }
     return res
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Human verification of LLM codes (the survey page)
+#
+# One person verifies every LLM code. On a seeded 20% blind subset they code
+# from scratch without seeing the LLM's answer; that subset gives an unbiased
+# human-vs-LLM kappa. On the rest they confirm or change a pre-selected
+# answer; there we report how often each field was changed. The verified
+# answers are the gold codes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_answers(path: Path) -> Dict[str, Dict[str, Any]]:
+    """Answers exported from the survey store: a directory of <rule id>.json, or one JSON object."""
+    path = Path(path)
+    raw: Dict[str, Any] = {}
+    if path.is_dir():
+        for f in sorted(path.rglob("*.json")):
+            doc = json.loads(f.read_text())
+            raw[doc.get("id") or f.stem] = doc.get("data", doc) if isinstance(doc.get("data"), dict) else doc
+    else:
+        raw = json.loads(path.read_text())
+    out = {}
+    for rid, doc in raw.items():
+        if not cf.RULE_ID_RE.match(rid):
+            raise CodingError(f"{rid!r} is not a rule id")
+        out[rid] = {"code": validate_code(doc["code"], f"answer {rid}"), "blind": bool(doc.get("blind")),
+                    "seconds": doc.get("seconds")}
+    return out
+
+
+def verification(answers: Mapping[str, Mapping[str, Any]], llm: Mapping[str, Mapping[str, Any]],
+                 blind_ids: Iterable[str]) -> Dict[str, Any]:
+    blind = set(blind_ids)
+    for rid, a in answers.items():
+        if a["blind"] != (rid in blind):
+            raise CodingError(f"{rid}: the page and the blind list disagree about whether it is blind")
+    gold = {rid: a["code"] for rid, a in answers.items()}
+    blind_human = {rid: gold[rid] for rid in gold if rid in blind and rid in llm}
+    blind_llm = {rid: llm[rid] for rid in blind_human}
+    report = agreement(blind_human, blind_llm)
+    report["coders"] = ["human (blind)", "llm"]
+    suggested = [rid for rid in gold if rid not in blind and rid in llm]
+    changed_any = [rid for rid in suggested if gold[rid] != llm[rid]]
+    per_field = {}
+    for f in AGREEMENT_FIELDS:
+        items = [rid for rid in suggested if f in gold[rid] or f in llm[rid]]
+        per_field[f] = _share(sum(gold[rid].get(f) != llm[rid].get(f) for rid in items), len(items))
+    secs = sorted(a["seconds"] for a in answers.values() if isinstance(a.get("seconds"), (int, float)))
+    return {"gold": gold, "agreement": report, "verification": {
+        "answered": len(answers), "llmCoded": len(llm), "blindAnswered": len(blind_human),
+        "suggestionsAnswered": len(suggested),
+        "suggestionsChanged": _share(len(changed_any), len(suggested)),
+        "changedByField": per_field,
+        "medianSeconds": secs[len(secs) // 2] if secs else None,
+    }}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -699,11 +764,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     j.add_argument("b")
     j.add_argument("resolved")
     j.add_argument("--out", required=True)
+    v = sub.add_parser("verify", help="survey answers + LLM codes -> gold codes, blind agreement, change rates")
+    v.add_argument("answers", help="ArtifactData export directory (out_dir) or a JSON object of answers")
+    v.add_argument("--llm", default=str(ROOT / "benchmarks" / "autotap" / "coding" / "llm.json"))
+    v.add_argument("--blind", default=str(ROOT / "benchmarks" / "autotap" / "coding" / "blind_ids.json"))
+    v.add_argument("--out-dir", default=str(CODING_OUT))
     n = sub.add_parser("analyze")
     n.add_argument("gold")
     n.add_argument("--rows", default=None, help="compile_fidelity rows.jsonl for the cross-tab")
     n.add_argument("--total", type=int, default=None, help="statements in the corpus (default: coded count)")
     n.add_argument("--agreement", default=None, help="the agree report, to include kappas in the results")
+    n.add_argument("--verification", default=None, help="the verify report, to include change rates")
     n.add_argument("--out", default=str(CODING_OUT / "results.json"))
     r = sub.add_parser("render")
     r.add_argument("results")
@@ -748,11 +819,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             write_codes(Path(args.out), "gold", gold)
             print(f"wrote {len(gold)} gold codes -> {args.out}")
             return 0
+        if args.cmd == "verify":
+            answers = load_answers(Path(args.answers))
+            llm = load_codes(Path(args.llm))["codes"]
+            blind = json.loads(Path(args.blind).read_text())["ids"]
+            result = verification(answers, llm, blind)
+            out = Path(args.out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            write_codes(out / "gold.json", "human-verified", result["gold"])
+            (out / "agreement.json").write_text(json.dumps(result["agreement"], indent=2) + "\n")
+            (out / "verification.json").write_text(json.dumps(result["verification"], indent=2) + "\n")
+            ver = result["verification"]
+            print(f"{ver['answered']} answers; blind {ver['blindAnswered']}; suggestions changed "
+                  f"{ver['suggestionsChanged']['share']}")
+            for f, a in result["agreement"]["fields"].items():
+                print(f"  blind kappa {f:<24} {a['kappa']}  (n={a['n']})")
+            return 0
         if args.cmd == "analyze":
             gold = load_codes(Path(args.gold))["codes"]
             agreement_report = json.loads(Path(args.agreement).read_text()) if args.agreement else None
+            verification_report = json.loads(Path(args.verification).read_text()) if args.verification else None
             res = analyze(gold, _rows_by_id(Path(args.rows) if args.rows else None), args.total,
-                          agreement_report)
+                          agreement_report, verification_report)
             out = Path(args.out)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(res, indent=2) + "\n")
