@@ -23,6 +23,8 @@ Route table
   GET    /policies/{rule_id}   → policy_authoring.handler.handler
   DELETE /policies/{rule_id}   → policy_authoring.handler.handler
   POST   /ingest               → ingestion_handler.handler
+  POST   /mcp                  → mcp_handler.handler
+  GET    /mcp                  → mcp_handler.handler
 """
 
 import json
@@ -92,8 +94,16 @@ def _build_event(environ: dict) -> dict:
     if len(segments) == 2 and segments[0] == "policies" and segments[1] != "author":
         path_params["rule_id"] = segments[1]
 
+    headers = {}
+    for key, value in environ.items():
+        if key.startswith("HTTP_") and isinstance(value, str):
+            headers[key[5:].lower().replace("_", "-")] = value
+    if environ.get("CONTENT_TYPE"):
+        headers["content-type"] = environ["CONTENT_TYPE"]
+
     return {
         "requestContext": {"http": {"method": method, "path": path}},
+        "headers": headers,
         "body": body,
         "queryStringParameters": query_params or None,
         "pathParameters": path_params or None,
@@ -113,6 +123,8 @@ _STATUS_TEXT = {
     404: "404 Not Found",
     409: "409 Conflict",
     422: "422 Unprocessable Entity",
+    401: "401 Unauthorized",
+    405: "405 Method Not Allowed",
     500: "500 Internal Server Error",
     502: "502 Bad Gateway",
     503: "503 Service Unavailable",
@@ -122,12 +134,18 @@ _STATUS_TEXT = {
 def _respond(lambda_resp: dict, start_response):
     code    = lambda_resp.get("statusCode", 200)
     headers = lambda_resp.get("headers", {"Content-Type": "application/json"})
-    body    = (lambda_resp.get("body") or "{}").encode("utf-8")
+    body_text = lambda_resp.get("body")
+    if body_text:
+        body = body_text.encode("utf-8")
+    elif body_text == "":
+        body = b""
+    else:
+        body = b"{}"
 
     # Always add CORS headers for local browser requests
     headers.setdefault("Access-Control-Allow-Origin",  "*")
     headers.setdefault("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-    headers.setdefault("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    headers.setdefault("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version")
 
     start_response(
         _STATUS_TEXT.get(code, f"{code} Unknown"),
@@ -146,7 +164,7 @@ def application(environ, start_response):
         start_response("204 No Content", [
             ("Access-Control-Allow-Origin",  "*"),
             ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
-            ("Access-Control-Allow-Headers", "Content-Type, Authorization"),
+            ("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version"),
             ("Content-Length", "0"),
         ])
         return [b""]
@@ -157,7 +175,11 @@ def application(environ, start_response):
     try:
         execution, policy, ingestion = _get_handlers()
 
-        if path.startswith("/policies"):
+        normalized = path.rstrip("/") or "/"
+        if normalized == "/mcp":
+            import mcp_handler
+            resp = mcp_handler.handler(event, None)
+        elif path.startswith("/policies"):
             resp = policy.handler(event, None)
         elif path.startswith("/ingest"):
             resp = ingestion.handler(event, None)

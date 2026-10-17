@@ -102,6 +102,8 @@ setting for all three.** See [Confidence thresholds](#confidence-thresholds).
 
 ## API
 
+DeviceWeave also serves a remote MCP endpoint at `POST /mcp`. See [Remote MCP server](#remote-mcp-server).
+
 ### Execution API
 
 | Method | Path | Body | Description |
@@ -311,6 +313,167 @@ Once stored, any `/execute` call that resolves to a `fan` device with `turn_on` 
 ```json
 HTTP 403
 {"error": "Policy blocked: Too cold to run fan", "rule_id": "c3f8a2d1-..."}
+```
+
+---
+
+## Remote MCP server
+
+`POST /mcp` is a remote [MCP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) endpoint on the same HTTP API. The transport is Streamable HTTP, protocol **`2025-06-18`**. An MCP client sends one JSON-RPC 2.0 message per POST. `GET /mcp` returns **405** — this server does not open an SSE stream, which the transport allows.
+
+The URL is the `McpEndpoint` stack output:
+
+```text
+https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp
+```
+
+Existing REST routes are unchanged and do not use this token.
+
+### Tools
+
+Each tool calls the same in-process service function as the matching HTTP route. Nothing on `/mcp` makes an HTTP request back to the API.
+
+| Tool | Service | Notes |
+|------|---------|--------|
+| `list_devices` | `GET /devices` | Read-only |
+| `get_device` | `GET /devices/{id}` | Read-only. Argument: `device_id` |
+| `create_device` | registry create | Registers a manual device (`device_id`, `name`, optional type, capabilities, ip, model). HTTP `POST /devices` still returns 405 |
+| `update_device` | `PUT /devices/{id}` | `device_id` plus any of `name`, `capabilities`, `ip`, `device_type`, `model` |
+| `delete_device` | `DELETE /devices/{id}` | **Destructive.** Deactivates the device |
+| `execute` | `POST /execute` | **Destructive.** Can actuate hardware. `command`, optional `session_id`, or a vision `source` |
+| `get_presence` | `GET /presence` | Read-only |
+| `set_presence` | `POST /presence` | `is_home` boolean |
+| `list_scenes` | `GET /scenes` | Read-only |
+| `delete_scene` | `DELETE /scenes/{id}` | **Destructive.** Argument: `scene_id` |
+| `list_policies` | `GET /policies` | Read-only. Optional `device_type`, `limit` |
+| `get_policy` | `GET /policies/{rule_id}` | Read-only. Optional `version` |
+| `author_policy` | `POST /policies/author` | Argument: `rule` |
+| `delete_policy` | `DELETE /policies/{rule_id}` | **Destructive** |
+| `get_learnings` | `GET /learnings` | Read-only |
+| `learn_phrase` | `POST /learn` | `device_id` and `phrase` |
+| `delete_learning` | `DELETE /learnings` | **Destructive.** `device_id` and `phrase` |
+| `list_providers` | `GET /providers` | Read-only |
+| `ingest` | `POST /ingest` | Optional `provider` (default `kasa`), `mode` (`full` or `delta`), Ring `refresh_token` / `two_fa_code`. `full` marks devices missing from the run offline |
+| `health` | `GET /health` | Read-only |
+
+`delete_device`, `delete_scene`, `delete_policy`, `delete_learning`, and `execute` are annotated `destructiveHint: true`.
+
+A tool result is the service's JSON body. `isError` is true when that service returns an HTTP status of 400 or higher.
+
+### Create the token
+
+The token is a Secrets Manager secret. It is not in this repository and it is not a CloudFormation parameter value. The parameter `McpAuthTokenSecretName` is only the **name** (default `deviceweave/mcp-auth-token`).
+
+Create it in the same account and region as the stack. The secret string is the raw token, not a JSON object:
+
+```bash
+aws secretsmanager create-secret \
+  --name deviceweave/mcp-auth-token \
+  --region us-east-1 \
+  --description "Bearer token for the DeviceWeave MCP endpoint" \
+  --secret-string "$(openssl rand -hex 32)"
+```
+
+Rotate by writing a new value. Warm Lambda environments pick it up within five minutes:
+
+```bash
+aws secretsmanager put-secret-value \
+  --secret-id deviceweave/mcp-auth-token \
+  --region us-east-1 \
+  --secret-string "$(openssl rand -hex 32)"
+```
+
+Read it when you configure a connector (do not commit the output):
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id deviceweave/mcp-auth-token \
+  --region us-east-1 \
+  --query SecretString \
+  --output text
+```
+
+Every `/mcp` request must send `Authorization: Bearer <token>`. A missing or wrong token is HTTP **401** with a JSON-RPC error body (`code` `-32001`, message `Unauthorized`). The server hashes both strings and compares the digests with a constant-time compare. If the secret cannot be read, the response is HTTP **500** and the endpoint stays closed.
+
+### Deploy
+
+Do not deploy the token itself. Do not pass it as a `sam deploy` parameter.
+
+`McpAuthTokenSecretName` defaults to `deviceweave/mcp-auth-token`, so the GitHub Actions workflow that deploys stack `deviceweave-prod` picks the new routes up without a new override. Create the secret before the first call to `/mcp`.
+
+Manual deploy, using the same stack name. A deploy of this stack also needs the VPC, subnet, and other parameters already in `.github/workflows/deploy.yml`. Reuse those values. The only MCP-specific override is the secret **name**:
+
+```bash
+sam build --use-container
+
+sam deploy \
+  --stack-name deviceweave-prod \
+  --capabilities CAPABILITY_IAM \
+  --region us-east-1 \
+  --resolve-s3 \
+  --no-confirm-changeset \
+  --no-fail-on-empty-changeset \
+  --parameter-overrides \
+      StageName=prod \
+      VpcId=<vpc-id> \
+      LambdaSubnetIds=<subnet-a>,<subnet-b> \
+      'ParameterKey=LambdaPublicSubnetIds,ParameterValue=""' \
+      LambdaUsePublicSubnets=false \
+      LambdaIpv6DualStack=<true-or-false> \
+      AgentProvider=gemini \
+      LLMProvider=gemini \
+      GeminiModelId=gemini-3.8-flash \
+      ObservatoryMetricsTableName=<table-or-empty> \
+      MemgraphSecretArn=<arn-or-empty> \
+      McpAuthTokenSecretName=deviceweave/mcp-auth-token
+```
+
+Then print the endpoint:
+
+```bash
+aws cloudformation describe-stacks \
+  --stack-name deviceweave-prod \
+  --region us-east-1 \
+  --query "Stacks[0].Outputs[?OutputKey=='McpEndpoint'].OutputValue" \
+  --output text
+```
+
+### Add it as a connector
+
+In Cursor: **Settings → MCP → Add new MCP server** (or edit the MCP config file). A `url` selects Streamable HTTP. Keep the token in the environment, not in the file you commit:
+
+```json
+{
+  "mcpServers": {
+    "deviceweave": {
+      "url": "https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:DEVICEWEAVE_MCP_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Set `DEVICEWEAVE_MCP_TOKEN` to the secret string. The client should send `Accept: application/json, text/event-stream` and, after `initialize`, `MCP-Protocol-Version: 2025-06-18`. `GET /mcp` answering 405 is expected.
+
+Check the handshake:
+
+```bash
+curl -sS "$MCP_URL" \
+  -H "Authorization: Bearer $DEVICEWEAVE_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+```
+
+A wrong token returns 401:
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" "$MCP_URL" \
+  -H "Authorization: Bearer wrong" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 ```
 
 ---
@@ -847,7 +1010,7 @@ sam deploy \
 
 `EumOriginationNumber` is the E.164 phone number provisioned in AWS End User Messaging (see [Two-way SMS setup](#two-way-sms-setup)). If you are not using SMS, omit the parameter — the `DeviceWeaveSmsFunction` will deploy but will log an error and skip sending when invoked.
 
-The `ExecuteEndpoint` URL is in the stack outputs.
+The `ExecuteEndpoint` and `McpEndpoint` URLs are in the stack outputs. The MCP bearer token is created separately; see [Remote MCP server](#remote-mcp-server). Do not pass the token as a deploy parameter.
 
 ### GitHub Actions
 
