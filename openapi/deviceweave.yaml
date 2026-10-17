@@ -8,6 +8,9 @@ info:
     observation, gets resolved to a scene or a device, is checked against the
     policy engine, and is executed against a provider.
 
+    `POST /mcp` is the remote MCP Streamable HTTP endpoint (protocol
+    2025-06-18). `GET /mcp` returns 405. Both require a bearer token.
+
     **Resolving the server and the data stores.** Do not hardcode anything:
 
         aws cloudformation describe-stacks --stack-name deviceweave \
@@ -46,6 +49,8 @@ tags:
     description: Natural-language rules compiled to a validated DSL
   - name: presence
     description: Home-occupancy state, consumed by the policy engine
+  - name: mcp
+    description: Remote MCP Streamable HTTP endpoint (protocol 2025-06-18)
 
 paths:
 
@@ -687,7 +692,133 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "503": { $ref: "#/components/responses/PolicyStoreUnconfigured" }
 
+  /mcp:
+    post:
+      tags: [mcp]
+      operationId: mcpPost
+      summary: MCP Streamable HTTP JSON-RPC
+      description: |
+        One JSON-RPC 2.0 message per request, protocol `2025-06-18`.
+        Methods: `initialize`, `tools/list`, and `tools/call`.
+        Notifications (no `id`), including `notifications/initialized`,
+        are answered with `202` and an empty body. JSON-RPC batches are
+        rejected with `400`.
+
+        Requires `Authorization: Bearer <token>`. The token is the
+        SecretString of the Secrets Manager secret named by the
+        `McpAuthTokenSecretName` stack parameter. A missing or wrong
+        token is `401` with a JSON-RPC error body. The comparison is
+        constant-time. Existing REST routes are unchanged and do not use
+        this token.
+      security:
+        - mcpBearer: []
+      parameters:
+        - in: header
+          name: MCP-Protocol-Version
+          required: false
+          schema:
+            type: string
+            example: "2025-06-18"
+          description: Protocol version. `2025-06-18` or `2025-03-26`. Omit on initialize.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [jsonrpc, method]
+              properties:
+                jsonrpc:
+                  type: string
+                  enum: ["2.0"]
+                id: {}
+                method:
+                  type: string
+                params:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200":
+          description: JSON-RPC result, or a JSON-RPC error for a well-formed request
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jsonrpc]
+                properties:
+                  jsonrpc:
+                    type: string
+                    enum: ["2.0"]
+                  id: {}
+                  result:
+                    type: object
+                    additionalProperties: true
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code:
+                        type: integer
+                      message:
+                        type: string
+        "202":
+          description: Accepted notification or client response. Empty body.
+        "400":
+          description: Parse error, invalid JSON-RPC, unsupported protocol version, or a JSON-RPC batch
+        "401":
+          description: Missing or wrong bearer token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jsonrpc, error]
+                properties:
+                  jsonrpc:
+                    type: string
+                  id: {}
+                  error:
+                    type: object
+                    required: [code, message]
+                    properties:
+                      code:
+                        type: integer
+                        example: -32001
+                      message:
+                        type: string
+                        example: Unauthorized
+        "500":
+          description: The auth-token secret could not be read
+    get:
+      tags: [mcp]
+      operationId: mcpGet
+      summary: SSE stream is not offered
+      description: |
+        Streamable HTTP allows GET /mcp to open a server-sent event stream.
+        This server does not offer one and returns 405. POST /mcp is how
+        clients send JSON-RPC. The bearer token is required here too; a
+        missing or wrong token is 401 before the 405.
+      security:
+        - mcpBearer: []
+      responses:
+        "401":
+          description: Missing or wrong bearer token
+        "405":
+          description: No SSE stream on this endpoint
+          headers:
+            Allow:
+              schema:
+                type: string
+                example: POST
+
 components:
+
+  securitySchemes:
+    mcpBearer:
+      type: http
+      scheme: bearer
+      description: >
+        SecretString of the Secrets Manager secret named by the
+        McpAuthTokenSecretName template parameter.
 
   parameters:
     DeviceId:

@@ -288,6 +288,21 @@ Parameters:
     Default: "-96.5158954"
     Description: Longitude for Open-Meteo weather lookups (Plano, TX).
 
+  # -----------------------------------------------------------------------
+  # MCP — bearer token for POST /mcp and GET /mcp.
+  # The secret value is created out of band and is not stored in this template.
+  # -----------------------------------------------------------------------
+  McpAuthTokenSecretName:
+    Type: String
+    Default: deviceweave/mcp-auth-token
+    AllowedPattern: "[A-Za-z0-9/_+=.@-]+"
+    Description: >
+      Secrets Manager secret name whose SecretString is the bearer token
+      required on /mcp. Create it before calling the endpoint, for example
+      aws secretsmanager create-secret --name deviceweave/mcp-auth-token
+      --secret-string "$(openssl rand -hex 32)". Do not put the token in
+      this template or in a deploy parameter.
+
 Resources:
   # -------------------------------------------------------------------
   # Lambda Security Group
@@ -334,6 +349,7 @@ Resources:
         AllowHeaders:
           - Content-Type
           - Authorization
+          - MCP-Protocol-Version
         AllowOrigins:
           - '*'
 
@@ -720,6 +736,123 @@ Resources:
       RetentionInDays: 14
 
   # -------------------------------------------------------------------
+  # MCP Lambda — Streamable HTTP at POST /mcp and GET /mcp.
+  # Tools call the execution, ingestion, and policy service functions
+  # in-process. The bearer token is read from Secrets Manager.
+  # -------------------------------------------------------------------
+  DeviceWeaveMcpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "deviceweave-mcp-${StageName}"
+      CodeUri: src/
+      Handler: mcp_handler.handler
+      Timeout: 120
+      MemorySize: 1024
+      Description: >
+        DeviceWeave MCP Streamable HTTP endpoint (protocol 2025-06-18).
+        POST /mcp accepts JSON-RPC. GET /mcp returns 405.
+      Environment:
+        Variables:
+          # Merged with Globals, which supply table names and provider secret ARNs.
+          MCP_AUTH_TOKEN_SECRET_NAME: !Ref McpAuthTokenSecretName
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !If
+          - HasPublicSubnets
+          - !Ref LambdaPublicSubnetIds
+          - !Ref LambdaSubnetIds
+        # Dual-stack: lets the function use IPv6 egress (Egress-Only IGW) for
+        # AWS and third-party APIs, so it no longer depends on the NAT
+        # instance for them. Requires an IPv6 CIDR on every subnet; the
+        # deploy workflow checks that and passes LambdaIpv6DualStack=false
+        # otherwise.
+        Ipv6AllowedForDualStack: !If [LambdaDualStack, true, false]
+      Policies:
+        - CloudWatchLogsFullAccess
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LearningTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DeviceRegistryTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PolicyTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PresenceTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SceneTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConversationTable
+        - !If
+          - HasObservatoryTable
+          - Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ObservatoryMetricsTableName}"
+          - !Ref AWS::NoValue
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${McpAuthTokenSecretName}-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/switchbot-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/govee-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/myq-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/wyze-credentials-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:gemini/api_key-*"
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:UpdateSecret
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/ring-credentials-*"
+        - !If
+          - HasMemgraphSecret
+          - AWSSecretsManagerGetSecretValuePolicy:
+              SecretArn: !Ref MemgraphSecretArn
+          - !Ref AWS::NoValue
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:Converse
+              Resource:
+                - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ec2:CreateNetworkInterface
+                - ec2:DescribeNetworkInterfaces
+                - ec2:DeleteNetworkInterface
+                - ec2:DescribeInstances
+              Resource: "*"
+      Events:
+        McpPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /mcp
+            Method: POST
+        McpGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /mcp
+            Method: GET
+
+  DeviceWeaveMcpFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/deviceweave-mcp-${StageName}"
+      RetentionInDays: 14
+
+  # -------------------------------------------------------------------
   # AWS End User Messaging — two-way SMS (replaced Amazon Pinpoint SMS)
   #
   # Low-cost pattern:
@@ -1042,6 +1175,14 @@ Outputs:
     Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
     Export:
       Name: !Sub "DeviceWeaveApiBaseUrl-${StageName}"
+
+  McpEndpoint:
+    Description: >
+      POST /mcp — MCP Streamable HTTP endpoint (protocol 2025-06-18).
+      Requires an Authorization header and the secret named by McpAuthTokenSecretName.
+    Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/mcp"
+    Export:
+      Name: !Sub "DeviceWeaveMcpEndpoint-${StageName}"
 
   ExecuteEndpoint:
     Description: POST /execute — natural language device or scene command

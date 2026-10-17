@@ -1,8 +1,7 @@
 """Keep openapi/deviceweave.yaml honest against the template.
 
-Twenty routes across three Lambdas, and the routing lives in two places that
-can disagree: template.yaml decides what API Gateway forwards, and the three
-handlers decide what to do with it. This test pins the spec to the first --
+HTTP routes and the handlers can disagree: template.yaml decides what
+API Gateway forwards, and the handlers decide what to do with it. This test pins the spec to the first --
 method by method, both directions -- and pins the stack Outputs a harness
 resolves its coordinates from to the resources that actually exist.
 
