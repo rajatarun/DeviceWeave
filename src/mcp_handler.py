@@ -622,7 +622,9 @@ TOOLS: List[Dict[str, Any]] = [
     _tool(
         "get_presence",
         "Get presence",
-        "Read the home-occupancy flag the policy engine uses. Defaults to home when nothing has been written.",
+        "Read home occupancy for the policy engine. Includes the eero zone (node), signal, "
+        "last_seen, and freshness when the eero poller has written them. Defaults to home "
+        "when nothing has been written.",
         _NO_ARGS,
         _get_presence,
         _READ_ONLY,

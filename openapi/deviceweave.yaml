@@ -483,10 +483,17 @@ paths:
       tags: [presence]
       operationId: getPresence
       description: |
-        Defaults to `is_home: true` with a null `updated_at` when nothing has
-        ever been written — the policy engine gets the safe answer rather than
-        an error, so a null `updated_at` is the only way to tell "nobody has
-        set this" from "someone set it to true".
+        Defaults to `is_home: true` with a null `updated_at` and
+        `freshness: unknown` when nothing has ever been written — the policy
+        engine gets the safe answer rather than an error, so a null
+        `updated_at` is the only way to tell "nobody has set this" from
+        "someone set it to true".
+
+        When the eero poller has run, `zone` / `node` name the eero node the
+        person is on, `signal` is the connection quality, `last_seen` is the
+        client's last-active time, and `freshness` is `fresh` or `stale`.
+        `stale` means the last poll could not trust eero; `is_home` is the
+        previous value and nobody was marked away because the poll failed.
       responses:
         "200":
           description: Current occupancy state
@@ -897,6 +904,48 @@ components:
           format: date-time
           nullable: true
           description: null when occupancy has never been written
+        zone:
+          type: string
+          nullable: true
+          description: Coarse room — the eero node's location, or its name when location is unset
+        node:
+          type: string
+          nullable: true
+          description: Eero node display name the matched device is connected to
+        signal:
+          type: string
+          nullable: true
+          description: Connection quality reported by eero (for example strong, or a bar count)
+        last_seen:
+          type: string
+          nullable: true
+          description: When eero last reported the matched client active
+        freshness:
+          type: string
+          enum: [fresh, stale, unknown]
+          description: fresh after a trusted poll or manual write; stale when the last poll failed; unknown when never written
+        source:
+          type: string
+          nullable: true
+          enum: [eero, manual]
+        stale_reason:
+          type: string
+          description: Present when freshness is stale
+        people:
+          type: array
+          items:
+            type: object
+            properties:
+              person: { type: string }
+              is_home: { type: boolean }
+              zone: { type: string, nullable: true }
+              node: { type: string, nullable: true }
+              signal: { type: string, nullable: true }
+              last_seen: { type: string, nullable: true }
+              freshness: { type: string }
+              miss_count:
+                type: integer
+                description: Consecutive polls that missed every device mapped to this person
 
     Device:
       type: object
