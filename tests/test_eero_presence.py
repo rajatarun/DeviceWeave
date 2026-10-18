@@ -559,9 +559,18 @@ def test_template_requires_a_secret_name_and_keeps_the_poller_serverless():
     assert "EeroSessionSecretName" in function
     assert "secretsmanager:PutSecretValue" not in function
     assert "secretsmanager:UpdateSecret" not in function
-    assert "AWS::Scheduler::Schedule" in _resource_block(template, "EeroPresencePollSchedule")
+    poll = _resource_block(template, "EeroPresencePollSchedule")
+    assert "AWS::Scheduler::Schedule" in poll
+    assert "RoleArn: !GetAtt EeroPresenceScheduleRole.Arn" in poll
+    # A RoleName or ManagedPolicyName makes CreateChangeSet demand
+    # CAPABILITY_NAMED_IAM. The schedule role is referenced only by ARN.
+    assert "RoleName:" not in template
+    assert "ManagedPolicyName:" not in template
+    assert "deviceweave-eero-presence-schedule" not in template
 
     assert "EeroSessionSecretName=deviceweave/eero-session" in workflow
+    assert "--capabilities CAPABILITY_IAM" in workflow
+    assert "CAPABILITY_NAMED_IAM" not in workflow
     assert 'EeroPollSchedule="rate(5 minutes)"' in workflow
     assert '"EeroPollSchedule=rate(5 minutes)"' not in workflow
     assert 'ParameterValue=""' not in workflow.split("EeroSessionSecretName")[1][:80]
