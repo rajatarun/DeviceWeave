@@ -2,9 +2,10 @@
 Home-occupancy item shared by POST/GET /presence and the eero poller.
 
 The policy engine reads one boolean, ``is_home``, from ``pk=home_state``.
-Richer eero fields (zone, node, signal, last_seen, freshness, people) live
-on that same item so a presence read stays one GetItem and a manual
-POST /presence does not need a second store.
+Richer eero fields (zone, node, signal, room, room_confidence, last_seen,
+freshness, people) live on that same item so a presence read stays one
+GetItem and a manual POST /presence does not need a second store.
+``room`` is ``unknown`` until calibration and two agreeing polls name one.
 
 ``freshness`` is ``fresh`` after a successful poll or a manual write,
 ``stale`` when a poll could not trust eero (the last ``is_home`` is kept),
@@ -81,6 +82,8 @@ def public_view(item: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "zone": None,
             "node": None,
             "signal": None,
+            "room": "unknown",
+            "room_confidence": 0.0,
             "last_seen": None,
             "freshness": "unknown",
             "source": None,
@@ -96,6 +99,8 @@ def public_view(item: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "zone": raw.get("zone"),
             "node": raw.get("node"),
             "signal": _text(raw.get("signal")),
+            "room": _room(raw.get("room")),
+            "room_confidence": _confidence(raw.get("room_confidence")),
             "last_seen": raw.get("last_seen"),
             "freshness": raw.get("freshness") or item.get("freshness") or "unknown",
             "miss_count": _as_int(raw.get("miss_count"), 0),
@@ -106,6 +111,8 @@ def public_view(item: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "zone": item.get("zone"),
         "node": item.get("node"),
         "signal": _text(item.get("signal")),
+        "room": _room(item.get("room")),
+        "room_confidence": _confidence(item.get("room_confidence")),
         "last_seen": item.get("last_seen"),
         "freshness": item.get("freshness") or "unknown",
         "source": item.get("source"),
@@ -137,3 +144,18 @@ def _text(value: Any) -> Optional[str]:
     if value is None:
         return None
     return str(value)
+
+
+def _room(value: Any) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "unknown"
+
+
+def _confidence(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return 0.0

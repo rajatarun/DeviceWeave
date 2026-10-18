@@ -119,6 +119,40 @@ def _best_match(devices: List[Dict[str, Any]], clients: List[Dict[str, Any]]) ->
     return max(found, key=lambda client: client.get("last_seen") or "")
 
 
+def connected_match(
+    tracked: Iterable[Dict[str, Any]],
+    clients: Iterable[Dict[str, Any]],
+    person: str,
+    now: str,
+) -> Optional[Dict[str, Any]]:
+    """The connected client mapped to ``person``, or None.
+
+    The returned ``mac`` and ``device`` are for the caller to hash and
+    then drop. They must not be written to presence or fingerprints.
+    """
+    wanted = person.casefold()
+    group = next((item for item in _group_tracked(tracked) if item["person"].casefold() == wanted), None)
+    if group is None:
+        return None
+    found: List[Dict[str, Any]] = []
+    for row in group["devices"]:
+        for client in clients:
+            if not isinstance(client, dict):
+                continue
+            parsed = parse_client(client, now)
+            if parsed.get("connected") and _row_matches(row, parsed):
+                found.append({
+                    "mac": parsed.get("mac") or "",
+                    "node": parsed.get("node"),
+                    "signal": parsed.get("signal"),
+                    "last_seen": parsed.get("last_seen") or "",
+                    "device": client,
+                })
+    if not found:
+        return None
+    return max(found, key=lambda match: match.get("last_seen") or "")
+
+
 def _row_matches(row: Dict[str, Any], client: Dict[str, Any]) -> bool:
     match = str(row.get("match") or "").strip().lower()
     if match == "mac":

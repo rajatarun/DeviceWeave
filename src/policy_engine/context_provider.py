@@ -29,6 +29,11 @@ Assembles the scalar values that policy conditions can reference:
                           reading never accidentally triggers a
                           "nobody_home → block everything" policy.
 
+  room            str     Calibrated room of the most recently active person
+                          who is home, or "unknown" when the classifier will
+                          not name one. Defaults to "unknown" so a missing
+                          reading does not match ``room == "Office"``.
+
 Design notes:
 - Temperature conversion: °F = (°C × 9/5) + 32
 - All failures are best-effort and logged at WARNING level.
@@ -71,6 +76,7 @@ def get_context() -> Dict[str, Any]:
             "is_overcast":     bool,   # cloud_cover_pct > 70
             "time_hour":       int,    # 0-23 (local Chicago time)
             "is_home":         bool,
+            "room":            str,    # calibrated room, or "unknown"
         }
     """
     weather = _get_weather()
@@ -95,6 +101,7 @@ def get_context() -> Dict[str, Any]:
         "is_overcast":     bool(is_overcast),
         "time_hour":       datetime.now(_CENTRAL_TZ).hour,
         "is_home":         _get_is_home(),
+        "room":            _get_room(),
     }
 
 
@@ -108,6 +115,26 @@ def _get_weather() -> Dict[str, Any]:
     except Exception as exc:
         logger.warning("Policy context: weather fetch failed (%s) — using defaults", exc)
         return {}
+
+
+def _get_room() -> str:
+    """Room label from the presence item. Unreadable presence is ``unknown``."""
+    table_name = os.environ.get("PRESENCE_TABLE_NAME", "").strip()
+    if not table_name:
+        return "unknown"
+    try:
+        table = get_dynamodb_resource().Table(table_name)
+        resp = table.get_item(Key={"pk": "home_state"})
+        item = resp.get("Item")
+        if not isinstance(item, dict):
+            return "unknown"
+        room = item.get("room")
+        if isinstance(room, str) and room.strip():
+            return room.strip()
+        return "unknown"
+    except Exception:
+        logger.warning("Policy context: presence room unreadable — room=unknown")
+        return "unknown"
 
 
 def _get_is_home() -> bool:

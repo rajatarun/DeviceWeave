@@ -71,7 +71,11 @@ NUMERIC_DOMAINS: Dict[str, Tuple[float, float]] = {
 }
 INTEGER_FIELDS = frozenset({"time_hour"})
 BOOLEAN_FIELDS = frozenset({"is_home", "is_overcast"})
-FIELDS = tuple(NUMERIC_DOMAINS) + tuple(sorted(BOOLEAN_FIELDS))
+# ``room`` is a string. ``==`` is that label; ``!=`` is every other label,
+# including ones that are not in the rule set. ``unknown`` is a real value
+# the presence classifier writes, not a gap in the domain.
+STRING_FIELDS = frozenset({"room"})
+FIELDS = tuple(NUMERIC_DOMAINS) + tuple(sorted(BOOLEAN_FIELDS)) + tuple(sorted(STRING_FIELDS))
 # Where a witness context is placed when the region allows it, so a
 # counterexample reads as a plausible afternoon rather than -80 °F at midnight.
 _TYPICAL = {"temperature": 70.0, "humidity": 50.0, "cloud_cover_pct": 50.0, "time_hour": 12.0}
@@ -140,11 +144,60 @@ class Interval:
         return max(self.hi - 0.5, (self.lo + self.hi) / 2)
 
 
-Dim = Union[Interval, frozenset]
+class StringSet:
+    """A string field: an optional finite include-set, minus excluded labels.
+
+    ``include is None`` means every label. Excluding a finite set from every
+    label is never empty, so ``room != "Office"`` stays satisfiable.
+    """
+
+    def __init__(self, include: Optional[frozenset], exclude: frozenset):
+        self.include = include
+        self.exclude = exclude
+
+    def empty(self) -> bool:
+        if self.include is None:
+            return False
+        return not (self.include - self.exclude)
+
+    def intersect(self, other: "StringSet") -> "StringSet":
+        if self.include is None:
+            include = other.include
+        elif other.include is None:
+            include = self.include
+        else:
+            include = self.include & other.include
+        return StringSet(include, self.exclude | other.exclude)
+
+    def complement(self) -> "StringSet":
+        if self.include is None:
+            if not self.exclude:
+                return StringSet(frozenset(), frozenset())
+            return StringSet(self.exclude, frozenset())
+        kept = self.include - self.exclude
+        return StringSet(None, kept)
+
+    def minus(self, other: "StringSet") -> List["StringSet"]:
+        diff = self.intersect(other.complement())
+        return [] if diff.empty() else [diff]
+
+    def sample(self) -> str:
+        if self.include is not None:
+            choices = sorted(self.include - self.exclude)
+            if choices:
+                return choices[0]
+        if "unknown" not in self.exclude:
+            return "unknown"
+        return "other"
+
+
+Dim = Union[Interval, frozenset, StringSet]
 Box = Dict[str, Dim]
 
 
 def _full(field: str) -> Dim:
+    if field in STRING_FIELDS:
+        return StringSet(None, frozenset())
     if field in BOOLEAN_FIELDS:
         return frozenset({True, False})
     lo, hi = NUMERIC_DOMAINS[field]
@@ -152,18 +205,24 @@ def _full(field: str) -> Dim:
 
 
 def _dim_empty(field: str, d: Dim) -> bool:
+    if isinstance(d, StringSet):
+        return d.empty()
     if isinstance(d, frozenset):
         return not d
     return d.empty(field in INTEGER_FIELDS)
 
 
 def _dim_intersect(a: Dim, b: Dim) -> Dim:
+    if isinstance(a, StringSet):
+        return a.intersect(b)  # type: ignore[arg-type]
     if isinstance(a, frozenset):
         return a & b  # type: ignore[operator]
     return a.intersect(b)  # type: ignore[arg-type]
 
 
 def _dim_minus(field: str, a: Dim, b: Dim) -> List[Dim]:
+    if isinstance(a, StringSet):
+        return a.minus(b)  # type: ignore[arg-type]
     if isinstance(a, frozenset):
         rest = a - b  # type: ignore[operator]
         return [rest] if rest else []
@@ -207,7 +266,9 @@ def witness(box: Box) -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
     for f in FIELDS:
         d = box[f]
-        if isinstance(d, frozenset):
+        if isinstance(d, StringSet):
+            ctx[f] = d.sample()
+        elif isinstance(d, frozenset):
             ctx[f] = sorted(d)[-1]
         else:
             v = d.sample(f in INTEGER_FIELDS, _TYPICAL[f])
@@ -225,6 +286,12 @@ def _num(v: Any) -> float:
 
 def _condition_dims(cond: Dict[str, Any]) -> Tuple[str, List[Dim]]:
     field, op, value = cond.get("field"), cond.get("operator"), cond.get("value")
+    if field in STRING_FIELDS:
+        if not isinstance(value, str) or not value or op not in ("==", "!="):
+            return str(field), []
+        if op == "==":
+            return field, [StringSet(frozenset({value}), frozenset())]
+        return field, [StringSet(None, frozenset({value}))]
     if field in BOOLEAN_FIELDS:
         if not isinstance(value, bool):
             return field, []

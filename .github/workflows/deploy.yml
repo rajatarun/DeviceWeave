@@ -301,7 +301,8 @@ jobs:
               MemgraphSecretArn="${{ steps.memgraph.outputs.memgraph_secret_arn }}" \
               EeroSessionSecretName=deviceweave/eero-session \
               'EeroPollSchedule="rate(5 minutes)"' \
-              EeroAwayMissThreshold=3
+              EeroAwayMissThreshold=3 \
+              EeroDeviceHmacSecretName=deviceweave/eero-device-hmac
 
       # ----------------------------------------------------------------
       # 11. Open Memgraph Bolt ingress from the new Lambda SG

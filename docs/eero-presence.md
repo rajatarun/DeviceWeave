@@ -45,6 +45,7 @@ Merging to `main` deploys the stack through GitHub Actions. The deploy role must
 - `EeroSessionSecretName=deviceweave/eero-session`
 - `EeroPollSchedule="rate(5 minutes)"` (the quotes are part of the argument SAM parses; without them the space is cut and the value is `rate(5`)
 - `EeroAwayMissThreshold=3`
+- `EeroDeviceHmacSecretName=deviceweave/eero-device-hmac`
 
 The poller Lambda is not in a VPC. It reads only that secret (`secretsmanager:GetSecretValue`) and writes the presence table. If you have not logged in or registered a device yet, do the steps above. The next poll picks them up. You do not need to redeploy to add a device.
 
@@ -63,6 +64,8 @@ A successful poll looks like:
   "zone": "Office",
   "node": "Office eero",
   "signal": "strong",
+  "room": "unknown",
+  "room_confidence": 0,
   "last_seen": "2026-10-18T16:00:00.000Z",
   "freshness": "fresh",
   "source": "eero",
@@ -73,6 +76,8 @@ A successful poll looks like:
       "zone": "Office",
       "node": "Office eero",
       "signal": "strong",
+      "room": "unknown",
+      "room_confidence": 0,
       "last_seen": "2026-10-18T16:00:00.000Z",
       "freshness": "fresh",
       "miss_count": 0
@@ -95,8 +100,58 @@ Change the schedule or the threshold in `.github/workflows/deploy.yml` (`EeroPol
 
 eero rejects an expired session with HTTP 401 (often `error.session.invalid` or `error.session.refresh`). The poller logs `eero session rejected`, leaves `is_home` as it was, sets `freshness` to `stale`, and sets `stale_reason`. It does the same for a network error, an unreadable secret, or an empty tracked-device table. It will not mark everyone away because the poll failed.
 
-`GET /presence` then still shows the last zone and `is_home`, with `freshness: "stale"`. Run `python scripts/eero_login.py` again. The Lambda cannot refresh the secret itself; its IAM policy is `GetSecretValue` on that one secret.
+`GET /presence` then still shows the last zone and `is_home`, with `freshness: "stale"`. Run `python scripts/eero_login.py` again. The Lambda cannot refresh the secret itself; its IAM policy is `GetSecretValue` on the session secret and the device HMAC secret.
 
 ## Optional network filter
 
 If the eero account admins more than one network, set the template parameter `EeroNetworkId` to the numeric id from the account payload (`/networks/<id>`). Left blank, every network on the account is polled.
+
+## Room calibration
+
+The node zone is which eero the phone is attached to. A room is a label you teach: stand in the room, take a short run of readings, and the poller later picks the nearest saved room. It will not guess. A tie, an unseen node, or a weak match stays `room: "unknown"` and leaves `zone` as the node location.
+
+### What the cloud API actually reports
+
+The device payload used by `eero-client` and the Home Assistant eero integration carries `connectivity.score_bars` (an integer, meaningful when it is 1–5), `connectivity.signal` and `connectivity.signal_avg` (strings: quality words such as `strong`, `fair`, or `weak`, and sometimes a dBm number), and `connectivity.score` (a float with no published 0–1 scale). The node is `source.location`, or `source.display_name` when location is unset. `last_active` is the last time the client did something, not a signal-sample timestamp.
+
+That list is not a live RSSI feed. Samples taken every 12 seconds during one calibration can be identical, and a fractional `score` is ignored. Each stored sample is the node plus a coarse bucket: `score_bars` when it is 1–5, otherwise the quality word, otherwise a coarse bucket when `signal` is a negative dBm value. There is no invented RSSI field. If two rooms share a node and the bucket does not separate them, classification returns `unknown`.
+
+### HMAC secret
+
+Fingerprints and the presence item store an HMAC-SHA256 of the device MAC, not the MAC. The key is its own secret so a new eero login does not invalidate every room. Create it once in `us-east-1` before the first calibration (the deploy does not create it):
+
+```bash
+aws secretsmanager create-secret \
+  --name deviceweave/eero-device-hmac \
+  --secret-string "$(openssl rand -hex 32)"
+```
+
+The name must match `EeroDeviceHmacSecretName`. Replacing the key makes existing fingerprints unmatchable until you calibrate those rooms again. The tracked-device table still holds the MAC you registered with `scripts/eero_login.py track`; that is how the poller finds the phone. Logs from calibration and classification record counts and room labels only.
+
+Occupancy still updates if this secret is missing. Room stays `unknown`.
+
+### Walkthrough
+
+The assistant calls these MCP tools. The same operations are HTTP routes on the calibration Lambda, and they require the MCP bearer token (`Authorization: Bearer …`, the secret `deviceweave/mcp-auth-token`). `GET /presence` stays open and does not return the samples.
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
+| `calibrate_room` | `person` (required), `room` (required), `samples` (optional, default 5, max 8) | Queue a sample run. Returns when the run has started, not when it finishes. Calling it again for the same person and room replaces that room's samples. |
+| `list_room_fingerprints` | `person` (optional) | List rooms, sample counts, nodes, buckets, and the samples. |
+| `delete_room_fingerprint` | `room` (required), `person` (optional) | Delete that room. Omit `person` to delete the label for every person. |
+
+`POST /presence/rooms/calibrate` with `{"person","room","samples"}` is the HTTP form of `calibrate_room` and returns **202**. `GET /presence/rooms` lists. `DELETE /presence/rooms/{room}` deletes. A missing or wrong token is **401**.
+
+Room labels are 1–40 characters: letters, digits, spaces, hyphens, underscores. `unknown` is reserved. A policy that says `room == "Office"` must use that same spelling, including capitals.
+
+1. Create the HMAC secret above, and finish the dedicated-admin login and `track` steps so the person has a device.
+2. Stand in the room for about a minute. Ask the assistant to call `calibrate_room` with `person` set to the tracked name (for example `Raja`), `room` set to the label you want in policies (for example `Office`), and `samples` left at 5. The reads are about 12 seconds apart.
+3. Wait for that minute. `list_room_fingerprints` should show the room, the node, and a bucket. Repeated identical samples are normal.
+4. Walk to the next room and repeat. One room at a time: the phone can only teach the room you are standing in.
+5. To redo a room, call `calibrate_room` again with the same `person` and `room`. The new samples replace the old ones. `delete_room_fingerprint` drops a room without replacing it.
+
+The scheduled poller reads the fingerprint table (it cannot write it) and classifies the live node and bucket. Confidence is the nearest bucket distance on that node, reduced when another room on the same node is close. Below 0.5, or when two rooms are equally near, or when the node was never calibrated, `room` is `unknown` and `zone` stays the node. The displayed room changes only after two polls in a row agree, so one odd reading does not flicker it. A Wi-Fi miss during the away debounce holds the current room; it is not stored as a new sample. Live readings are not kept as history. The current presence item holds the room, the confidence, and the two-reading smoothing state.
+
+`GET /presence` and `get_presence` include `room`, `room_confidence`, and `zone`. The policy context field `room` is that label, or `unknown` when presence cannot be read. `room == "Office"` matches only that label. `unknown` does not match it.
+
+The fingerprint table is on-demand, encrypted at rest, and not covered by point-in-time recovery. Only the calibration function can write it, and only the authenticated routes and the MCP tools reach it.
