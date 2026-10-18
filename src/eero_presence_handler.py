@@ -118,7 +118,22 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return _mark_stale(table, "tracked eero devices were unusable")
 
     _assign_rooms(updated, previous, tracked, clients)
-    presence_store.write_home(table, updated)
+    try:
+        presence_store.write_home(table, updated)
+    except Exception as exc:
+        # Scheduler invokes this asynchronously and retries a raised error.
+        # Returning leaves the stored item unchanged (last is_home kept) so a
+        # retry does not poll eero again in the same minute or mark anyone away.
+        logger.error(
+            "eero presence write failed (%s) — stored item unchanged, not marking anyone away",
+            exc.__class__.__name__,
+        )
+        return {
+            "status": "write_failed",
+            "is_home": bool((previous or {}).get("is_home", True)),
+            "freshness": (previous or {}).get("freshness") or "unknown",
+            "room": (previous or {}).get("room") or "unknown",
+        }
     logger.info(
         "eero presence updated is_home=%s freshness=%s zone=%s room=%s people=%s",
         updated.get("is_home"),
@@ -154,7 +169,20 @@ def _mark_stale(table: Any, reason: str) -> Dict[str, Any]:
     # Belt: this path keeps the last occupancy and never invents an away.
     if was_home:
         item["is_home"] = True
-    presence_store.write_home(table, item)
+    try:
+        presence_store.write_home(table, item)
+    except Exception as exc:
+        logger.error(
+            "eero presence stale write failed (%s) — stored item unchanged, not marking anyone away",
+            exc.__class__.__name__,
+        )
+        return {
+            "status": "stale",
+            "is_home": was_home,
+            "freshness": "stale",
+            "reason": reason,
+            "persisted": False,
+        }
     logger.info(
         "eero presence left unchanged is_home=%s freshness=stale reason=%s",
         item.get("is_home"),

@@ -343,14 +343,19 @@ def load_all(table: Any) -> List[Dict[str, Any]]:
 
 
 def save_fingerprint(table: Any, item: Dict[str, Any]) -> None:
-    table.put_item(Item=item)
+    import presence_store
+
+    table.put_item(Item=presence_store.to_dynamo(item))
 
 
 def list_fingerprints(table: Any, person: Optional[str] = None) -> List[Dict[str, Any]]:
     """Authenticated view: room, counts, nodes, buckets, samples. No HMAC."""
+    import presence_store
+
     wanted = person.casefold() if person else None
     views = []
-    for item in load_all(table):
+    for raw in load_all(table):
+        item = presence_store.from_dynamo(raw)
         if wanted and str(item.get("person") or "").casefold() != wanted:
             continue
         samples = [sample for sample in item.get("samples") or [] if isinstance(sample, dict)]

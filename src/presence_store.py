@@ -14,6 +14,7 @@ and ``unknown`` when nothing has been written yet.
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
@@ -31,7 +32,10 @@ def write_home(table: Any, item: Dict[str, Any]) -> Dict[str, Any]:
     for key, value in item.items():
         if key == "pk" or value is None:
             continue
-        stored[key] = _dynamo_value(value)
+        mapped = to_dynamo(value)
+        if mapped is None:
+            continue
+        stored[key] = mapped
     table.put_item(Item=stored)
     return stored
 
@@ -89,6 +93,7 @@ def public_view(item: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "source": None,
             "people": [],
         }
+    item = from_dynamo(item)
     people = []
     for raw in item.get("people") or []:
         if not isinstance(raw, dict):
@@ -123,13 +128,48 @@ def public_view(item: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return view
 
 
-def _dynamo_value(value: Any) -> Any:
+def to_dynamo(value: Any) -> Any:
+    """Replace floats with Decimal. boto3's Table rejects float on put_item."""
     if isinstance(value, dict):
-        return {key: _dynamo_value(inner) for key, inner in value.items() if inner is not None}
+        converted = {}
+        for key, inner in value.items():
+            if inner is None:
+                continue
+            mapped = to_dynamo(inner)
+            if mapped is None:
+                continue
+            converted[key] = mapped
+        return converted
     if isinstance(value, list):
-        return [_dynamo_value(inner) for inner in value if inner is not None]
+        converted = []
+        for inner in value:
+            if inner is None:
+                continue
+            mapped = to_dynamo(inner)
+            if mapped is None:
+                continue
+            converted.append(mapped)
+        return converted
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return Decimal(str(value))
     if isinstance(value, Decimal):
-        return int(value) if value % 1 == 0 else float(value)
+        return value
+    return value
+
+
+def from_dynamo(value: Any) -> Any:
+    """Replace Decimal with int or float so json.dumps can encode a response."""
+    if isinstance(value, dict):
+        return {key: from_dynamo(inner) for key, inner in value.items()}
+    if isinstance(value, list):
+        return [from_dynamo(inner) for inner in value]
+    if isinstance(value, Decimal):
+        integral = value.to_integral_value()
+        if value == integral:
+            return int(integral)
+        return float(value)
     return value
 
 
