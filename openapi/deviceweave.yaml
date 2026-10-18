@@ -490,10 +490,13 @@ paths:
         "someone set it to true".
 
         When the eero poller has run, `zone` / `node` name the eero node the
-        person is on, `signal` is the connection quality, `last_seen` is the
-        client's last-active time, and `freshness` is `fresh` or `stale`.
-        `stale` means the last poll could not trust eero; `is_home` is the
-        previous value and nobody was marked away because the poll failed.
+        person is on, `signal` is the connection quality, `room` is the
+        calibrated room or `unknown`, `room_confidence` is that classification,
+        `last_seen` is the client's last-active time, and `freshness` is
+        `fresh` or `stale`. `stale` means the last poll could not trust eero;
+        `is_home` is the previous value and nobody was marked away because
+        the poll failed. `room` stays `unknown` when the classifier will not
+        name a room. `zone` remains the node-level location either way.
       responses:
         "200":
           description: Current occupancy state
@@ -537,6 +540,175 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "503": { $ref: "#/components/responses/StoreUnconfigured" }
+
+  /presence/rooms/calibrate:
+    post:
+      tags: [presence]
+      operationId: calibrateRoom
+      summary: Start room calibration
+      description: |
+        Raja stands in one room. This records N on-demand eero reads
+        (about every 12 seconds) and stores them as that room's fingerprint:
+        node, coarse signal bucket, and time. `samples` defaults to 5 and
+        is capped at 8. Calling it again for the same person and room
+        replaces that room's samples.
+
+        The minute of reads does not fit in an HTTP integration, so this
+        returns **202** once sampling has been queued. `GET /presence/rooms`
+        shows the stored samples after it finishes. A failed run leaves the
+        previous samples in place.
+
+        Requires the same bearer token as `POST /mcp`. There is no
+        unauthenticated route to the fingerprint table.
+      security:
+        - mcpBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [person, room]
+              properties:
+                person:
+                  type: string
+                  description: Person name, matching the tracked-device mapping
+                room:
+                  type: string
+                  description: Room label. 1-40 letters, digits, spaces, hyphens, or underscores. `unknown` is reserved.
+                samples:
+                  type: integer
+                  minimum: 1
+                  maximum: 8
+                  description: How many eero reads to take. Defaults to 5.
+      responses:
+        "202":
+          description: Sampling started
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, person, room, samples, interval_seconds]
+                properties:
+                  status: { type: string, enum: [started] }
+                  person: { type: string }
+                  room: { type: string }
+                  samples: { type: integer }
+                  interval_seconds: { type: number }
+        "400":
+          description: Invalid room, person, or sample count, or the person is not tracked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "502":
+          description: Sampling could not be queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Fingerprint table or a required secret is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /presence/rooms:
+    get:
+      tags: [presence]
+      operationId: listRoomFingerprints
+      summary: List calibrated room fingerprints
+      description: |
+        Rooms and their samples (node, coarse signal bucket, time). Optional
+        `person` query filters to one person. Device identifiers are not
+        returned. Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      parameters:
+        - name: person
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Stored fingerprints
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rooms]
+                properties:
+                  rooms:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        person: { type: string }
+                        room: { type: string }
+                        sample_count: { type: integer }
+                        nodes: { type: array, items: { type: string } }
+                        buckets: { type: array, items: { type: integer } }
+                        updated_at: { type: string }
+                        samples:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              node: { type: string }
+                              bucket: { type: integer }
+                              signal: { type: string }
+                              taken_at: { type: string }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Fingerprint table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /presence/rooms/{room}:
+    delete:
+      tags: [presence]
+      operationId: deleteRoomFingerprint
+      summary: Delete a room fingerprint
+      description: |
+        Deletes the samples stored for `room`. Optional `person` limits the
+        delete to that person; omitting it deletes that room label for every
+        person. Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      parameters:
+        - name: room
+          in: path
+          required: true
+          schema: { type: string }
+        - name: person
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deleted count. Zero when the room had no samples.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [room, deleted]
+                properties:
+                  room: { type: string }
+                  deleted: { type: integer }
+        "400":
+          description: Room label is not valid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Fingerprint table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /policies/author:
     post:
@@ -916,6 +1088,14 @@ components:
           type: string
           nullable: true
           description: Connection quality reported by eero (for example strong, or a bar count)
+        room:
+          type: string
+          description: Calibrated room, or unknown when the classifier will not name one
+        room_confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Confidence of room. Zero when room is unknown.
         last_seen:
           type: string
           nullable: true
@@ -941,6 +1121,8 @@ components:
               zone: { type: string, nullable: true }
               node: { type: string, nullable: true }
               signal: { type: string, nullable: true }
+              room: { type: string }
+              room_confidence: { type: number }
               last_seen: { type: string, nullable: true }
               freshness: { type: string }
               miss_count:

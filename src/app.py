@@ -551,7 +551,7 @@ def _route_delete_learning(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _route_get_presence() -> Dict[str, Any]:
-    """GET /presence — occupancy, and the eero zone, signal, and freshness when polled."""
+    """GET /presence — occupancy, and the eero zone, room, signal, and freshness when polled."""
     table_name = os.environ.get("PRESENCE_TABLE_NAME", "")
     if not table_name:
         return _error(503, "Presence store not configured.")

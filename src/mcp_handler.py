@@ -56,10 +56,10 @@ _BEARER_RE = re.compile(r"(?i)bearer\s+(\S+)")
 INSTRUCTIONS = (
     "DeviceWeave MCP server. Tools call the same service functions as the HTTP API. "
     "health, list_devices, get_device, list_scenes, list_providers, get_presence, "
-    "get_learnings, list_policies, and get_policy read state. "
+    "list_room_fingerprints, get_learnings, list_policies, and get_policy read state. "
     "execute sends a natural-language command and can actuate devices. "
-    "delete_device, delete_scene, delete_policy, and delete_learning remove state. "
-    "create_device, update_device, set_presence, learn_phrase, author_policy, and ingest change state."
+    "delete_device, delete_scene, delete_policy, delete_learning, and delete_room_fingerprint remove state. "
+    "create_device, update_device, set_presence, calibrate_room, learn_phrase, author_policy, and ingest change state."
 )
 
 _READ_ONLY = {"readOnlyHint": True, "destructiveHint": False}
@@ -407,6 +407,41 @@ def _get_presence(_args: Dict[str, Any]) -> Dict[str, Any]:
     return _app()._route_get_presence()
 
 
+def _calibrate_room(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {
+        "person": _require_str(args, "person"),
+        "room": _require_str(args, "room"),
+    }
+    if "samples" in args and args["samples"] is not None:
+        samples = args["samples"]
+        if isinstance(samples, bool) or not isinstance(samples, int):
+            raise InvalidParams("samples must be an integer")
+        payload["samples"] = samples
+    return room_calibration_client.invoke("start", payload)
+
+
+def _list_room_fingerprints(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {}
+    person = _optional_str(args, "person")
+    if person:
+        payload["person"] = person
+    return room_calibration_client.invoke("list", payload)
+
+
+def _delete_room_fingerprint(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {"room": _require_str(args, "room")}
+    person = _optional_str(args, "person")
+    if person:
+        payload["person"] = person
+    return room_calibration_client.invoke("delete", payload)
+
+
 def _set_presence(args: Dict[str, Any]) -> Dict[str, Any]:
     if "is_home" not in args or not isinstance(args["is_home"], bool):
         raise InvalidParams("Missing required boolean argument 'is_home'")
@@ -623,11 +658,55 @@ TOOLS: List[Dict[str, Any]] = [
         "get_presence",
         "Get presence",
         "Read home occupancy for the policy engine. Includes the eero zone (node), signal, "
-        "last_seen, and freshness when the eero poller has written them. Defaults to home "
+        "room, room_confidence, last_seen, and freshness when the eero poller has written them. "
+        "room is unknown until calibration classifies the reading. Defaults to home "
         "when nothing has been written.",
         _NO_ARGS,
         _get_presence,
         _READ_ONLY,
+    ),
+    _tool(
+        "calibrate_room",
+        "Calibrate room",
+        "Stand in one room and record N eero readings (node and coarse signal bucket), about "
+        "12 seconds apart. samples defaults to 5 and must be 1-8. Calling this again for the "
+        "same person and room replaces that room's samples. Returns as soon as sampling starts; "
+        "list_room_fingerprints shows the stored samples after about a minute.",
+        {
+            "person": _str_prop("Person name, matching the tracked-device mapping."),
+            "room": _str_prop("Room label to store. 1-40 letters, digits, spaces, hyphens, or underscores."),
+            "samples": {
+                "type": "integer",
+                "description": "How many eero reads to take. Defaults to 5. Maximum 8.",
+                "minimum": 1,
+                "maximum": 8,
+            },
+        },
+        _calibrate_room,
+        _MUTATING,
+        ["person", "room"],
+    ),
+    _tool(
+        "list_room_fingerprints",
+        "List room fingerprints",
+        "List calibrated rooms and their samples (node, coarse signal bucket, time). "
+        "Optional person filter. Does not return device identifiers.",
+        {"person": _str_prop("Optional person filter.")},
+        _list_room_fingerprints,
+        _READ_ONLY,
+    ),
+    _tool(
+        "delete_room_fingerprint",
+        "Delete room fingerprint",
+        "Delete the samples stored for a room. Optional person limits the delete to that person; "
+        "omitting person deletes that room label for every person.",
+        {
+            "room": _str_prop("Room label to delete."),
+            "person": _str_prop("Optional person. Omit to delete this room for every person."),
+        },
+        _delete_room_fingerprint,
+        _DESTRUCTIVE,
+        ["room"],
     ),
     _tool(
         "set_presence",

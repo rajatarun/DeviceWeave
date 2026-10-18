@@ -36,7 +36,7 @@ _ALLOWED_TOP_KEYS = frozenset({"rule_id", "scope", "conditions", "action", "conf
 _ALLOWED_DEVICE_TYPES = frozenset({"fan", "light", "ac", "plug", "heater"})
 _ALLOWED_CONDITION_FIELDS = frozenset({
     "temperature", "humidity", "time_hour",
-    "cloud_cover_pct", "is_home", "is_overcast",
+    "cloud_cover_pct", "is_home", "is_overcast", "room",
 })
 _ALLOWED_OPERATORS = frozenset({">", "<", ">=", "<=", "==", "!="})
 _ALLOWED_ACTION_TYPES = frozenset({"block", "allow", "modify"})
@@ -46,6 +46,9 @@ _NUMERIC_FIELDS = frozenset({"temperature", "humidity", "time_hour", "cloud_cove
 
 # Fields whose condition value must be a boolean.
 _BOOLEAN_FIELDS = frozenset({"is_home", "is_overcast"})
+
+# Fields whose condition value is a string and only == / != are meaningful.
+_STRING_FIELDS = frozenset({"room"})
 
 
 class ValidationError(Exception):
@@ -227,4 +230,18 @@ def _validate_condition(cond: Any, index: int) -> None:
             raise ValidationError(
                 f"conditions[{index}].value for field '{field}' must be a "
                 f"boolean (true or false), got {type(value).__name__}."
+            )
+    elif field in _STRING_FIELDS:
+        if operator not in ("==", "!="):
+            raise ValidationError(
+                f"conditions[{index}].operator '{operator}' is not allowed for "
+                f"field '{field}'. Room comparisons use == or !=."
+            )
+        from room_fingerprint import is_room_label
+
+        if not is_room_label(value, allow_unknown=True):
+            raise ValidationError(
+                f"conditions[{index}].value for field '{field}' must be a room "
+                f"label (1-40 letters, digits, spaces, hyphens, or underscores) "
+                f"or the string 'unknown'."
             )
