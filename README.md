@@ -677,7 +677,7 @@ curl -X POST $API_URL/presence -H "Content-Type: application/json" -d '{"is_home
 
 Defaults to `true` when not set — avoids accidental lockout from "nobody home" policies.
 
-An eero poller can keep this item up to date from the mesh you already have: who is home, which node they are on, signal, and whether the reading is fresh. A phone that drops off Wi-Fi for one poll is not marked away, and a rejected eero session never marks the house empty. Setup (one-time login, tracked devices, deploy) is in [`docs/eero-presence.md`](docs/eero-presence.md). The eero API is unofficial and can change.
+An eero poller can keep this item up to date from the mesh you already have: who is home, which node they are on, signal, and whether the reading is fresh. A phone that drops off Wi-Fi for one poll is not marked away, and a rejected eero session never marks the house empty. The login cannot use an Amazon eero account; setup creates a separate email or phone admin, invites it from the owner's eero app, and accepts the invite. Steps are in [`docs/eero-presence.md`](docs/eero-presence.md). The eero API is unofficial and can change.
 
 ---
 

@@ -6,9 +6,10 @@ eero sends a one-time code by SMS or email. This script logs in, verifies
 the code, and stores the session token in Secrets Manager. It does not print
 the token. The presence poller reads that secret with GetSecretValue.
 
-The eero API used here is unofficial and can change. Accounts that sign in
-only with Amazon may not receive a code; an email or phone admin on the
-same network does.
+The eero API used here is unofficial and can change. It does not support
+Amazon sign-in. Log in as a separate standard eero account (email or phone
+and a one-time code) that the owner has invited as a network admin. See
+docs/eero-presence.md.
 
 Examples
 --------
@@ -43,7 +44,10 @@ def main(argv: list[str] | None = None) -> int:
 
     login_parser = sub.add_parser("login", help="Request a code, verify it, store the session")
     _add_common(login_parser)
-    login_parser.add_argument("--identifier", help="Eero account email or phone. Prompted when omitted.")
+    login_parser.add_argument(
+        "--identifier",
+        help="Dedicated admin email or phone (not an Amazon login). Prompted when omitted.",
+    )
     login_parser.add_argument("--code", help="Verification code. Prompted when omitted.")
 
     track_parser = sub.add_parser("track", help="Map one eero client to a person")
@@ -95,11 +99,16 @@ def _login(args: argparse.Namespace) -> int:
     if not secret_name:
         print("secret name must not be blank", file=sys.stderr)
         return 2
-    identifier = (args.identifier or "").strip() or input("Eero login (email or phone): ").strip()
+    identifier = (args.identifier or "").strip() or input(
+        "Dedicated admin email or phone (not an Amazon login): "
+    ).strip()
     if not identifier:
         print("email or phone is required", file=sys.stderr)
         return 2
-    print("Requesting a verification code from eero...")
+    print(
+        "Requesting a one-time code for the dedicated admin account. "
+        "Do not use an Amazon login."
+    )
     user_token = eero_client.login(identifier)
     code = (args.code or "").strip() or input("Verification code: ").strip()
     if not code:

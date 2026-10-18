@@ -7,6 +7,7 @@ Every eero HTTP call is a stand-in. Nothing in this file opens a socket.
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import re
@@ -106,6 +107,74 @@ def test_login_and_verify_use_the_unofficial_auth_flow(monkeypatch):
     assert seen[1].full_url == f"{eero_client.API_BASE}/login/verify"
     assert json.loads(seen[1].data.decode()) == {"code": "123456"}
     assert seen[1].get_header("Cookie") == "s=verify-session"
+
+
+def _assert_amazon_workaround(message: str) -> None:
+    assert "Amazon" in message
+    assert "one-time code" in message
+    assert "network admin" in message
+    assert "accept the invite" in message
+    assert "dedicated admin" in message
+
+
+def test_login_401_error_login_unknown_explains_the_admin_workaround(monkeypatch):
+    _install(monkeypatch, {
+        "/login": (401, {"meta": {"code": 401, "error": "error.login.unknown"}}),
+    })
+    try:
+        eero_client.login("owner@example.com")
+    except eero_client.EeroAuthError as exc:
+        assert exc.status == 401
+        assert exc.error_code == "error.login.unknown"
+        _assert_amazon_workaround(str(exc))
+    else:
+        raise AssertionError("Amazon-linked login should fail")
+
+
+def test_login_401_without_error_code_still_explains_the_workaround(monkeypatch):
+    _install(monkeypatch, {
+        "/login": (401, {"meta": {"code": 401}}),
+    })
+    try:
+        eero_client.login("owner@example.com")
+    except eero_client.EeroAuthError as exc:
+        assert exc.status == 401
+        _assert_amazon_workaround(str(exc))
+    else:
+        raise AssertionError("HTTP 401 on login should fail")
+
+
+def test_login_cli_prints_the_amazon_workaround(monkeypatch, capsys):
+    _install(monkeypatch, {
+        "/login": (401, {"meta": {"code": 401, "error": "error.login.unknown"}}),
+    })
+    script = _login_cli()
+    code = script.main(["login", "--identifier", "owner@example.com"])
+    err = capsys.readouterr().err
+    assert code == 1
+    _assert_amazon_workaround(err)
+
+
+def test_session_401_is_not_reported_as_an_amazon_login(monkeypatch):
+    _install(monkeypatch, {
+        "/account": (401, {"meta": {"code": 401, "error": "error.session.invalid"}}),
+    })
+    try:
+        eero_client.list_connected_clients("session-token")
+    except eero_client.EeroAuthError as exc:
+        assert exc.error_code == "error.session.invalid"
+        assert "network admin" not in str(exc)
+        assert "dedicated admin" not in str(exc)
+    else:
+        raise AssertionError("expired session should fail")
+
+
+def _login_cli():
+    path = REPO / "scripts" / "eero_login.py"
+    spec = importlib.util.spec_from_file_location("eero_login_cli", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_client_list_parses_into_presence(monkeypatch):

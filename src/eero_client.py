@@ -26,6 +26,11 @@ and schmittx/home-assistant-eero):
 A 401/403, including meta error ``error.session.refresh`` and
 ``error.session.invalid``, is an auth failure. Callers must not treat that
 as "nobody is home".
+
+``POST /login`` answers an Amazon-linked identifier with HTTP 401 and
+``error.login.unknown``. That sign-in method is not supported. ``login()``
+turns those responses into instructions to create a standard email or phone
+account, invite it as a network admin, and log in as that admin.
 """
 
 from __future__ import annotations
@@ -61,16 +66,44 @@ class EeroApiError(EeroError):
     """A transport or non-auth API failure. Also not evidence that anyone left."""
 
 
+# Shown when POST /login is rejected. Amazon sign-in produces HTTP 401 and
+# meta error error.login.unknown. Session failures use error.session.* on
+# later calls and must not be rewritten into this message.
+AMAZON_LOGIN_WORKAROUND = (
+    "eero rejected this login. The unofficial API does not support Amazon sign-in "
+    "(HTTP 401, error.login.unknown). Create a separate standard eero account that "
+    "uses email or phone with a one-time code, not Amazon login. In the owner's "
+    "eero app, invite that account as a network admin, and accept the invite. "
+    "Then run scripts/eero_login.py with that dedicated admin account."
+)
+
+
 def login(identifier: str, urlopen: Optional[UrlOpen] = None) -> str:
     """Start login. Returns the user_token that must be sent to login/verify."""
     identifier = (identifier or "").strip()
     if not identifier:
         raise EeroAuthError("missing email or phone")
-    data = request_json("POST", "login", body={"login": identifier}, urlopen=urlopen)
+    try:
+        data = request_json("POST", "login", body={"login": identifier}, urlopen=urlopen)
+    except EeroAuthError as exc:
+        if _is_amazon_login_rejection(exc):
+            raise EeroAuthError(
+                AMAZON_LOGIN_WORKAROUND,
+                status=exc.status,
+                error_code=exc.error_code,
+            ) from exc
+        raise
     token = data.get("user_token") if isinstance(data, dict) else None
     if not token:
         raise EeroAuthError("login did not return a user_token")
     return str(token)
+
+
+def _is_amazon_login_rejection(exc: EeroAuthError) -> bool:
+    """True for the login response an Amazon-linked account receives."""
+    if (exc.error_code or "").strip().lower() == "error.login.unknown":
+        return True
+    return exc.status == 401
 
 
 def login_verify(code: str, user_token: str, urlopen: Optional[UrlOpen] = None) -> str:

@@ -6,19 +6,28 @@ The poller is a Lambda on an EventBridge Scheduler rate (default every 5 minutes
 
 **The eero API is unofficial.** It is the cloud API used by the open-source `eero-client` Python library and the Home Assistant eero integration (`POST /login`, `POST /login/verify`, `GET /account`, `GET /networks/{id}/devices` on `api-user.e2ro.com`). eero does not publish it and can change or shut it off without notice. When that happens the poller keeps the last presence, marks it stale, and does not mark anyone away.
 
-Amazon-only eero logins often do not receive a verification code. An email or phone login that is an admin on the same network does.
+## Dedicated admin account
+
+The login CLI cannot use an Amazon eero login. Raja's owner account signs in with Amazon, and this API answers that identifier with HTTP 401 and `error.login.unknown`. Create a separate standard account and invite it as a network admin. The CLI must log in as that dedicated admin, not as the Amazon owner account.
+
+1. Create a new eero account with an email address or a phone number. Choose the one-time code sign-in. Do not choose Amazon login.
+2. On the owner's phone, open the eero app and invite that new account as a network admin.
+3. Accept the invite on the new account (the email or SMS from eero, or the eero app signed in as the new account).
+4. Run the login CLI below and enter that dedicated admin's email or phone, then the one-time code.
+
+If the identifier is still the Amazon account, the CLI stops with a message that repeats these steps. It does not store a session.
 
 ## What you run before the first poll
 
 The stack does not create the session secret and it does not know which devices are yours. Do this once, from a checkout of this repo, with AWS credentials that can write Secrets Manager and the tracked-device table in `us-east-1`. The login script is safe to run before or after the stack deploy. A missing secret does not fail the deploy, and it does not mark anyone away.
 
-1. Log in. eero sends a code by SMS or email. The script stores the session and does not print it.
+1. Log in as the dedicated admin from the section above. eero sends a code by SMS or email to that account. The script stores the session and does not print it.
 
    ```bash
    python scripts/eero_login.py
    ```
 
-   The default secret name is `deviceweave/eero-session`. Override it with `--secret-name` only if the deploy used a different `EeroSessionSecretName`. The name must not be blank.
+   The default secret name is `deviceweave/eero-session`. Override it with `--secret-name` only if the deploy used a different `EeroSessionSecretName`. The name must not be blank. The prompt asks for the dedicated admin email or phone, not the Amazon owner login.
 
 2. Map each device to a person, by MAC or by the name eero shows (nickname, hostname, or display name). The MAC below is a placeholder.
 
