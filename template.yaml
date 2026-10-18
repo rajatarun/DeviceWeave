@@ -808,7 +808,9 @@ Resources:
   # Room calibration. Not in the VPC, same reason as the poller.
   # HTTP returns before the sample minute finishes; the function invokes
   # itself asynchronously to read eero. This role is the only writer of
-  # the fingerprint table. The routes require the MCP bearer token.
+  # the fingerprint table and the room check-in table. The poller can
+  # read fingerprints and cannot read or write check-ins. The routes
+  # require the MCP bearer token.
   # -------------------------------------------------------------------
   EeroCalibrationFunction:
     Type: AWS::Serverless::Function
@@ -827,6 +829,7 @@ Resources:
           EERO_DEVICE_HMAC_SECRET_NAME: !Ref EeroDeviceHmacSecretName
           EERO_TRACKED_TABLE: !Ref EeroTrackedDevicesTable
           ROOM_FINGERPRINT_TABLE: !Ref RoomFingerprintTable
+          ROOM_CHECKIN_TABLE: !Ref RoomCheckinTable
           EERO_CALIBRATION_FUNCTION_NAME: !Sub "deviceweave-eero-calibration-${StageName}"
           MCP_AUTH_TOKEN_SECRET_NAME: !Ref McpAuthTokenSecretName
           EERO_NETWORK_ID: !If
@@ -837,6 +840,8 @@ Resources:
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
             TableName: !Ref RoomFingerprintTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RoomCheckinTable
         - DynamoDBReadPolicy:
             TableName: !Ref EeroTrackedDevicesTable
         - AWSSecretsManagerGetSecretValuePolicy:
@@ -869,6 +874,36 @@ Resources:
           Properties:
             ApiId: !Ref DeviceWeaveApi
             Path: /presence/rooms/{room}
+            Method: DELETE
+        RecordRoomCheckin:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence/checkins
+            Method: POST
+        CaptureRoomReading:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence/checkins/capture
+            Method: POST
+        LabelRoomCheckin:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence/checkins/{checkin_id}/label
+            Method: POST
+        ListRoomCheckins:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence/checkins
+            Method: GET
+        DeleteRoomCheckin:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence/checkins/{checkin_id}
             Method: DELETE
 
   EeroCalibrationFunctionLogGroup:
@@ -1350,6 +1385,31 @@ Resources:
           KeyType: RANGE
 
   # -------------------------------------------------------------------
+  # DynamoDB — room check-ins (a week or more of labeled readings).
+  # Pay-per-request. Encryption is the default AWS owned key.
+  # No TTL: the rows are the training set. No RoleName or other
+  # custom IAM name. Written only by the calibration Lambda.
+  # -------------------------------------------------------------------
+  RoomCheckinTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-room-checkins-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  # -------------------------------------------------------------------
   # DynamoDB — Policy Store
   # Stores validated Policy DSL rules with full version history.
   # -------------------------------------------------------------------
@@ -1552,6 +1612,12 @@ Outputs:
     Value: !Ref RoomFingerprintTable
     Export:
       Name: !Sub "DeviceWeaveRoomFingerprintTable-${StageName}"
+
+  RoomCheckinTableName:
+    Description: DynamoDB table of labeled room check-ins
+    Value: !Ref RoomCheckinTable
+    Export:
+      Name: !Sub "DeviceWeaveRoomCheckinTable-${StageName}"
 
   # The outputs below complete the set an automation harness needs to resolve
   # every coordinate from `describe-stacks` alone. scripts/stack_env.py reads

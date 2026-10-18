@@ -6,6 +6,11 @@ HTTP routes (same bearer token as POST /mcp):
   POST   /presence/rooms/calibrate     start a sample run, return 202
   GET    /presence/rooms                list stored fingerprints
   DELETE /presence/rooms/{room}         delete one room's samples
+  POST   /presence/checkins             record a labeled check-in
+  POST   /presence/checkins/capture     snapshot eero without a label
+  POST   /presence/checkins/{id}/label  attach the room answer
+  GET    /presence/checkins             list check-ins
+  DELETE /presence/checkins/{id}        delete one check-in
 
 API Gateway's integration limit is about 30 seconds, and a minute of
 eero reads does not fit in that. The HTTP request checks the room name,
@@ -14,13 +19,15 @@ asynchronously to take the samples. List and delete run in the request.
 
 The function is not in a VPC, for the same reason as the presence
 poller: eero's API is on the public internet. It is the only role that
-can write the fingerprint table. The poller can read that table.
+can write the fingerprint table and the room check-in table. The poller
+can read fingerprints. It cannot read or write check-ins.
 
 Direct invokes (the async sample run, and the MCP tools, which call
-this function rather than writing the table themselves) use ``action``
-of ``collect``, ``start``, ``list``, or ``delete``. Those invokes are
-IAM-gated. The public routes are the HTTP ones, and they require the
-bearer token.
+this function rather than writing the tables themselves) use ``action``
+of ``collect``, ``start``, ``list``, ``delete``, ``record_checkin``,
+``capture_reading``, ``label_checkin``, ``list_checkins``, or
+``delete_checkin``. Those invokes are IAM-gated. The public routes are
+the HTTP ones, and they require the bearer token.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ import aws_clients
 import eero_client
 import eero_presence
 import eero_presence_handler
+import room_checkin
 import room_fingerprint
 from room_fingerprint import LabelError
 
@@ -62,6 +70,16 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return list_rooms(event.get("person"))
     if action == "delete":
         return delete_room(event.get("room"), event.get("person"))
+    if action == "record_checkin":
+        return record_checkin(event)
+    if action == "capture_reading":
+        return capture_checkin(event)
+    if action == "label_checkin":
+        return label_checkin(event)
+    if action == "list_checkins":
+        return list_checkins(event)
+    if action == "delete_checkin":
+        return delete_checkin(event)
     return _error(400, "unknown action")
 
 
@@ -240,6 +258,34 @@ def _http(event: Dict[str, Any]) -> Dict[str, Any]:
         return list_rooms(_query(event, "person"))
     if route == "delete":
         return delete_room(_room_from_path(event, path), _query(event, "person"))
+    if route == "checkin_record":
+        try:
+            body = _body_json(event)
+        except LabelError as exc:
+            return _error(400, str(exc))
+        return record_checkin(body)
+    if route == "checkin_capture":
+        try:
+            body = _body_json(event)
+        except LabelError as exc:
+            return _error(400, str(exc))
+        return capture_checkin(body)
+    if route == "checkin_label":
+        try:
+            body = _body_json(event)
+        except LabelError as exc:
+            return _error(400, str(exc))
+        body = dict(body)
+        body["checkin_id"] = _checkin_id(event, path, label=True)
+        return label_checkin(body)
+    if route == "checkin_list":
+        return list_checkins({
+            "person": _query(event, "person"),
+            "since": _query(event, "since"),
+            "limit": _limit_query(event),
+        })
+    if route == "checkin_delete":
+        return delete_checkin({"checkin_id": _checkin_id(event, path, label=False)})
     return _error(404, "not found")
 
 
@@ -267,6 +313,16 @@ def _authorized(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def _route(method: str, path: str) -> str:
     trimmed = path.rstrip("/")
+    if method == "POST" and trimmed.endswith("/presence/checkins/capture"):
+        return "checkin_capture"
+    if method == "POST" and trimmed.endswith("/label") and "/presence/checkins/" in trimmed:
+        return "checkin_label"
+    if method == "POST" and trimmed.endswith("/presence/checkins"):
+        return "checkin_record"
+    if method == "GET" and trimmed.endswith("/presence/checkins"):
+        return "checkin_list"
+    if method == "DELETE" and "/presence/checkins/" in trimmed:
+        return "checkin_delete"
     if method == "POST" and trimmed.endswith("/presence/rooms/calibrate"):
         return "calibrate"
     if method == "GET" and trimmed.endswith("/presence/rooms"):
@@ -274,6 +330,128 @@ def _route(method: str, path: str) -> str:
     if method == "DELETE" and "/presence/rooms/" in trimmed:
         return "delete"
     return ""
+
+
+def record_checkin(event: Dict[str, Any]) -> Dict[str, Any]:
+    table = _checkin_table()
+    if table is None:
+        return _error(503, "Room check-in table is not configured")
+    try:
+        record = room_checkin.record(
+            table,
+            event.get("person"),
+            event.get("room"),
+            asked_at=event.get("asked_at"),
+            source=event.get("source"),
+        )
+    except room_checkin.CheckinError as exc:
+        return _error(exc.status, exc.message)
+    except Exception:
+        logger.error("checkin record failed")
+        return _error(500, "Could not store the check-in")
+    logger.info(
+        "checkin stored room=%s freshness=%s",
+        record.get("room"),
+        record.get("freshness"),
+    )
+    return _json(200, record)
+
+
+def capture_checkin(event: Dict[str, Any]) -> Dict[str, Any]:
+    table = _checkin_table()
+    if table is None:
+        return _error(503, "Room check-in table is not configured")
+    try:
+        record = room_checkin.capture(
+            table,
+            event.get("person"),
+            asked_at=event.get("asked_at"),
+            source=event.get("source"),
+        )
+    except room_checkin.CheckinError as exc:
+        return _error(exc.status, exc.message)
+    except Exception:
+        logger.error("checkin capture failed")
+        return _error(500, "Could not store the check-in")
+    logger.info("checkin captured freshness=%s", record.get("freshness"))
+    return _json(200, record)
+
+
+def label_checkin(event: Dict[str, Any]) -> Dict[str, Any]:
+    table = _checkin_table()
+    if table is None:
+        return _error(503, "Room check-in table is not configured")
+    try:
+        record = room_checkin.label(table, event.get("checkin_id"), event.get("room"))
+    except room_checkin.CheckinError as exc:
+        return _error(exc.status, exc.message)
+    except Exception:
+        logger.error("checkin label failed")
+        return _error(500, "Could not label the check-in")
+    logger.info("checkin labeled room=%s", record.get("room"))
+    return _json(200, record)
+
+
+def list_checkins(event: Dict[str, Any]) -> Dict[str, Any]:
+    table = _checkin_table()
+    if table is None:
+        return _error(503, "Room check-in table is not configured")
+    try:
+        rows = room_checkin.list_checkins(
+            table,
+            person=event.get("person"),
+            since=event.get("since"),
+            limit=event.get("limit"),
+        )
+    except room_checkin.CheckinError as exc:
+        return _error(exc.status, exc.message)
+    except Exception:
+        logger.error("checkin list failed")
+        return _error(500, "Could not list check-ins")
+    logger.info("checkin listed count=%s", len(rows))
+    return _json(200, {"checkins": rows})
+
+
+def delete_checkin(event: Dict[str, Any]) -> Dict[str, Any]:
+    table = _checkin_table()
+    if table is None:
+        return _error(503, "Room check-in table is not configured")
+    try:
+        deleted = room_checkin.delete_checkin(table, event.get("checkin_id"))
+    except room_checkin.CheckinError as exc:
+        return _error(exc.status, exc.message)
+    except Exception:
+        logger.error("checkin delete failed")
+        return _error(500, "Could not delete the check-in")
+    logger.info("checkin deleted count=%s", deleted)
+    return _json(200, {"checkin_id": event.get("checkin_id"), "deleted": deleted})
+
+
+def _checkin_table() -> Any:
+    table_name = os.environ.get("ROOM_CHECKIN_TABLE", "").strip()
+    if not table_name:
+        return None
+    return aws_clients.get_dynamodb_resource().Table(table_name)
+
+
+def _checkin_id(event: Dict[str, Any], path: str, *, label: bool) -> str:
+    params = event.get("pathParameters") or {}
+    if isinstance(params, dict) and params.get("checkin_id"):
+        return urllib.parse.unquote(str(params["checkin_id"]))
+    tail = path.split("/presence/checkins/", 1)[-1].strip("/")
+    if label and tail.endswith("/label"):
+        tail = tail[: -len("/label")].strip("/")
+    return urllib.parse.unquote(tail)
+
+
+def _limit_query(event: Dict[str, Any]) -> Any:
+    raw = _query(event, "limit")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
 
 
 def _room_from_path(event: Dict[str, Any], path: str) -> str:
