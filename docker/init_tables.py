@@ -74,6 +74,16 @@ TABLES = [
         "BillingMode": "PAY_PER_REQUEST",
     },
     {
+        "TableName": os.environ.get("EERO_TRACKED_TABLE", "deviceweave-eero-tracked-dev"),
+        "AttributeDefinitions": [
+            {"AttributeName": "pk", "AttributeType": "S"},
+        ],
+        "KeySchema": [
+            {"AttributeName": "pk", "KeyType": "HASH"},
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+    },
+    {
         "TableName": os.environ.get("SCENE_TABLE_NAME", "deviceweave-scenes-dev"),
         "AttributeDefinitions": [
             {"AttributeName": "scene_id", "AttributeType": "S"},

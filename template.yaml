@@ -303,6 +303,46 @@ Parameters:
       --secret-string "$(openssl rand -hex 32)". Do not put the token in
       this template or in a deploy parameter.
 
+  # -----------------------------------------------------------------------
+  # Eero presence — unofficial cloud API, polled by a Lambda outside the VPC.
+  # The secret name must not be blank: an empty override is rejected by
+  # AllowedPattern and MinLength, which is the failure mode that broke
+  # earlier deploys (a bare Parameter= with an empty value).
+  # -----------------------------------------------------------------------
+  EeroSessionSecretName:
+    Type: String
+    Default: deviceweave/eero-session
+    MinLength: 1
+    AllowedPattern: "[A-Za-z0-9/_+=.@-]+"
+    Description: >
+      Secrets Manager name of the eero session token written by
+      scripts/eero_login.py. The poller may call GetSecretValue on this
+      secret only. Do not put the token in this template. Must not be blank.
+
+  EeroPollSchedule:
+    Type: String
+    Default: "rate(5 minutes)"
+    AllowedPattern: 'rate\([1-9][0-9]* (minute|minutes|hour|hours|day|days)\)|cron\([^)]+\)'
+    Description: >
+      EventBridge Scheduler expression for the eero presence poll.
+      Default is every 5 minutes. Must not be blank.
+
+  EeroAwayMissThreshold:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    MaxValue: 30
+    Description: >
+      Consecutive polls that must miss every device mapped to a person
+      before that person is marked away. Arrival is immediate.
+
+  EeroNetworkId:
+    Type: String
+    Default: ""
+    AllowedPattern: "[0-9]*"
+    Description: >
+      Optional eero network id. Blank polls every network on the account.
+
 Resources:
   # -------------------------------------------------------------------
   # Lambda Security Group
@@ -657,6 +697,87 @@ Resources:
     Properties:
       LogGroupName: !Sub "/aws/lambda/deviceweave-ingestion-${StageName}"
       RetentionInDays: 14
+
+  # -------------------------------------------------------------------
+  # Eero presence poller
+  # Not in the VPC: eero's cloud API is on the public internet, and the
+  # private subnets only reach it through NAT. No VPC, no NAT, no
+  # always-on process. EventBridge Scheduler invokes it on EeroPollSchedule.
+  # -------------------------------------------------------------------
+  EeroPresenceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "deviceweave-eero-presence-${StageName}"
+      CodeUri: src/
+      Handler: eero_presence_handler.handler
+      Timeout: 30
+      MemorySize: 256
+      Description: >
+        Poll eero's unofficial cloud API and update home presence
+        (occupancy, node/zone, signal, last_seen).
+      Environment:
+        Variables:
+          EERO_SESSION_SECRET_NAME: !Ref EeroSessionSecretName
+          EERO_TRACKED_TABLE: !Ref EeroTrackedDevicesTable
+          EERO_AWAY_MISS_THRESHOLD: !Sub "${EeroAwayMissThreshold}"
+          EERO_NETWORK_ID: !If
+            - HasEeroNetwork
+            - !Ref EeroNetworkId
+            - !Ref AWS::NoValue
+      Policies:
+        - CloudWatchLogsFullAccess
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PresenceTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EeroTrackedDevicesTable
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${EeroSessionSecretName}-*"
+
+  EeroPresenceFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/deviceweave-eero-presence-${StageName}"
+      RetentionInDays: 14
+
+  EeroPresenceScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "deviceweave-eero-presence-schedule-${StageName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: InvokeEeroPresence
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt EeroPresenceFunction.Arn
+
+  EeroPresencePollSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "deviceweave-eero-presence-${StageName}"
+      Description: Poll the unofficial eero cloud API and update DeviceWeave presence
+      ScheduleExpression: !Ref EeroPollSchedule
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: !GetAtt EeroPresenceFunction.Arn
+        RoleArn: !GetAtt EeroPresenceScheduleRole.Arn
+        Input: '{"source":"eero-scheduler"}'
+        RetryPolicy:
+          MaximumRetryAttempts: 0
+          MaximumEventAgeInSeconds: 300
 
   # -------------------------------------------------------------------
   # Policy Authoring Lambda
@@ -1080,6 +1201,23 @@ Resources:
           KeyType: HASH
 
   # -------------------------------------------------------------------
+  # DynamoDB — eero devices mapped to people (MAC or name).
+  # Written by scripts/eero_login.py track. Small, on-demand, no VPC.
+  # -------------------------------------------------------------------
+  EeroTrackedDevicesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-eero-tracked-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+
+  # -------------------------------------------------------------------
   # DynamoDB — Policy Store
   # Stores validated Policy DSL rules with full version history.
   # -------------------------------------------------------------------
@@ -1168,6 +1306,7 @@ Conditions:
     - !Not [!Equals [!Join ["", !Ref LambdaPublicSubnetIds], ""]]
     - !Equals [!Ref LambdaUsePublicSubnets, "true"]
   LambdaDualStack: !Equals [!Ref LambdaIpv6DualStack, "true"]
+  HasEeroNetwork: !Not [!Equals [!Ref EeroNetworkId, ""]]
 
 Outputs:
   ApiBaseUrl:
@@ -1263,6 +1402,18 @@ Outputs:
     Value: !Ref PresenceTable
     Export:
       Name: !Sub "DeviceWeavePresenceTable-${StageName}"
+
+  EeroTrackedDevicesTableName:
+    Description: DynamoDB table of eero clients mapped to people
+    Value: !Ref EeroTrackedDevicesTable
+    Export:
+      Name: !Sub "DeviceWeaveEeroTrackedTable-${StageName}"
+
+  EeroPresenceFunctionArn:
+    Description: Eero presence poller Lambda ARN
+    Value: !GetAtt EeroPresenceFunction.Arn
+    Export:
+      Name: !Sub "DeviceWeaveEeroPresenceFunctionArn-${StageName}"
 
   # The outputs below complete the set an automation harness needs to resolve
   # every coordinate from `describe-stacks` alone. scripts/stack_env.py reads

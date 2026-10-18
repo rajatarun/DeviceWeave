@@ -420,3 +420,17 @@ The abstraction is deliberate and stated in the codebook:
 - one step of grace after an uncontrollable change ("reaction"), which can be switched off.
 
 Outcomes distinguish *exact* from *preemptive* (forcing before anything happened) and *over-restrictive* (safe only by refusing what the property allows). A refusal-only guard is never credited with a property it can only satisfy by also refusing commands the user allowed. The paper draft holds placeholders only, and a test fails if one names a key the analysis does not produce.
+
+---
+
+## 36. Eero presence polls the unofficial cloud API into the existing presence item
+
+**Chosen**: a Lambda outside the VPC, invoked by EventBridge Scheduler (default `rate(5 minutes)`), calling the same unofficial eero cloud API as `eero-client` and the Home Assistant eero integration. Tracked devices (MAC or name → person) live in a small on-demand DynamoDB table. The poller writes `pk=home_state` through `presence_store`, which `GET /presence` and the policy engine already read. `is_home` stays the occupancy flag; zone, node, signal, last_seen, and freshness are extra attributes on that item. The session token is written once by `scripts/eero_login.py` into Secrets Manager (`deviceweave/eero-session` by default). The function's IAM allows `secretsmanager:GetSecretValue` on that secret only.
+
+**Rejected**: new presence hardware; running the poll inside the VPC ingestion Lambda (the private subnets need NAT to reach eero, and this feature stays pay-per-request); a second occupancy table; marking everyone away when eero returns 401 or the client list cannot be fetched; putting the session token or device MACs in the template or the repo; a SAM `Schedule` event (EventBridge rule) instead of Scheduler, because the schedule has to be a deploy parameter and Scheduler is the resource that takes a schedule expression directly.
+
+Departure waits for `EeroAwayMissThreshold` consecutive misses (default 3) of every device mapped to that person. Arrival is immediate. Auth failure, transport failure, a blank secret, and an empty tracked-device table call `apply_stale`: the last `is_home` is kept, `freshness` becomes `stale`, and a missing record defaults to home. That matches decision 22. The secret name and schedule are passed as non-empty workflow overrides; `AllowedPattern` and `MinLength` reject a blank secret name, which is the empty-parameter failure that broke earlier deploys.
+
+The API is unofficial and may change. The client pins the paths those libraries use (`/login`, `/login/verify` with cookie `s`, `/account`, `/networks/{id}/devices`) and tests them with mocked HTTP so CI never calls eero.
+
+Amazon sign-in is not supported: `POST /login` returns HTTP 401 and `error.login.unknown`. The login CLI is for a separate standard account (email or phone, one-time code) that the owner invites as a network admin. A login 401 is reported with those steps. A later session 401 (`error.session.invalid`, `error.session.refresh`) stays on the fail-safe path and is not described as an Amazon-login problem.

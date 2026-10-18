@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 import behavior_engine
 import decision_engine
 import graph_engine
+import presence_store
 from aws_clients import get_dynamodb_resource
 from device_resolver import (
     DeviceRegistryError,
@@ -281,13 +282,15 @@ def _route_presence(event: Dict[str, Any]) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     try:
         table = get_dynamodb_resource().Table(table_name)
-        table.put_item(Item={"pk": "home_state", "is_home": is_home, "updated_at": now})
+        current = presence_store.read_home(table)
+        item = presence_store.apply_manual(current, is_home, now)
+        presence_store.write_home(table, item)
     except Exception as exc:
         logger.error("Presence update failed: %s", exc, exc_info=True)
         return _error(500, f"Failed to update presence state: {exc}")
 
     logger.info("Presence updated: is_home=%s", is_home)
-    return _ok({"is_home": is_home, "updated_at": now})
+    return _ok(presence_store.public_view(item))
 
 
 def _route_get_device(device_id: str) -> Dict[str, Any]:
@@ -548,18 +551,15 @@ def _route_delete_learning(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _route_get_presence() -> Dict[str, Any]:
-    """GET /presence — current home-occupancy state."""
+    """GET /presence — occupancy, and the eero zone, signal, and freshness when polled."""
     table_name = os.environ.get("PRESENCE_TABLE_NAME", "")
     if not table_name:
         return _error(503, "Presence store not configured.")
 
     try:
         table = get_dynamodb_resource().Table(table_name)
-        resp = table.get_item(Key={"pk": "home_state"})
-        item = resp.get("Item")
-        if item is None:
-            return _ok({"is_home": True, "updated_at": None})
-        return _ok({"is_home": item.get("is_home", True), "updated_at": item.get("updated_at")})
+        item = presence_store.read_home(table)
+        return _ok(presence_store.public_view(item))
     except Exception as exc:
         logger.error("Get presence failed: %s", exc, exc_info=True)
         return _error(500, f"Failed to get presence state: {exc}")

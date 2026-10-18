@@ -122,7 +122,7 @@ DeviceWeave also serves a remote MCP endpoint at `POST /mcp`. See [Remote MCP se
 | `GET` | `/learnings` | — | List all learned phrases |
 | `DELETE` | `/learnings` | `{"device_id": "...", "phrase": "..."}` | Remove a learned phrase |
 | `POST` | `/presence` | `{"is_home": true\|false}` | Update home-occupancy state for the Policy Engine |
-| `GET` | `/presence` | — | Get current home-occupancy state |
+| `GET` | `/presence` | — | Occupancy plus eero zone, node, signal, last_seen, and freshness |
 
 ### Policy Authoring API
 
@@ -341,7 +341,7 @@ Each tool calls the same in-process service function as the matching HTTP route.
 | `update_device` | `PUT /devices/{id}` | `device_id` plus any of `name`, `capabilities`, `ip`, `device_type`, `model` |
 | `delete_device` | `DELETE /devices/{id}` | **Destructive.** Deactivates the device |
 | `execute` | `POST /execute` | **Destructive.** Can actuate hardware. `command`, optional `session_id`, or a vision `source` |
-| `get_presence` | `GET /presence` | Read-only |
+| `get_presence` | `GET /presence` | Read-only. Includes eero zone, node, signal, and freshness when the poller has written them |
 | `set_presence` | `POST /presence` | `is_home` boolean |
 | `list_scenes` | `GET /scenes` | Read-only |
 | `delete_scene` | `DELETE /scenes/{id}` | **Destructive.** Argument: `scene_id` |
@@ -677,6 +677,8 @@ curl -X POST $API_URL/presence -H "Content-Type: application/json" -d '{"is_home
 
 Defaults to `true` when not set — avoids accidental lockout from "nobody home" policies.
 
+An eero poller can keep this item up to date from the mesh you already have: who is home, which node they are on, signal, and whether the reading is fresh. A phone that drops off Wi-Fi for one poll is not marked away, and a rejected eero session never marks the house empty. The login cannot use an Amazon eero account; setup creates a separate email or phone admin, invites it from the owner's eero app, and accepts the invite. Steps are in [`docs/eero-presence.md`](docs/eero-presence.md). The eero API is unofficial and can change.
+
 ---
 
 ## Devices
@@ -723,9 +725,14 @@ DeviceWeave/
 ├── docs/
 │   ├── oidc-trust-policy.json       IAM trust policy for GitHub OIDC role
 │   ├── ui-update-spec.md            UI implementation spec (devices/scenes/providers)
-│   └── ui-conversational-agent-spec.md  UI spec — Home tab conversational interface
+│   ├── ui-conversational-agent-spec.md  UI spec — Home tab conversational interface
+│   └── eero-presence.md             Eero mesh presence — login, tracked devices, deploy
 └── src/
     ├── app.py                       Execution Lambda — routing, dispatch, conversational path
+    ├── presence_store.py            Home-occupancy item shared by /presence and the eero poller
+    ├── eero_client.py               Unofficial eero cloud API client
+    ├── eero_presence.py             Client list → presence, with away debounce
+    ├── eero_presence_handler.py     Scheduler Lambda — poll eero, write presence
     ├── bedrock_agent.py             Bedrock Converse API agentic loop + tool implementations
     ├── conversation_store.py        DynamoDB-backed session store (24 h TTL)
     ├── sms_handler.py               End User Messaging inbound SMS Lambda handler
