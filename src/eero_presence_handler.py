@@ -118,6 +118,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return _mark_stale(table, "tracked eero devices were unusable")
 
     _assign_rooms(updated, previous, tracked, clients)
+    _apply_schedule(updated, previous)
     try:
         presence_store.write_home(table, updated)
     except Exception as exc:
@@ -238,6 +239,115 @@ def _assign_rooms(
     )
 
 
+def _apply_schedule(updated: Dict[str, Any], previous: Any) -> None:
+    """Apply a home time-window rule and record one training row per hour.
+
+    A missing table or a failed check-in write does not change occupancy
+    and does not undo the room the rule just set.
+    """
+    table_name = os.environ.get("ROOM_SCHEDULE_TABLE", "").strip()
+    if not table_name:
+        return
+    try:
+        import room_schedule
+
+        rules = room_schedule.load_rules(
+            aws_clients.get_dynamodb_resource().Table(table_name)
+        )
+        moment = datetime.fromisoformat(_now())
+        applied = room_schedule.apply_rules(updated, rules, moment)
+    except Exception:
+        logger.error("room schedule skipped reason=unreadable")
+        return
+    if applied:
+        logger.info(
+            "room schedule room=%s source=%s",
+            updated.get("room"),
+            updated.get("room_source"),
+        )
+    _write_schedule_checkins(updated, previous, applied, moment)
+
+
+def _write_schedule_checkins(
+    updated: Dict[str, Any],
+    previous: Any,
+    applied: List[Dict[str, Any]],
+    moment: datetime,
+) -> None:
+    if not applied:
+        return
+    import room_checkin
+    import room_schedule
+
+    table = None
+    table_name = os.environ.get("ROOM_CHECKIN_TABLE", "").strip()
+    if table_name:
+        try:
+            table = aws_clients.get_dynamodb_resource().Table(table_name)
+        except Exception:
+            logger.error("schedule check-in skipped reason=table_unreadable")
+    prev_people = {
+        str(person.get("person") or "").casefold(): person
+        for person in (previous or {}).get("people") or []
+        if isinstance(person, dict)
+    }
+    current = {
+        str(person.get("person") or "").casefold(): person
+        for person in updated.get("people") or []
+        if isinstance(person, dict)
+    }
+    for match in applied:
+        person = current.get(str(match.get("person") or "").casefold())
+        rule = match.get("rule") or {}
+        if not isinstance(person, dict) or not rule:
+            continue
+        try:
+            misses = int(person.get("miss_count") or 0)
+        except (TypeError, ValueError):
+            misses = 0
+        if misses > 0:
+            continue
+        zone_name = str(rule.get("timezone") or room_schedule.DEFAULT_TIMEZONE)
+        try:
+            key = room_schedule.hour_key(moment, zone_name)
+        except Exception:
+            continue
+        previous_person = prev_people.get(str(person.get("person") or "").casefold()) or {}
+        if previous_person.get("schedule_checkin_key") == key:
+            person["schedule_checkin_key"] = key
+            continue
+        if table is None:
+            continue
+        signal = person.get("signal") if isinstance(person.get("signal"), str) else None
+        reading: Dict[str, Any] = {
+            "node": person.get("node"),
+            "signal": signal,
+            "freshness": "fresh",
+            "last_seen": person.get("last_seen"),
+            "is_home": True,
+        }
+        if person.get("device_hmac"):
+            reading["device_hmac"] = person["device_hmac"]
+        bucket = room_fingerprint.signal_bucket({"connectivity": {"signal": signal}})
+        if bucket is not None:
+            reading["signal_bucket"] = bucket
+        try:
+            room_checkin.store_observed(
+                table,
+                person.get("person"),
+                rule.get("room"),
+                reading,
+                source=room_schedule.SCHEDULE_SOURCE,
+                at=moment,
+                timezone_name=zone_name,
+            )
+        except Exception as exc:
+            logger.error("schedule check-in failed (%s)", exc.__class__.__name__)
+            continue
+        person["schedule_checkin_key"] = key
+        logger.info("schedule check-in stored room=%s", rule.get("room"))
+
+
 def _readings(
     tracked: List[Dict[str, Any]],
     clients: List[Dict[str, Any]],
@@ -257,6 +367,7 @@ def _readings(
         digest = room_fingerprint.device_hmac(str(match.get("mac") or ""), key)
         readings[person.casefold()] = {
             "node": match.get("node"),
+            "zone": match.get("zone"),
             "bucket": room_fingerprint.signal_bucket(match.get("device")),
             "device_hmac": digest,
         }

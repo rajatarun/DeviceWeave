@@ -350,6 +350,9 @@ Each tool calls the same in-process service function as the matching HTTP route.
 | `label_room_checkin` | `POST /presence/checkins/{checkin_id}/label` | `checkin_id`, `room`. Attaches the answer without reading eero again. Bearer token required on the HTTP route |
 | `list_room_checkins` | `GET /presence/checkins` | Read-only. Optional `person`, `since`, `limit` (1–200, default 50). Bearer token required on the HTTP route |
 | `delete_room_checkin` | `DELETE /presence/checkins/{checkin_id}` | **Destructive.** `checkin_id`. Bearer token required on the HTTP route |
+| `set_room_schedule_rule` | `POST /presence/schedule` | `person`, `room`, `start`, `end`, optional `timezone`. Fixed local-time room. A window may wrap midnight. Bearer token required on the HTTP route |
+| `list_room_schedule_rules` | `GET /presence/schedule` | Read-only. Optional `person`. Bearer token required on the HTTP route |
+| `delete_room_schedule_rule` | `DELETE /presence/schedule/{rule_id}` | **Destructive.** `rule_id`. Bearer token required on the HTTP route |
 | `set_presence` | `POST /presence` | `is_home` boolean |
 | `list_scenes` | `GET /scenes` | Read-only |
 | `delete_scene` | `DELETE /scenes/{id}` | **Destructive.** Argument: `scene_id` |
@@ -364,7 +367,7 @@ Each tool calls the same in-process service function as the matching HTTP route.
 | `ingest` | `POST /ingest` | Optional `provider` (default `kasa`), `mode` (`full` or `delta`), Ring `refresh_token` / `two_fa_code`. `full` marks devices missing from the run offline |
 | `health` | `GET /health` | Read-only |
 
-`delete_device`, `delete_scene`, `delete_policy`, `delete_learning`, `delete_room_fingerprint`, `delete_room_checkin`, and `execute` are annotated `destructiveHint: true`.
+`delete_device`, `delete_scene`, `delete_policy`, `delete_learning`, `delete_room_fingerprint`, `delete_room_checkin`, `delete_room_schedule_rule`, and `execute` are annotated `destructiveHint: true`.
 
 A tool result is the service's JSON body. `isError` is true when that service returns an HTTP status of 400 or higher.
 
@@ -744,6 +747,7 @@ DeviceWeave/
     ├── eero_calibration_handler.py  Room calibration and check-ins (the only writer of both tables)
     ├── room_fingerprint.py          Room samples, HMAC device ids, nearest-room classifier
     ├── room_checkin.py              Labeled check-ins: eero snapshot, Chicago hour, HMAC device id
+    ├── room_schedule.py             Fixed local-time room rules the poller applies when home
     ├── room_calibration_client.py   MCP invoke of the calibration Lambda
     ├── bedrock_agent.py             Bedrock Converse API agentic loop + tool implementations
     ├── conversation_store.py        DynamoDB-backed session store (24 h TTL)

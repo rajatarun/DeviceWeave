@@ -116,6 +116,8 @@ def test_unconfigured_routes_document_503(spec):
                          ("/presence/checkins/capture", "post"),
                          ("/presence/checkins/{checkin_id}/label", "post"),
                          ("/presence/checkins/{checkin_id}", "delete"),
+                         ("/presence/schedule", "post"), ("/presence/schedule", "get"),
+                         ("/presence/schedule/{rule_id}", "delete"),
                          ("/policies", "get"), ("/policies/author", "post"),
                          ("/policies/{rule_id}", "get"), ("/policies/{rule_id}", "delete"),
                          ("/devices", "get")):

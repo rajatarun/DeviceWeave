@@ -114,7 +114,9 @@ The node zone is which eero the phone is attached to. A room is a label you teac
 
 The device payload used by `eero-client` and the Home Assistant eero integration carries `connectivity.score_bars` (an integer, meaningful when it is 1–5), `connectivity.signal` and `connectivity.signal_avg` (strings: quality words such as `strong`, `fair`, or `weak`, and sometimes a dBm number), and `connectivity.score` (a float with no published 0–1 scale). The node is `source.location`, or `source.display_name` when location is unset. `last_active` is the last time the client did something, not a signal-sample timestamp.
 
-That list is not a live RSSI feed. Samples taken every 12 seconds during one calibration can be identical, and a fractional `score` is ignored. Each stored sample is the node plus a coarse bucket: `score_bars` when it is 1–5, otherwise the quality word, otherwise a coarse bucket when `signal` is a negative dBm value. There is no invented RSSI field. If two rooms share a node and the bucket does not separate them, classification returns `unknown`.
+That list is not a live RSSI feed. Samples taken every 12 seconds during one calibration can be identical, and a fractional `score` is ignored. `score` of `1.0` is eero's 0–1 quality, not bar 1, so it is not a bucket either. Each stored sample is the node plus a coarse bucket. A negative dBm value on `signal` is bucketed first, then `score_bars` when it is 1–5, then a quality word. There is no invented RSSI field. If two rooms share a node and the bucket does not separate them, classification returns `unknown`.
+
+A fingerprint matches a live reading when the node is the same eero. `source.location` (`Family Room`) and `source.display_name` (`Family Room eero`) are that same node: comparison ignores case and a trailing `eero`, and tries both the location and the display name. A sample whose stored signal is `-54 dBm` is scored from that dBm, not from a `score_bars` value that was saved beside it. The fingerprint is used when its person matches the tracked person, or when its device HMAC matches. A phone tracked by name can change MAC and still keep the rooms calibrated for that person.
 
 ### HMAC secret
 
@@ -188,3 +190,21 @@ Hourly collection, when the answer is not instant:
 2. When Raja answers, call `label_room_checkin` with that `checkin_id` and the room, or `Not home`.
 3. If the answer is already known at ask time, `record_room_checkin` does both in one call.
 4. `list_room_checkins` reads the week back out of DynamoDB. `delete_room_checkin` drops a bad row.
+
+## Overnight room rule
+
+From 11pm to 6am America/Chicago, Raja is in Master bedroom. That is a schedule rule in DynamoDB, not a file on the assistant's machine. While he is home inside the window, the poller sets `room` to `Master bedroom`, `room_confidence` to 1, and `room_source` to `schedule_rule`. It does not wait for a second poll. Outside the window, classification works as before.
+
+The same poll writes one labeled check-in per local hour (`source` `schedule_rule`) so those hours are training data. A second poll in the same hour does not write another row. The check-in uses the live node and signal already on the presence item. The poller can put that row and cannot list or delete check-ins.
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
+| `set_room_schedule_rule` | `person`, `room`, `start` (`HH:MM`), `end` (`HH:MM`), optional `timezone` | Store the window. `end` earlier than `start` wraps midnight. Timezone defaults to `America/Chicago`. The same start and end replaces the room. Overlapping windows for one person are rejected. |
+| `list_room_schedule_rules` | optional `person` | List the rules. |
+| `delete_room_schedule_rule` | `rule_id` | Delete one rule. `deleted` is 0 when it is already gone. |
+
+`POST /presence/schedule`, `GET /presence/schedule`, and `DELETE /presence/schedule/{rule_id}` are the HTTP forms. They use the MCP bearer token.
+
+Create Raja's window once after deploy:
+
+`set_room_schedule_rule` with `person` `Raja`, `room` `Master bedroom`, `start` `23:00`, `end` `06:00`. Leave `timezone` unset. If the tracked person name is `iphone`, pass `iphone` instead. The phone must already be tracked. No new secret and no new deploy parameter. CloudFormation creates the schedule table.

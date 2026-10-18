@@ -934,6 +934,122 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /presence/schedule:
+    post:
+      tags: [presence]
+      operationId: setRoomScheduleRule
+      summary: Set a fixed local-time room rule
+      description: |
+        Stores one window. While that person is home inside it, the poller
+        sets the room with high confidence and `room_source` `schedule_rule`,
+        and writes one labeled check-in per local hour. `end` earlier than
+        `start` wraps midnight. `timezone` defaults to `America/Chicago`.
+        Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [person, room, start, end]
+              properties:
+                person: { type: string }
+                room: { type: string }
+                start: { type: string, description: "HH:MM, 24-hour, inclusive." }
+                end: { type: string, description: "HH:MM, 24-hour, exclusive." }
+                timezone: { type: string, description: "IANA name. Defaults to America/Chicago." }
+      responses:
+        "200":
+          description: Stored rule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoomScheduleRule" }
+        "400":
+          description: Invalid window, or it overlaps another rule for this person
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Schedule table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    get:
+      tags: [presence]
+      operationId: listRoomScheduleRules
+      summary: List room schedule rules
+      description: |
+        Lists fixed time-window rules. Optional `person` filter.
+        Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      parameters:
+        - name: person
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Rules
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rules]
+                properties:
+                  rules:
+                    type: array
+                    items: { $ref: "#/components/schemas/RoomScheduleRule" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Schedule table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /presence/schedule/{rule_id}:
+    delete:
+      tags: [presence]
+      operationId: deleteRoomScheduleRule
+      summary: Delete a room schedule rule
+      description: |
+        Deletes one rule. `deleted` is 0 when the id is already gone.
+        Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      parameters:
+        - name: rule_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deleted count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rule_id, deleted]
+                properties:
+                  rule_id: { type: string }
+                  deleted: { type: integer }
+        "400":
+          description: Invalid id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Schedule table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /policies/author:
     post:
       tags: [policy]
@@ -1339,6 +1455,17 @@ components:
           type: boolean
           description: Omitted when eero could not be read, so a failed poll is not trained as away.
 
+    RoomScheduleRule:
+      type: object
+      required: [rule_id, person, room, start, end, timezone]
+      properties:
+        rule_id: { type: string }
+        person: { type: string }
+        room: { type: string }
+        start: { type: string, description: "HH:MM, inclusive." }
+        end: { type: string, description: "HH:MM, exclusive. Earlier than start wraps midnight." }
+        timezone: { type: string }
+
     Presence:
       type: object
       required: [is_home, updated_at]
@@ -1369,6 +1496,10 @@ components:
           minimum: 0
           maximum: 1
           description: Confidence of room. Zero when room is unknown.
+        room_source:
+          type: string
+          enum: [schedule_rule]
+          description: Present when a fixed time-window rule set the room.
         last_seen:
           type: string
           nullable: true
@@ -1396,6 +1527,9 @@ components:
               signal: { type: string, nullable: true }
               room: { type: string }
               room_confidence: { type: number }
+              room_source:
+                type: string
+                enum: [schedule_rule]
               last_seen: { type: string, nullable: true }
               freshness: { type: string }
               miss_count:

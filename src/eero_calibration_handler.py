@@ -11,6 +11,9 @@ HTTP routes (same bearer token as POST /mcp):
   POST   /presence/checkins/{id}/label  attach the room answer
   GET    /presence/checkins             list check-ins
   DELETE /presence/checkins/{id}        delete one check-in
+  POST   /presence/schedule            set a room schedule rule
+  GET    /presence/schedule            list room schedule rules
+  DELETE /presence/schedule/{rule_id}  delete a room schedule rule
 
 API Gateway's integration limit is about 30 seconds, and a minute of
 eero reads does not fit in that. The HTTP request checks the room name,
@@ -25,8 +28,9 @@ can read fingerprints. It cannot read or write check-ins.
 Direct invokes (the async sample run, and the MCP tools, which call
 this function rather than writing the tables themselves) use ``action``
 of ``collect``, ``start``, ``list``, ``delete``, ``record_checkin``,
-``capture_reading``, ``label_checkin``, ``list_checkins``, or
-``delete_checkin``. Those invokes are IAM-gated. The public routes are
+``capture_reading``, ``label_checkin``, ``list_checkins``,
+``delete_checkin``, ``set_schedule``, ``list_schedule``, or
+``delete_schedule``. Those invokes are IAM-gated. The public routes are
 the HTTP ones, and they require the bearer token.
 """
 
@@ -45,6 +49,7 @@ import eero_presence
 import eero_presence_handler
 import room_checkin
 import room_fingerprint
+import room_schedule
 from room_fingerprint import LabelError
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -80,6 +85,12 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return list_checkins(event)
     if action == "delete_checkin":
         return delete_checkin(event)
+    if action == "set_schedule":
+        return set_schedule(event)
+    if action == "list_schedule":
+        return list_schedule(event)
+    if action == "delete_schedule":
+        return delete_schedule(event)
     return _error(400, "unknown action")
 
 
@@ -286,6 +297,16 @@ def _http(event: Dict[str, Any]) -> Dict[str, Any]:
         })
     if route == "checkin_delete":
         return delete_checkin({"checkin_id": _checkin_id(event, path, label=False)})
+    if route == "schedule_set":
+        try:
+            body = _body_json(event)
+        except LabelError as exc:
+            return _error(400, str(exc))
+        return set_schedule(body)
+    if route == "schedule_list":
+        return list_schedule({"person": _query(event, "person")})
+    if route == "schedule_delete":
+        return delete_schedule({"rule_id": _schedule_id(event, path)})
     return _error(404, "not found")
 
 
@@ -313,6 +334,12 @@ def _authorized(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def _route(method: str, path: str) -> str:
     trimmed = path.rstrip("/")
+    if method == "POST" and trimmed.endswith("/presence/schedule"):
+        return "schedule_set"
+    if method == "GET" and trimmed.endswith("/presence/schedule"):
+        return "schedule_list"
+    if method == "DELETE" and "/presence/schedule/" in trimmed:
+        return "schedule_delete"
     if method == "POST" and trimmed.endswith("/presence/checkins/capture"):
         return "checkin_capture"
     if method == "POST" and trimmed.endswith("/label") and "/presence/checkins/" in trimmed:
@@ -425,6 +452,73 @@ def delete_checkin(event: Dict[str, Any]) -> Dict[str, Any]:
         return _error(500, "Could not delete the check-in")
     logger.info("checkin deleted count=%s", deleted)
     return _json(200, {"checkin_id": event.get("checkin_id"), "deleted": deleted})
+
+
+def set_schedule(event: Dict[str, Any]) -> Dict[str, Any]:
+    table = _schedule_table()
+    if table is None:
+        return _error(503, "Room schedule table is not configured")
+    try:
+        rule = room_schedule.set_rule(
+            table,
+            event.get("person"),
+            event.get("room"),
+            event.get("start"),
+            event.get("end"),
+            event.get("timezone"),
+        )
+    except room_schedule.ScheduleError as exc:
+        return _error(exc.status, exc.message)
+    except Exception:
+        logger.error("schedule set failed")
+        return _error(500, "Could not store the schedule rule")
+    logger.info("schedule stored room=%s", rule.get("room"))
+    return _json(200, rule)
+
+
+def list_schedule(event: Dict[str, Any]) -> Dict[str, Any]:
+    table = _schedule_table()
+    if table is None:
+        return _error(503, "Room schedule table is not configured")
+    try:
+        rules = room_schedule.list_rules(table, person=event.get("person"))
+    except room_schedule.ScheduleError as exc:
+        return _error(exc.status, exc.message)
+    except Exception:
+        logger.error("schedule list failed")
+        return _error(500, "Could not list schedule rules")
+    logger.info("schedule listed count=%s", len(rules))
+    return _json(200, {"rules": rules})
+
+
+def delete_schedule(event: Dict[str, Any]) -> Dict[str, Any]:
+    table = _schedule_table()
+    if table is None:
+        return _error(503, "Room schedule table is not configured")
+    try:
+        deleted = room_schedule.delete_rule(table, event.get("rule_id"))
+    except room_schedule.ScheduleError as exc:
+        return _error(exc.status, exc.message)
+    except Exception:
+        logger.error("schedule delete failed")
+        return _error(500, "Could not delete the schedule rule")
+    logger.info("schedule deleted count=%s", deleted)
+    return _json(200, {"rule_id": event.get("rule_id"), "deleted": deleted})
+
+
+def _schedule_table() -> Any:
+    table_name = os.environ.get("ROOM_SCHEDULE_TABLE", "").strip()
+    if not table_name:
+        return None
+    return aws_clients.get_dynamodb_resource().Table(table_name)
+
+
+def _schedule_id(event: Dict[str, Any], path: str) -> str:
+    params = event.get("pathParameters") or {}
+    if isinstance(params, dict) and params.get("rule_id"):
+        return urllib.parse.unquote(str(params["rule_id"]))
+    tail = path.split("/presence/schedule/", 1)[-1].strip("/")
+    return urllib.parse.unquote(tail)
 
 
 def _checkin_table() -> Any:

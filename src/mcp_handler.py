@@ -56,12 +56,14 @@ _BEARER_RE = re.compile(r"(?i)bearer\s+(\S+)")
 INSTRUCTIONS = (
     "DeviceWeave MCP server. Tools call the same service functions as the HTTP API. "
     "health, list_devices, get_device, list_scenes, list_providers, get_presence, "
-    "list_room_fingerprints, list_room_checkins, get_learnings, list_policies, and get_policy read state. "
+    "list_room_fingerprints, list_room_checkins, list_room_schedule_rules, get_learnings, "
+    "list_policies, and get_policy read state. "
     "execute sends a natural-language command and can actuate devices. "
     "delete_device, delete_scene, delete_policy, delete_learning, delete_room_fingerprint, "
-    "and delete_room_checkin remove state. "
+    "delete_room_checkin, and delete_room_schedule_rule remove state. "
     "create_device, update_device, set_presence, calibrate_room, record_room_checkin, "
-    "capture_room_reading, label_room_checkin, learn_phrase, author_policy, and ingest change state."
+    "capture_room_reading, label_room_checkin, set_room_schedule_rule, learn_phrase, "
+    "author_policy, and ingest change state."
 )
 
 _READ_ONLY = {"readOnlyHint": True, "destructiveHint": False}
@@ -508,6 +510,39 @@ def _delete_room_checkin(args: Dict[str, Any]) -> Dict[str, Any]:
     })
 
 
+def _set_room_schedule_rule(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {
+        "person": _require_str(args, "person"),
+        "room": _require_str(args, "room"),
+        "start": _require_str(args, "start"),
+        "end": _require_str(args, "end"),
+    }
+    timezone_name = _optional_str(args, "timezone")
+    if timezone_name:
+        payload["timezone"] = timezone_name
+    return room_calibration_client.invoke("set_schedule", payload)
+
+
+def _list_room_schedule_rules(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {}
+    person = _optional_str(args, "person")
+    if person:
+        payload["person"] = person
+    return room_calibration_client.invoke("list_schedule", payload)
+
+
+def _delete_room_schedule_rule(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    return room_calibration_client.invoke("delete_schedule", {
+        "rule_id": _require_str(args, "rule_id"),
+    })
+
+
 def _set_presence(args: Dict[str, Any]) -> Dict[str, Any]:
     if "is_home" not in args or not isinstance(args["is_home"], bool):
         raise InvalidParams("Missing required boolean argument 'is_home'")
@@ -847,6 +882,41 @@ TOOLS: List[Dict[str, Any]] = [
         _delete_room_checkin,
         _DESTRUCTIVE,
         ["checkin_id"],
+    ),
+    _tool(
+        "set_room_schedule_rule",
+        "Set room schedule rule",
+        "Store a fixed local-time room. While the person is home inside the window, "
+        "the presence poller sets that room with high confidence and room_source "
+        "schedule_rule. A window may wrap midnight (start 23:00, end 06:00). "
+        "timezone defaults to America/Chicago. Replacing the same start and end updates the room.",
+        {
+            "person": _str_prop("Person name, matching the tracked-device mapping."),
+            "room": _str_prop("Room label. 1-40 letters, digits, spaces, hyphens, or underscores."),
+            "start": _str_prop("Window start, HH:MM, 24-hour, inclusive."),
+            "end": _str_prop("Window end, HH:MM, 24-hour, exclusive. Earlier than start wraps midnight."),
+            "timezone": _str_prop("IANA timezone. Defaults to America/Chicago."),
+        },
+        _set_room_schedule_rule,
+        _MUTATING,
+        ["person", "room", "start", "end"],
+    ),
+    _tool(
+        "list_room_schedule_rules",
+        "List room schedule rules",
+        "List fixed time-window room rules stored in DeviceWeave. Optional person filter.",
+        {"person": _str_prop("Optional person filter.")},
+        _list_room_schedule_rules,
+        _READ_ONLY,
+    ),
+    _tool(
+        "delete_room_schedule_rule",
+        "Delete room schedule rule",
+        "Delete one schedule rule by id. Deleted is 0 when the id is already gone.",
+        {"rule_id": _str_prop("Id returned by set_room_schedule_rule.")},
+        _delete_room_schedule_rule,
+        _DESTRUCTIVE,
+        ["rule_id"],
     ),
     _tool(
         "set_presence",

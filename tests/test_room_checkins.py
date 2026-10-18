@@ -458,8 +458,11 @@ def test_template_gives_checkins_only_to_the_calibration_function():
     mcp = template.split("DeviceWeaveMcpFunction:", 1)[1].split("DeviceWeaveMcpFunctionLogGroup:", 1)[0]
     table = template.split("RoomCheckinTable:", 1)[1].split("PolicyTable:", 1)[0]
 
-    assert "RoomCheckinTable" not in poller
+    assert "dynamodb:DeleteItem" not in poller
+    assert "dynamodb:PutItem" in poller
+    assert "!GetAtt RoomCheckinTable.Arn" in poller
     assert "RoomCheckinTable" not in mcp
+    assert "RoomScheduleTable" not in mcp
     assert "lambda:InvokeFunction" in mcp
     assert "TableName: !Ref RoomCheckinTable" in calibration
     assert "DynamoDBCrudPolicy:" in calibration

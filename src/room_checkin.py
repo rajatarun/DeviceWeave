@@ -208,6 +208,39 @@ def delete_checkin(table: Any, checkin_id: Any) -> int:
     return 1
 
 
+def store_observed(
+    table: Any,
+    person: Any,
+    room: Any,
+    reading: Dict[str, Any],
+    *,
+    source: str,
+    at: datetime,
+    timezone_name: str = "America/Chicago",
+) -> Dict[str, Any]:
+    """Store a labeled row from a reading the caller already has.
+
+    Does not call eero. ``reading`` may carry node, signal, signal_bucket,
+    freshness, last_seen, is_home, and device_hmac. A MAC is ignored.
+    """
+    person_name = _person(person)
+    room_name = validate_room_label(room)
+    zone = _zone(timezone_name)
+    safe = _observed_reading(reading)
+    item = _item(
+        person_name,
+        at,
+        source=validate_source(source, "schedule_rule"),
+        room=room_name,
+        answered_at=at,
+        reading=safe,
+        zone=zone,
+        timezone_name=timezone_name,
+    )
+    put_checkin(table, item)
+    return public_record(item)
+
+
 def put_checkin(table: Any, item: Dict[str, Any]) -> None:
     """Store one check-in. Floats become Decimal before put_item."""
     table.put_item(Item=presence_store.to_dynamo(item))
@@ -231,8 +264,10 @@ def _item(
     room: Optional[str],
     answered_at: Optional[datetime],
     reading: Dict[str, Any],
+    zone: ZoneInfo = CHICAGO,
+    timezone_name: str = "America/Chicago",
 ) -> Dict[str, Any]:
-    local = asked.astimezone(CHICAGO)
+    local = asked.astimezone(zone)
     pk, sk, checkin_id = _ids(person, asked)
     item: Dict[str, Any] = {
         "pk": pk,
@@ -241,7 +276,7 @@ def _item(
         "person": person,
         "source": source,
         "asked_at": _iso(asked),
-        "timezone": "America/Chicago",
+        "timezone": timezone_name,
         "local_hour": local.hour,
         "weekday": local.weekday(),
         "freshness": reading.get("freshness") or "stale",
@@ -314,6 +349,23 @@ def _tracked_rows() -> List[Dict[str, Any]]:
 
     table = aws_clients.get_dynamodb_resource().Table(table_name)
     return room_fingerprint.load_all(table)
+
+
+def _observed_reading(reading: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(reading, dict):
+        return {"freshness": "stale"}
+    safe: Dict[str, Any] = {}
+    for key in ("device_hmac", "node", "signal", "signal_bucket", "freshness", "last_seen", "is_home"):
+        if key in reading and reading[key] is not None and reading[key] != "":
+            safe[key] = reading[key]
+    return safe
+
+
+def _zone(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except Exception as exc:
+        raise CheckinError(400, "timezone is not a known zone") from exc
 
 
 def _person(value: Any) -> str:
