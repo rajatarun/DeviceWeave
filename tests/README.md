@@ -61,9 +61,10 @@ push to `main`; it has no test job. Run the suite locally before merging.
   (opt-in, not autouse) swaps in an in-memory resource with a minimal
   `Table.put_item`/`get_item`/`scan`. Used by the `observatory_wrapper`
   metric-shape tests. That fake accepts Python floats, which a real
-  DynamoDB table rejects. `tests/test_dynamo_numbers.py` uses moto and a
-  boto3 `Table` so presence, fingerprint, and tracked writes are serialized
-  the way the poller is.
+  DynamoDB table rejects. `tests/test_dynamo_numbers.py` and
+  `tests/test_room_checkins.py` use moto and a boto3 `Table` so presence,
+  fingerprint, tracked-device, and room check-in writes are serialized
+  the way the poller and the calibration function are.
 - **`mcp_observatory`** — two opt-in fixtures: `missing_mcp_observatory`
   (forces `ImportError` via `sys.modules["mcp_observatory"] = None`) and
   `fake_mcp_observatory` (injects a minimal fake module, whose wrapper

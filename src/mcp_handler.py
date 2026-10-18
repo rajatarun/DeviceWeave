@@ -56,10 +56,14 @@ _BEARER_RE = re.compile(r"(?i)bearer\s+(\S+)")
 INSTRUCTIONS = (
     "DeviceWeave MCP server. Tools call the same service functions as the HTTP API. "
     "health, list_devices, get_device, list_scenes, list_providers, get_presence, "
-    "list_room_fingerprints, get_learnings, list_policies, and get_policy read state. "
+    "list_room_fingerprints, list_room_checkins, list_room_schedule_rules, get_learnings, "
+    "list_policies, and get_policy read state. "
     "execute sends a natural-language command and can actuate devices. "
-    "delete_device, delete_scene, delete_policy, delete_learning, and delete_room_fingerprint remove state. "
-    "create_device, update_device, set_presence, calibrate_room, learn_phrase, author_policy, and ingest change state."
+    "delete_device, delete_scene, delete_policy, delete_learning, delete_room_fingerprint, "
+    "delete_room_checkin, and delete_room_schedule_rule remove state. "
+    "create_device, update_device, set_presence, calibrate_room, record_room_checkin, "
+    "capture_room_reading, label_room_checkin, set_room_schedule_rule, learn_phrase, "
+    "author_policy, and ingest change state."
 )
 
 _READ_ONLY = {"readOnlyHint": True, "destructiveHint": False}
@@ -442,6 +446,103 @@ def _delete_room_fingerprint(args: Dict[str, Any]) -> Dict[str, Any]:
     return room_calibration_client.invoke("delete", payload)
 
 
+def _record_room_checkin(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {
+        "person": _require_str(args, "person"),
+        "room": _require_str(args, "room"),
+    }
+    asked_at = _optional_str(args, "asked_at")
+    source = _optional_str(args, "source")
+    if asked_at:
+        payload["asked_at"] = asked_at
+    if source:
+        payload["source"] = source
+    return room_calibration_client.invoke("record_checkin", payload)
+
+
+def _capture_room_reading(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {"person": _require_str(args, "person")}
+    asked_at = _optional_str(args, "asked_at")
+    source = _optional_str(args, "source")
+    if asked_at:
+        payload["asked_at"] = asked_at
+    if source:
+        payload["source"] = source
+    return room_calibration_client.invoke("capture_reading", payload)
+
+
+def _label_room_checkin(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    return room_calibration_client.invoke("label_checkin", {
+        "checkin_id": _require_str(args, "checkin_id"),
+        "room": _require_str(args, "room"),
+    })
+
+
+def _list_room_checkins(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {}
+    person = _optional_str(args, "person")
+    since = _optional_str(args, "since")
+    if person:
+        payload["person"] = person
+    if since:
+        payload["since"] = since
+    if "limit" in args and args["limit"] is not None:
+        limit = args["limit"]
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise InvalidParams("limit must be an integer")
+        payload["limit"] = limit
+    return room_calibration_client.invoke("list_checkins", payload)
+
+
+def _delete_room_checkin(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    return room_calibration_client.invoke("delete_checkin", {
+        "checkin_id": _require_str(args, "checkin_id"),
+    })
+
+
+def _set_room_schedule_rule(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {
+        "person": _require_str(args, "person"),
+        "room": _require_str(args, "room"),
+        "start": _require_str(args, "start"),
+        "end": _require_str(args, "end"),
+    }
+    timezone_name = _optional_str(args, "timezone")
+    if timezone_name:
+        payload["timezone"] = timezone_name
+    return room_calibration_client.invoke("set_schedule", payload)
+
+
+def _list_room_schedule_rules(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    payload: Dict[str, Any] = {}
+    person = _optional_str(args, "person")
+    if person:
+        payload["person"] = person
+    return room_calibration_client.invoke("list_schedule", payload)
+
+
+def _delete_room_schedule_rule(args: Dict[str, Any]) -> Dict[str, Any]:
+    import room_calibration_client
+
+    return room_calibration_client.invoke("delete_schedule", {
+        "rule_id": _require_str(args, "rule_id"),
+    })
+
+
 def _set_presence(args: Dict[str, Any]) -> Dict[str, Any]:
     if "is_home" not in args or not isinstance(args["is_home"], bool):
         raise InvalidParams("Missing required boolean argument 'is_home'")
@@ -707,6 +808,115 @@ TOOLS: List[Dict[str, Any]] = [
         _delete_room_fingerprint,
         _DESTRUCTIVE,
         ["room"],
+    ),
+    _tool(
+        "record_room_checkin",
+        "Record room check-in",
+        "Store a labeled room check-in in DeviceWeave. The server reads the current eero "
+        "snapshot for the person's tracked device (node, signal, coarse bucket, freshness, "
+        "last_seen, is_home) and stores it with the label. Hour and weekday are asked_at in "
+        "America/Chicago, Monday is 0. asked_at defaults to now. The eero reading is always "
+        "taken now, so pass asked_at only when it is the question time of this call. "
+        "room may be 'Not home' or any other short label. Returns the stored record.",
+        {
+            "person": _str_prop("Person name, matching the tracked-device mapping."),
+            "room": _str_prop("Room label, including 'Not home'. 1-80 characters."),
+            "asked_at": _str_prop("Optional ISO-8601 question time. Defaults to now."),
+            "source": _str_prop("Optional source label. Defaults to record."),
+        },
+        _record_room_checkin,
+        _MUTATING,
+        ["person", "room"],
+    ),
+    _tool(
+        "capture_room_reading",
+        "Capture room reading",
+        "Snapshot the current eero reading for a person without a room label. Returns "
+        "checkin_id. Call label_room_checkin when the answer arrives so the signal matches "
+        "ask time. Hour and weekday are asked_at in America/Chicago.",
+        {
+            "person": _str_prop("Person name, matching the tracked-device mapping."),
+            "asked_at": _str_prop("Optional ISO-8601 question time. Defaults to now."),
+            "source": _str_prop("Optional source label. Defaults to capture."),
+        },
+        _capture_room_reading,
+        _MUTATING,
+        ["person"],
+    ),
+    _tool(
+        "label_room_checkin",
+        "Label room check-in",
+        "Attach the room answer to a check-in captured earlier. Does not re-read eero. "
+        "room may be 'Not home' or any other short label.",
+        {
+            "checkin_id": _str_prop("Id returned by capture_room_reading or record_room_checkin."),
+            "room": _str_prop("Room label, including 'Not home'. 1-80 characters."),
+        },
+        _label_room_checkin,
+        _MUTATING,
+        ["checkin_id", "room"],
+    ),
+    _tool(
+        "list_room_checkins",
+        "List room check-ins",
+        "List labeled and unlabeled check-ins stored in DeviceWeave. Optional person, "
+        "since (ISO-8601), and limit (1-200, default 50). Oldest first.",
+        {
+            "person": _str_prop("Optional person filter."),
+            "since": _str_prop("Optional ISO-8601 lower bound on asked_at."),
+            "limit": {
+                "type": "integer",
+                "description": "Maximum rows. Defaults to 50. Maximum 200.",
+                "minimum": 1,
+                "maximum": 200,
+            },
+        },
+        _list_room_checkins,
+        _READ_ONLY,
+    ),
+    _tool(
+        "delete_room_checkin",
+        "Delete room check-in",
+        "Delete one check-in by id. Deleted is 0 when the id is already gone.",
+        {"checkin_id": _str_prop("Check-in id to delete.")},
+        _delete_room_checkin,
+        _DESTRUCTIVE,
+        ["checkin_id"],
+    ),
+    _tool(
+        "set_room_schedule_rule",
+        "Set room schedule rule",
+        "Store a fixed local-time room. While the person is home inside the window, "
+        "the presence poller sets that room with high confidence and room_source "
+        "schedule_rule. A window may wrap midnight (start 23:00, end 06:00). "
+        "timezone defaults to America/Chicago. Replacing the same start and end updates the room.",
+        {
+            "person": _str_prop("Person name, matching the tracked-device mapping."),
+            "room": _str_prop("Room label. 1-40 letters, digits, spaces, hyphens, or underscores."),
+            "start": _str_prop("Window start, HH:MM, 24-hour, inclusive."),
+            "end": _str_prop("Window end, HH:MM, 24-hour, exclusive. Earlier than start wraps midnight."),
+            "timezone": _str_prop("IANA timezone. Defaults to America/Chicago."),
+        },
+        _set_room_schedule_rule,
+        _MUTATING,
+        ["person", "room", "start", "end"],
+    ),
+    _tool(
+        "list_room_schedule_rules",
+        "List room schedule rules",
+        "List fixed time-window room rules stored in DeviceWeave. Optional person filter.",
+        {"person": _str_prop("Optional person filter.")},
+        _list_room_schedule_rules,
+        _READ_ONLY,
+    ),
+    _tool(
+        "delete_room_schedule_rule",
+        "Delete room schedule rule",
+        "Delete one schedule rule by id. Deleted is 0 when the id is already gone.",
+        {"rule_id": _str_prop("Id returned by set_room_schedule_rule.")},
+        _delete_room_schedule_rule,
+        _DESTRUCTIVE,
+        ["rule_id"],
     ),
     _tool(
         "set_presence",

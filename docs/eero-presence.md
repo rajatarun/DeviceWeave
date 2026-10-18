@@ -114,7 +114,9 @@ The node zone is which eero the phone is attached to. A room is a label you teac
 
 The device payload used by `eero-client` and the Home Assistant eero integration carries `connectivity.score_bars` (an integer, meaningful when it is 1–5), `connectivity.signal` and `connectivity.signal_avg` (strings: quality words such as `strong`, `fair`, or `weak`, and sometimes a dBm number), and `connectivity.score` (a float with no published 0–1 scale). The node is `source.location`, or `source.display_name` when location is unset. `last_active` is the last time the client did something, not a signal-sample timestamp.
 
-That list is not a live RSSI feed. Samples taken every 12 seconds during one calibration can be identical, and a fractional `score` is ignored. Each stored sample is the node plus a coarse bucket: `score_bars` when it is 1–5, otherwise the quality word, otherwise a coarse bucket when `signal` is a negative dBm value. There is no invented RSSI field. If two rooms share a node and the bucket does not separate them, classification returns `unknown`.
+That list is not a live RSSI feed. Samples taken every 12 seconds during one calibration can be identical, and a fractional `score` is ignored. `score` of `1.0` is eero's 0–1 quality, not bar 1, so it is not a bucket either. Each stored sample is the node plus a coarse bucket. A negative dBm value on `signal` is bucketed first, then `score_bars` when it is 1–5, then a quality word. There is no invented RSSI field. If two rooms share a node and the bucket does not separate them, classification returns `unknown`.
+
+A fingerprint matches a live reading when the node is the same eero. `source.location` (`Family Room`) and `source.display_name` (`Family Room eero`) are that same node: comparison ignores case and a trailing `eero`, and tries both the location and the display name. A sample whose stored signal is `-54 dBm` is scored from that dBm, not from a `score_bars` value that was saved beside it. The fingerprint is used when its person matches the tracked person, or when its device HMAC matches. A phone tracked by name can change MAC and still keep the rooms calibrated for that person.
 
 ### HMAC secret
 
@@ -155,3 +157,54 @@ The scheduled poller reads the fingerprint table (it cannot write it) and classi
 `GET /presence` and `get_presence` include `room`, `room_confidence`, and `zone`. The policy context field `room` is that label, or `unknown` when presence cannot be read. `room == "Office"` matches only that label. `unknown` does not match it.
 
 The fingerprint table is on-demand, encrypted at rest, and not covered by point-in-time recovery. Only the calibration function can write it, and only the authenticated routes and the MCP tools reach it.
+
+## Room check-ins
+
+A week of labeled check-ins is the training set for a later room model: eero node, coarse signal, time of day, weekday, and the room Raja names. Every row is written to the DeviceWeave check-in table (`deviceweave-room-checkins-<stage>`). Nothing in this path writes a file on the assistant's machine.
+
+The table is pay-per-request, uses the default AWS owned encryption key, and has no TTL, so a week of rows is still there when you train. CloudFormation creates it on the next deploy. There is no new secret and no new deploy parameter. The phone tracked as `iphone` (or whichever person name you passed to `scripts/eero_login.py track`) is the device the server reads.
+
+The reading is the live cloud snapshot at the moment of `record_room_checkin` or `capture_room_reading`. It is not a historical RSSI for a past `asked_at`. When the answer arrives minutes after the question, capture at ask time and label later. Passing `asked_at` to `record_room_checkin` only sets the clock features; the eero fields are still "now".
+
+Hour and weekday come from `asked_at` in `America/Chicago`. Weekday is Monday `0` through Sunday `6`. `asked_at` is the question time. `answered_at` is when the label was stored. Labeling does not change `asked_at`, the hour, the weekday, or the eero fields, and it does not read eero again.
+
+`room` may be `Not home` or any other label of 1–80 characters. It is not limited to the calibration room names. A blank label is rejected.
+
+If eero or the session cannot be read, the row is still stored with `freshness: "stale"` and without `is_home`, so a failed poll is not trained as away. If the poll succeeds and the device is not connected, `freshness` is `fresh` and `is_home` is false. A person who is not in the tracked-device table is rejected before any row is written.
+
+Device ids on a check-in are the same HMAC-SHA256 used for fingerprints (`deviceweave/eero-device-hmac`). The row never stores the MAC or the eero nickname. If the HMAC secret cannot be read, the node and signal are still stored and `device_hmac` is omitted. The calibration function is the only role that can write the table. The poller cannot read or write it. The MCP function invokes the calibration function; it does not write the table itself. The HTTP routes use the same bearer token as `POST /mcp`.
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
+| `record_room_checkin` | `person`, `room`, optional `asked_at`, optional `source` | Read eero now, store the label and the snapshot, return the row. |
+| `capture_room_reading` | `person`, optional `asked_at`, optional `source` | Store the snapshot with no room. Returns `checkin_id`. |
+| `label_room_checkin` | `checkin_id`, `room` | Attach the answer. Does not read eero again. |
+| `list_room_checkins` | optional `person`, optional `since` (ISO-8601), optional `limit` (1–200, default 50) | Oldest first. |
+| `delete_room_checkin` | `checkin_id` | Delete one row. `deleted` is 0 when the id is already gone. |
+
+`POST /presence/checkins` records. `POST /presence/checkins/capture` snapshots. `POST /presence/checkins/{checkin_id}/label` labels. `GET /presence/checkins` lists. `DELETE /presence/checkins/{checkin_id}` deletes. A missing or wrong token is **401**.
+
+Hourly collection, when the answer is not instant:
+
+1. At the question, call `capture_room_reading` with `person` set to the tracked name (the phone tracked today is `iphone`).
+2. When Raja answers, call `label_room_checkin` with that `checkin_id` and the room, or `Not home`.
+3. If the answer is already known at ask time, `record_room_checkin` does both in one call.
+4. `list_room_checkins` reads the week back out of DynamoDB. `delete_room_checkin` drops a bad row.
+
+## Overnight room rule
+
+From 11pm to 6am America/Chicago, Raja is in Master bedroom. That is a schedule rule in DynamoDB, not a file on the assistant's machine. While he is home inside the window, the poller sets `room` to `Master bedroom`, `room_confidence` to 1, and `room_source` to `schedule_rule`. It does not wait for a second poll. Outside the window, classification works as before.
+
+The same poll writes one labeled check-in per local hour (`source` `schedule_rule`) so those hours are training data. A second poll in the same hour does not write another row. The check-in uses the live node and signal already on the presence item. The poller can put that row and cannot list or delete check-ins.
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
+| `set_room_schedule_rule` | `person`, `room`, `start` (`HH:MM`), `end` (`HH:MM`), optional `timezone` | Store the window. `end` earlier than `start` wraps midnight. Timezone defaults to `America/Chicago`. The same start and end replaces the room. Overlapping windows for one person are rejected. |
+| `list_room_schedule_rules` | optional `person` | List the rules. |
+| `delete_room_schedule_rule` | `rule_id` | Delete one rule. `deleted` is 0 when it is already gone. |
+
+`POST /presence/schedule`, `GET /presence/schedule`, and `DELETE /presence/schedule/{rule_id}` are the HTTP forms. They use the MCP bearer token.
+
+Create Raja's window once after deploy:
+
+`set_room_schedule_rule` with `person` `Raja`, `room` `Master bedroom`, `start` `23:00`, `end` `06:00`. Leave `timezone` unset. If the tracked person name is `iphone`, pass `iphone` instead. The phone must already be tracked. No new secret and no new deploy parameter. CloudFormation creates the schedule table.

@@ -104,6 +104,80 @@ def _walk_keys(value):
 # Buckets and labels
 # ---------------------------------------------------------------------------
 
+def test_family_room_dbm_matches_when_the_node_name_and_bars_disagree():
+    """A fingerprint that shows Family Room / -54 dBm must classify.
+
+    The live payload names the same eero ``Family Room eero``, and
+    ``score_bars`` 1 plus ``score`` 1.0 must not hide the dBm. The
+    fingerprint person matches even when the device HMAC does not.
+    """
+    fingerprint = {
+        "person": "Raja",
+        "room": "Living room",
+        "device_hmac": "different-device",
+        "samples": [{
+            "node": "Family Room",
+            "bucket": 1,
+            "signal": "-54 dBm",
+        }],
+    }
+    assert room_fingerprint.signal_bucket({
+        "connectivity": {"signal": "-54 dBm", "score": 1.0, "score_bars": 1},
+    }) == 4
+    assert room_fingerprint.signal_bucket({"connectivity": {"score": 1.0}}) is None
+
+    room, confidence = room_fingerprint.classify(
+        "Family Room eero",
+        4,
+        [fingerprint],
+        zone="Family Room",
+    )
+    assert (room, confidence) == ("Living room", 1.0)
+
+    room, confidence = room_fingerprint.classify(
+        "Family Room eero",
+        4,
+        [{**fingerprint, "person": "Someone Else", "device_hmac": "other"}],
+        zone="Family Room",
+    )
+    # classify itself does not filter by person; apply_rooms does.
+    assert room == "Living room"
+
+    reading = {
+        "node": "Family Room eero",
+        "zone": "Family Room",
+        "bucket": 4,
+        "device_hmac": "live-hmac",
+    }
+    other = {
+        "people": [{
+            "person": "iphone",
+            "is_home": True,
+            "miss_count": 0,
+            "last_seen": NOW,
+        }],
+    }
+    room_fingerprint.apply_rooms(other, None, {"iphone": reading}, [fingerprint])
+    assert other["room"] == "unknown"
+    assert other["room_confidence"] == 0.0
+
+    previous = None
+    current = None
+    for _ in range(2):
+        current = {
+            "people": [{
+                "person": "Raja",
+                "is_home": True,
+                "miss_count": 0,
+                "last_seen": NOW,
+            }],
+        }
+        room_fingerprint.apply_rooms(current, previous, {"raja": reading}, [fingerprint])
+        previous = current
+    assert current["room"] == "Living room"
+    assert current["room_confidence"] == 1.0
+
+
 def test_signal_bucket_uses_only_real_eero_fields():
     assert room_fingerprint.signal_bucket(
         {"connectivity": {"signal": "weak", "score": 0.9, "score_bars": 4}}

@@ -144,6 +144,7 @@ def connected_match(
                 found.append({
                     "mac": parsed.get("mac") or "",
                     "node": parsed.get("node"),
+                    "zone": parsed.get("zone"),
                     "signal": parsed.get("signal"),
                     "last_seen": parsed.get("last_seen") or "",
                     "device": client,

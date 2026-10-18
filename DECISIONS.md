@@ -446,3 +446,21 @@ The cloud payload does not include a live RSSI or a signal-sample timestamp. Sam
 Device ids on fingerprints and presence are HMAC-SHA256 under `deviceweave/eero-device-hmac`, not the eero session token. The tracked-device table still stores the MAC the poller matches on. Logs for this path are counts and room labels.
 
 **Rejected**: blocking the HTTP request for the whole minute; deriving the HMAC from the rotating eero session; storing raw MACs on the fingerprint or presence items; keeping a history of live readings; letting the poller write fingerprints; guessing a room when two labels are equally near; inventing an RSSI field the cloud API does not return.
+
+---
+
+## 38. Labeled room check-ins live in DynamoDB
+
+**Chosen**: a pay-per-request check-in table (`pk` person, `sk` ask-time plus a random suffix) with the default AWS owned encryption key and no TTL. The calibration Lambda, already outside the VPC, is the only writer. `record_room_checkin` reads eero once and stores the label with the snapshot. `capture_room_reading` stores the snapshot without a label and returns `checkin_id`; `label_room_checkin` sets the room later and does not read eero again. Hour and weekday are `asked_at` in America/Chicago (Monday is 0). The eero fields are the live cloud snapshot, not a reconstruction of a past `asked_at`. A failed eero read still stores the label with `freshness=stale` and omits `is_home`. Device ids are the fingerprint HMAC. Floats become `Decimal` at `put_item`, and JSON responses convert them back. The MCP function invokes the calibration function. The poller has no access to the table. HTTP routes use the MCP bearer token. There is no new secret and no new deploy parameter, so the changeset stays on `CAPABILITY_IAM`.
+
+**Rejected**: writing the training rows on the assistant's machine; a new Lambda; a GSI just to find a check-in by id (the id carries the person and the sort key); a TTL that would drop the week before training; `SSEEnabled: true` (that is an AWS managed KMS key, not the default owned key); an explicit IAM name; the calibration room allowlist (a check-in room may be `Not home` or any short string); storing raw MACs; treating a failed eero read as away.
+
+---
+
+## 39. A fixed local window can name the room, and classification matches the eero the fingerprint shows
+
+**Chosen**: schedule rules live in their own on-demand table (default AWS owned key, no TTL, no custom IAM name). `set_room_schedule_rule(person, room, start, end, timezone=America/Chicago)` stores one window. `end` earlier than `start` wraps midnight. The calibration function is the only writer. The poller may read. While the person is home inside the window, the poller sets `room` to the rule, `room_confidence` to 1, and `room_source` to `schedule_rule`, without waiting for a second sample. It also puts one check-in per local hour (`source=schedule_rule`) and cannot list or delete check-ins. The hour marker sits on the presence person so a 5-minute poll does not write twelve rows.
+
+Classification was returning `unknown` / `0.0` for a reading that showed the same eero and the same dBm as a fingerprint. Three comparisons caused that. Node equality was exact, so `Family Room` and `Family Room eero` never met. `score_bars` (and a float `score` of `1.0`) outranked the dBm string the fingerprint displays, and an unknown room is stored with confidence 0. Fingerprints were selected only by device HMAC, so a name-tracked phone whose MAC changed dropped its rooms. A sample now matches on a case-insensitive node with a trailing `eero` removed, using either the location or the display name. A dBm signal is bucketed before `score_bars`. A fingerprint applies when the person matches or the HMAC matches.
+
+**Rejected**: hard-coding Raja's night window in the template (MCP has to be able to change it); letting the poller delete check-ins; treating `score` `1.0` as bar 1; keeping HMAC as the only key for a person who is tracked by name.

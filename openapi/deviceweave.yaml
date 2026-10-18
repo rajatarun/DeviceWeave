@@ -710,6 +710,346 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /presence/checkins:
+    post:
+      tags: [presence]
+      operationId: recordRoomCheckin
+      summary: Record a labeled room check-in
+      description: |
+        Stores one training row in DeviceWeave. The server reads the current
+        eero snapshot for the person's tracked device and saves it with the
+        room label, `asked_at`, `answered_at`, and America/Chicago hour and
+        weekday (Monday is 0). `room` may be `Not home` or any other label
+        of 1-80 characters. The eero reading is taken now; pass `asked_at`
+        only when this call is the question. Device ids are HMAC hashes.
+        Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [person, room]
+              properties:
+                person: { type: string }
+                room: { type: string }
+                asked_at: { type: string, description: ISO-8601. Defaults to now. }
+                source: { type: string }
+      responses:
+        "200":
+          description: Stored check-in. Numbers are JSON numbers.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoomCheckin" }
+        "400":
+          description: Invalid label, or the person is not tracked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "500":
+          description: The check-in could not be stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Check-in table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    get:
+      tags: [presence]
+      operationId: listRoomCheckins
+      summary: List room check-ins
+      description: |
+        Lists check-ins stored in DeviceWeave, oldest first. Optional
+        `person`, `since` (ISO-8601), and `limit` (1-200, default 50).
+        Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      parameters:
+        - name: person
+          in: query
+          schema: { type: string }
+        - name: since
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses:
+        "200":
+          description: Check-ins
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [checkins]
+                properties:
+                  checkins:
+                    type: array
+                    items: { $ref: "#/components/schemas/RoomCheckin" }
+        "400":
+          description: Invalid filter
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Check-in table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /presence/checkins/capture:
+    post:
+      tags: [presence]
+      operationId: captureRoomReading
+      summary: Snapshot eero without a room label
+      description: |
+        Reads eero now and stores an unlabeled check-in. Returns `checkin_id`.
+        Call `POST /presence/checkins/{checkin_id}/label` when the answer
+        arrives. Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [person]
+              properties:
+                person: { type: string }
+                asked_at: { type: string }
+                source: { type: string }
+      responses:
+        "200":
+          description: Stored snapshot, including checkin_id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoomCheckin" }
+        "400":
+          description: Invalid person, or the person is not tracked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Check-in table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /presence/checkins/{checkin_id}/label:
+    post:
+      tags: [presence]
+      operationId: labelRoomCheckin
+      summary: Attach a room label to a captured check-in
+      description: |
+        Sets the room and `answered_at`. Does not read eero again, so the
+        stored signal stays the ask-time snapshot. Requires the same bearer
+        token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      parameters:
+        - name: checkin_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [room]
+              properties:
+                room: { type: string }
+      responses:
+        "200":
+          description: Updated check-in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoomCheckin" }
+        "400":
+          description: Invalid id or room
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "404":
+          description: No check-in with that id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Check-in table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /presence/checkins/{checkin_id}:
+    delete:
+      tags: [presence]
+      operationId: deleteRoomCheckin
+      summary: Delete a room check-in
+      description: |
+        Deletes one check-in. `deleted` is 0 when the id is already gone.
+        Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      parameters:
+        - name: checkin_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deleted count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [checkin_id, deleted]
+                properties:
+                  checkin_id: { type: string }
+                  deleted: { type: integer }
+        "400":
+          description: Invalid id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Check-in table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /presence/schedule:
+    post:
+      tags: [presence]
+      operationId: setRoomScheduleRule
+      summary: Set a fixed local-time room rule
+      description: |
+        Stores one window. While that person is home inside it, the poller
+        sets the room with high confidence and `room_source` `schedule_rule`,
+        and writes one labeled check-in per local hour. `end` earlier than
+        `start` wraps midnight. `timezone` defaults to `America/Chicago`.
+        Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [person, room, start, end]
+              properties:
+                person: { type: string }
+                room: { type: string }
+                start: { type: string, description: "HH:MM, 24-hour, inclusive." }
+                end: { type: string, description: "HH:MM, 24-hour, exclusive." }
+                timezone: { type: string, description: "IANA name. Defaults to America/Chicago." }
+      responses:
+        "200":
+          description: Stored rule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoomScheduleRule" }
+        "400":
+          description: Invalid window, or it overlaps another rule for this person
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Schedule table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    get:
+      tags: [presence]
+      operationId: listRoomScheduleRules
+      summary: List room schedule rules
+      description: |
+        Lists fixed time-window rules. Optional `person` filter.
+        Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      parameters:
+        - name: person
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Rules
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rules]
+                properties:
+                  rules:
+                    type: array
+                    items: { $ref: "#/components/schemas/RoomScheduleRule" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Schedule table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /presence/schedule/{rule_id}:
+    delete:
+      tags: [presence]
+      operationId: deleteRoomScheduleRule
+      summary: Delete a room schedule rule
+      description: |
+        Deletes one rule. `deleted` is 0 when the id is already gone.
+        Requires the same bearer token as `POST /mcp`.
+      security:
+        - mcpBearer: []
+      parameters:
+        - name: rule_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deleted count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rule_id, deleted]
+                properties:
+                  rule_id: { type: string }
+                  deleted: { type: integer }
+        "400":
+          description: Invalid id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or wrong bearer token
+        "503":
+          description: Schedule table is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /policies/author:
     post:
       tags: [policy]
@@ -1066,6 +1406,66 @@ components:
       properties:
         error: { type: string }
 
+    RoomCheckin:
+      type: object
+      required: [checkin_id, person, source, asked_at, timezone, local_hour, weekday, freshness]
+      properties:
+        checkin_id:
+          type: string
+          description: Opaque id. person and sort key, so a later label does not need a second index.
+        person: { type: string }
+        room:
+          type: string
+          description: Room label, including Not home. Absent until the check-in is labeled.
+        source: { type: string }
+        asked_at:
+          type: string
+          format: date-time
+          description: When the question was asked. Hour and weekday are this instant in America/Chicago.
+        answered_at:
+          type: string
+          format: date-time
+          description: When the room label was stored. Absent on an unlabeled capture.
+        timezone:
+          type: string
+          enum: ["America/Chicago"]
+        local_hour:
+          type: integer
+          minimum: 0
+          maximum: 23
+        weekday:
+          type: integer
+          minimum: 0
+          maximum: 6
+          description: Monday is 0. Taken from asked_at in America/Chicago.
+        device_hmac:
+          type: string
+          description: HMAC-SHA256 of the tracked device id. Never a MAC address.
+        node: { type: string }
+        signal: { type: string }
+        signal_bucket:
+          type: integer
+          minimum: 1
+          maximum: 5
+        freshness:
+          type: string
+          enum: [fresh, stale]
+        last_seen: { type: string }
+        is_home:
+          type: boolean
+          description: Omitted when eero could not be read, so a failed poll is not trained as away.
+
+    RoomScheduleRule:
+      type: object
+      required: [rule_id, person, room, start, end, timezone]
+      properties:
+        rule_id: { type: string }
+        person: { type: string }
+        room: { type: string }
+        start: { type: string, description: "HH:MM, inclusive." }
+        end: { type: string, description: "HH:MM, exclusive. Earlier than start wraps midnight." }
+        timezone: { type: string }
+
     Presence:
       type: object
       required: [is_home, updated_at]
@@ -1096,6 +1496,10 @@ components:
           minimum: 0
           maximum: 1
           description: Confidence of room. Zero when room is unknown.
+        room_source:
+          type: string
+          enum: [schedule_rule]
+          description: Present when a fixed time-window rule set the room.
         last_seen:
           type: string
           nullable: true
@@ -1123,6 +1527,9 @@ components:
               signal: { type: string, nullable: true }
               room: { type: string }
               room_confidence: { type: number }
+              room_source:
+                type: string
+                enum: [schedule_rule]
               last_seen: { type: string, nullable: true }
               freshness: { type: string }
               miss_count:

@@ -6,13 +6,14 @@ the eero node they were on, a coarse signal bucket, and the time.
 Those samples are the model. Live polls are not appended to them.
 
 The eero cloud API does not publish a live RSSI field or a
-signal-updated timestamp. ``connectivity.score_bars`` (1–5),
-``connectivity.signal`` / ``signal_avg`` (quality words, sometimes a
-dBm reading), and an integer ``connectivity.score`` in 1–5 are the
-fields the client libraries actually carry. ``last_active`` is the
-client's last activity, not a fresh signal sample. Buckets stay coarse
-on purpose: two rooms that share a node and a bucket are a tie, and a
-tie is ``unknown``.
+signal-updated timestamp. ``connectivity.signal`` / ``signal_avg``
+(quality words, sometimes a dBm reading) and ``connectivity.score_bars``
+(1–5) are the fields the client libraries actually carry. A dBm reading
+is bucketed ahead of ``score_bars``, because the bars often disagree
+with the dBm a fingerprint shows. A float ``score`` is not mapped.
+``last_active`` is the client's last activity, not a fresh signal
+sample. Buckets stay coarse on purpose: two rooms that share a node
+and a bucket are a tie, and a tie is ``unknown``.
 
 Device identifiers stored here and on the presence item are HMAC-SHA256
 of the normalized MAC. The key is a dedicated secret, not the eero
@@ -87,14 +88,20 @@ def validate_samples(value: Any, default: int = DEFAULT_SAMPLES) -> int:
 def signal_bucket(device: Any) -> Optional[int]:
     """Coarse 1–5 bucket from fields eero's device payload actually has.
 
-    ``score_bars`` wins when it is in 1–5 (0 means the API left it unset).
-    Otherwise a quality word or a negative dBm number on ``signal`` or
-    ``signal_avg``. A fractional ``score`` (the libraries type it as a
-    float) is not mapped: there is no published scale for it.
+    A negative dBm reading on ``signal`` or ``signal_avg`` wins. That is
+    the value a fingerprint shows, and ``score_bars`` often disagrees with
+    it. Otherwise ``score_bars`` wins when it is in 1–5 (0 means the API
+    left it unset), then a quality word. A float ``score`` is not mapped:
+    eero uses it as a 0–1 quality, so ``1.0`` is not bar 1.
     """
     if not isinstance(device, dict):
         return None
     connectivity = device.get("connectivity") if isinstance(device.get("connectivity"), dict) else {}
+    for key in ("signal", "signal_avg"):
+        if _is_dbm(connectivity.get(key)):
+            bucket = _bucket_from_value(connectivity.get(key))
+            if bucket is not None:
+                return bucket
     bars = _as_int(connectivity.get("score_bars"))
     if bars is not None and 1 <= bars <= 5:
         return bars
@@ -103,9 +110,8 @@ def signal_bucket(device: Any) -> Optional[int]:
         if bucket is not None:
             return bucket
     score = connectivity.get("score")
-    if isinstance(score, (int, float)) and not isinstance(score, bool):
-        if float(score).is_integer() and 1 <= int(score) <= 5:
-            return int(score)
+    if isinstance(score, int) and not isinstance(score, bool) and 1 <= score <= 5:
+        return score
     return _bucket_from_value(device.get("signal"))
 
 
@@ -137,18 +143,22 @@ def classify(
     node: Any,
     bucket: Any,
     fingerprints: Iterable[Dict[str, Any]],
+    zone: Any = None,
 ) -> Tuple[str, float]:
     """Nearest room on this node, or ``unknown``.
 
-    A room competes only when it has a sample on ``node``. Distance is the
-    smallest absolute bucket difference. An equal distance across rooms,
-    an unseen node, or a confidence under ``CONFIDENCE_FLOOR`` is
-    ``unknown`` — the node zone is left to the caller, and this function
-    does not pick a runner-up.
+    A room competes when a sample sits on ``node`` or on ``zone``. Those
+    two strings are the eero display name and the location; either one may
+    have been stored, and a trailing ``eero`` does not make them different.
+    Distance is the smallest absolute bucket difference. A stored dBm
+    signal is bucketed again so an old ``score_bars`` value cannot hide a
+    matching ``-54 dBm``. An equal distance across rooms, an unseen node,
+    or a confidence under ``CONFIDENCE_FLOOR`` is ``unknown``.
     """
-    if not isinstance(node, str) or not node.strip():
+    node_name = node.strip() if isinstance(node, str) else ""
+    zone_name = zone.strip() if isinstance(zone, str) else ""
+    if not node_name and not zone_name:
         return "unknown", 0.0
-    node_name = node.strip()
     live_bucket = _as_bucket(bucket)
     ranked: List[Tuple[str, int, bool]] = []
     for fp in fingerprints:
@@ -157,11 +167,11 @@ def classify(
             continue
         on_node = [
             sample for sample in fp.get("samples") or []
-            if isinstance(sample, dict) and str(sample.get("node") or "") == node_name
+            if isinstance(sample, dict) and _sample_matches_node(sample, node_name, zone_name)
         ]
         if not on_node:
             continue
-        bucketed = [b for b in (_as_bucket(sample.get("bucket")) for sample in on_node) if b is not None]
+        bucketed = [b for b in (_sample_bucket(sample) for sample in on_node) if b is not None]
         if live_bucket is not None and bucketed:
             dist = min(abs(b - live_bucket) for b in bucketed)
             had_bucket = True
@@ -259,20 +269,16 @@ def apply_rooms(
     ``readings`` maps a person's casefolded name to ``node``, ``bucket``,
     and ``device_hmac`` for this poll. A debounce miss is not a reading:
     the previous room is held. Away clears the room to ``unknown``.
-    Fingerprints are used only when their HMAC matches the live device.
+    A fingerprint applies when its person matches or its HMAC matches the
+    live device. A name-tracked phone can change MAC between calibration
+    and a later poll; the person label still owns those rooms.
     """
     prev_people = {
         str(person.get("person") or "").casefold(): person
         for person in (previous or {}).get("people") or []
         if isinstance(person, dict) and person.get("person")
     }
-    by_hmac: Dict[str, List[Dict[str, Any]]] = {}
-    for fp in fingerprints:
-        if not isinstance(fp, dict):
-            continue
-        digest = str(fp.get("device_hmac") or "")
-        if digest:
-            by_hmac.setdefault(digest, []).append(fp)
+    stored = [fp for fp in fingerprints if isinstance(fp, dict)]
 
     for person in updated.get("people") or []:
         if not isinstance(person, dict):
@@ -287,10 +293,15 @@ def apply_rooms(
             continue
         reading = readings.get(key) or {}
         digest = str(reading.get("device_hmac") or "")
+        usable = [
+            fp for fp in stored
+            if _fingerprint_applies(fp, key, digest)
+        ]
         proposed, confidence = classify(
             reading.get("node"),
             reading.get("bucket"),
-            by_hmac.get(digest, []),
+            usable,
+            zone=reading.get("zone"),
         )
         person.update(smooth(prev, proposed, confidence))
         if digest:
@@ -406,6 +417,56 @@ def _validate_label(value: Any, kind: str) -> str:
     return label
 
 
+def _fingerprint_applies(fp: Dict[str, Any], person_key: str, digest: str) -> bool:
+    fp_person = str(fp.get("person") or "").casefold()
+    fp_digest = str(fp.get("device_hmac") or "")
+    if person_key and fp_person == person_key:
+        return True
+    return bool(digest and fp_digest and fp_digest == digest)
+
+
+def _sample_matches_node(sample: Dict[str, Any], node_name: str, zone_name: str) -> bool:
+    stored = sample.get("node")
+    if _same_node(stored, node_name):
+        return True
+    return bool(zone_name) and _same_node(stored, zone_name)
+
+
+def _same_node(left: Any, right: Any) -> bool:
+    a = _node_key(left)
+    b = _node_key(right)
+    return bool(a) and a == b
+
+
+def _node_key(value: Any) -> str:
+    """Case-insensitive node identity. A trailing ``eero`` is the same node."""
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.strip().casefold().split())
+    if text.endswith(" eero"):
+        text = text[: -len(" eero")].strip()
+    return text
+
+
+def _sample_bucket(sample: Dict[str, Any]) -> Optional[int]:
+    """Prefer the dBm written on the sample over a stored score_bars bucket."""
+    signal = sample.get("signal")
+    if _is_dbm(signal):
+        parsed = _bucket_from_value(signal)
+        if parsed is not None:
+            return parsed
+    return _as_bucket(sample.get("bucket"))
+
+
+def _is_dbm(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return float(value) < 0
+    text = str(value).strip().casefold()
+    return bool(_DBM_RE.fullmatch(text)) and _bucket_from_dbm(float(_DBM_RE.fullmatch(text).group(1))) is not None
+
+
 def _bucket_from_value(value: Any) -> Optional[int]:
     if value is None or isinstance(value, bool):
         return None
@@ -486,6 +547,7 @@ def _clear_room(person: Dict[str, Any]) -> None:
     person.pop("room_pending", None)
     person.pop("room_pending_count", None)
     person.pop("device_hmac", None)
+    person.pop("room_source", None)
 
 
 def _hold_room(person: Dict[str, Any], previous: Dict[str, Any]) -> None:
@@ -513,6 +575,10 @@ def _aggregate_room(updated: Dict[str, Any]) -> None:
     chosen = max(home, key=lambda person: person.get("last_seen") or "")
     updated["room"] = chosen.get("room") or "unknown"
     updated["room_confidence"] = _as_float(chosen.get("room_confidence"))
+    if chosen.get("room_source"):
+        updated["room_source"] = chosen["room_source"]
+    else:
+        updated.pop("room_source", None)
 
 
 def _clean_sample(sample: Dict[str, Any]) -> Dict[str, Any]:

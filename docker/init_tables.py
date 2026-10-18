@@ -96,6 +96,30 @@ TABLES = [
         "BillingMode": "PAY_PER_REQUEST",
     },
     {
+        "TableName": os.environ.get("ROOM_SCHEDULE_TABLE", "deviceweave-room-schedule-dev"),
+        "AttributeDefinitions": [
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+        ],
+        "KeySchema": [
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+    },
+    {
+        "TableName": os.environ.get("ROOM_CHECKIN_TABLE", "deviceweave-room-checkins-dev"),
+        "AttributeDefinitions": [
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+        ],
+        "KeySchema": [
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+    },
+    {
         "TableName": os.environ.get("SCENE_TABLE_NAME", "deviceweave-scenes-dev"),
         "AttributeDefinitions": [
             {"AttributeName": "scene_id", "AttributeType": "S"},
