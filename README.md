@@ -122,7 +122,7 @@ DeviceWeave also serves a remote MCP endpoint at `POST /mcp`. See [Remote MCP se
 | `GET` | `/learnings` | — | List all learned phrases |
 | `DELETE` | `/learnings` | `{"device_id": "...", "phrase": "..."}` | Remove a learned phrase |
 | `POST` | `/presence` | `{"is_home": true\|false}` | Update home-occupancy state for the Policy Engine |
-| `GET` | `/presence` | — | Occupancy plus eero zone, node, signal, last_seen, and freshness |
+| `GET` | `/presence` | — | Occupancy plus eero zone, room, room confidence, node, signal, last_seen, and freshness |
 
 ### Policy Authoring API
 
@@ -341,7 +341,10 @@ Each tool calls the same in-process service function as the matching HTTP route.
 | `update_device` | `PUT /devices/{id}` | `device_id` plus any of `name`, `capabilities`, `ip`, `device_type`, `model` |
 | `delete_device` | `DELETE /devices/{id}` | **Destructive.** Deactivates the device |
 | `execute` | `POST /execute` | **Destructive.** Can actuate hardware. `command`, optional `session_id`, or a vision `source` |
-| `get_presence` | `GET /presence` | Read-only. Includes eero zone, node, signal, and freshness when the poller has written them |
+| `get_presence` | `GET /presence` | Read-only. Includes eero zone, room, room confidence, node, signal, and freshness when the poller has written them |
+| `calibrate_room` | `POST /presence/rooms/calibrate` | `person`, `room`, optional `samples` (1–8, default 5). Starts a minute of eero reads and returns immediately. Calling it again replaces that room. Bearer token required on the HTTP route |
+| `list_room_fingerprints` | `GET /presence/rooms` | Read-only. Optional `person`. Bearer token required on the HTTP route |
+| `delete_room_fingerprint` | `DELETE /presence/rooms/{room}` | **Destructive.** `room`, optional `person`. Bearer token required on the HTTP route |
 | `set_presence` | `POST /presence` | `is_home` boolean |
 | `list_scenes` | `GET /scenes` | Read-only |
 | `delete_scene` | `DELETE /scenes/{id}` | **Destructive.** Argument: `scene_id` |
@@ -356,7 +359,7 @@ Each tool calls the same in-process service function as the matching HTTP route.
 | `ingest` | `POST /ingest` | Optional `provider` (default `kasa`), `mode` (`full` or `delta`), Ring `refresh_token` / `two_fa_code`. `full` marks devices missing from the run offline |
 | `health` | `GET /health` | Read-only |
 
-`delete_device`, `delete_scene`, `delete_policy`, `delete_learning`, and `execute` are annotated `destructiveHint: true`.
+`delete_device`, `delete_scene`, `delete_policy`, `delete_learning`, `delete_room_fingerprint`, and `execute` are annotated `destructiveHint: true`.
 
 A tool result is the service's JSON body. `isError` is true when that service returns an HTTP status of 400 or higher.
 
@@ -677,7 +680,7 @@ curl -X POST $API_URL/presence -H "Content-Type: application/json" -d '{"is_home
 
 Defaults to `true` when not set — avoids accidental lockout from "nobody home" policies.
 
-An eero poller can keep this item up to date from the mesh you already have: who is home, which node they are on, signal, and whether the reading is fresh. A phone that drops off Wi-Fi for one poll is not marked away, and a rejected eero session never marks the house empty. The login cannot use an Amazon eero account; setup creates a separate email or phone admin, invites it from the owner's eero app, and accepts the invite. Steps are in [`docs/eero-presence.md`](docs/eero-presence.md). The eero API is unofficial and can change.
+An eero poller can keep this item up to date from the mesh you already have: who is home, which node they are on, which calibrated room that reading matches, signal, and whether the reading is fresh. A phone that drops off Wi-Fi for one poll is not marked away, and a rejected eero session never marks the house empty. Room stays `unknown` until you calibrate and the classifier will name one. The login cannot use an Amazon eero account; setup creates a separate email or phone admin, invites it from the owner's eero app, and accepts the invite. Steps, including room calibration, are in [`docs/eero-presence.md`](docs/eero-presence.md). The eero API is unofficial and can change.
 
 ---
 
@@ -726,13 +729,16 @@ DeviceWeave/
 │   ├── oidc-trust-policy.json       IAM trust policy for GitHub OIDC role
 │   ├── ui-update-spec.md            UI implementation spec (devices/scenes/providers)
 │   ├── ui-conversational-agent-spec.md  UI spec — Home tab conversational interface
-│   └── eero-presence.md             Eero mesh presence — login, tracked devices, deploy
+│   └── eero-presence.md             Eero mesh presence — login, tracked devices, room calibration
 └── src/
     ├── app.py                       Execution Lambda — routing, dispatch, conversational path
     ├── presence_store.py            Home-occupancy item shared by /presence and the eero poller
     ├── eero_client.py               Unofficial eero cloud API client
     ├── eero_presence.py             Client list → presence, with away debounce
     ├── eero_presence_handler.py     Scheduler Lambda — poll eero, write presence
+    ├── eero_calibration_handler.py  On-demand room calibration (the only fingerprint writer)
+    ├── room_fingerprint.py          Room samples, HMAC device ids, nearest-room classifier
+    ├── room_calibration_client.py   MCP invoke of the calibration Lambda
     ├── bedrock_agent.py             Bedrock Converse API agentic loop + tool implementations
     ├── conversation_store.py        DynamoDB-backed session store (24 h TTL)
     ├── sms_handler.py               End User Messaging inbound SMS Lambda handler

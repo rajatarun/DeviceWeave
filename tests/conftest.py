@@ -49,6 +49,10 @@ _TABLE_ENV_VARS = [
     "EERO_SESSION_SECRET_NAME",
     "EERO_AWAY_MISS_THRESHOLD",
     "EERO_NETWORK_ID",
+    "EERO_DEVICE_HMAC_SECRET_NAME",
+    "EERO_CALIBRATION_FUNCTION_NAME",
+    "EERO_CALIBRATION_INTERVAL_SECONDS",
+    "ROOM_FINGERPRINT_TABLE",
     "OBSERVATORY_METRICS_TABLE",
     "CONVERSATION_TABLE_NAME",
     "MEMGRAPH_HOST",
@@ -143,6 +147,10 @@ class FakeTable:
 
     def scan(self, **kwargs) -> Dict[str, Any]:
         return {"Items": list(self._items.values())}
+
+    def delete_item(self, Key: Dict[str, Any]) -> Dict[str, Any]:
+        self._items.pop((Key.get("pk"), Key.get("sk")), None)
+        return {}
 
 
 class FakeDynamoDBResource:

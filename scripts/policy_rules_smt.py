@@ -33,7 +33,7 @@ import z3
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from policy_authoring.rule_set_checker import (  # noqa: E402
-    BOOLEAN_FIELDS, INTEGER_FIELDS, NUMERIC_DOMAINS,
+    BOOLEAN_FIELDS, INTEGER_FIELDS, NUMERIC_DOMAINS, STRING_FIELDS,
 )
 
 
@@ -44,6 +44,8 @@ class Encoding:
             self.vars[f] = z3.Int(f) if f in INTEGER_FIELDS else z3.Real(f)
         for f in BOOLEAN_FIELDS:
             self.vars[f] = z3.Bool(f)
+        for f in STRING_FIELDS:
+            self.vars[f] = z3.String(f)
         self.domain = z3.And(*[
             z3.And(self.vars[f] >= lo, self.vars[f] <= hi) for f, (lo, hi) in NUMERIC_DOMAINS.items()
         ])
@@ -57,6 +59,11 @@ class Encoding:
             if not isinstance(v, bool) or op not in ("==", "!="):
                 return z3.BoolVal(False)
             return x == v if op == "==" else x != v
+        if f in STRING_FIELDS:
+            if not isinstance(v, str) or op not in ("==", "!="):
+                return z3.BoolVal(False)
+            lit = z3.StringVal(v)
+            return x == lit if op == "==" else x != lit
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             return z3.BoolVal(False)
         val = z3.RealVal(str(float(v)))

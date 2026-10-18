@@ -343,6 +343,17 @@ Parameters:
     Description: >
       Optional eero network id. Blank polls every network on the account.
 
+  EeroDeviceHmacSecretName:
+    Type: String
+    Default: deviceweave/eero-device-hmac
+    MinLength: 1
+    AllowedPattern: "[A-Za-z0-9/_+=.@-]+"
+    Description: >
+      Secrets Manager name of the HMAC key used to hash device identifiers
+      before they are written to room fingerprints or presence. This is not
+      the eero session token. Must not be blank. Create the secret before
+      calibrating a room. Do not put the key in this template.
+
 Resources:
   # -------------------------------------------------------------------
   # Lambda Security Group
@@ -720,6 +731,8 @@ Resources:
           EERO_SESSION_SECRET_NAME: !Ref EeroSessionSecretName
           EERO_TRACKED_TABLE: !Ref EeroTrackedDevicesTable
           EERO_AWAY_MISS_THRESHOLD: !Sub "${EeroAwayMissThreshold}"
+          EERO_DEVICE_HMAC_SECRET_NAME: !Ref EeroDeviceHmacSecretName
+          ROOM_FINGERPRINT_TABLE: !Ref RoomFingerprintTable
           EERO_NETWORK_ID: !If
             - HasEeroNetwork
             - !Ref EeroNetworkId
@@ -732,6 +745,16 @@ Resources:
             TableName: !Ref EeroTrackedDevicesTable
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${EeroSessionSecretName}-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${EeroDeviceHmacSecretName}-*"
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:BatchGetItem
+                - dynamodb:Query
+                - dynamodb:Scan
+              Resource: !GetAtt RoomFingerprintTable.Arn
 
   EeroPresenceFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -778,6 +801,79 @@ Resources:
         RetryPolicy:
           MaximumRetryAttempts: 0
           MaximumEventAgeInSeconds: 300
+
+  # -------------------------------------------------------------------
+  # Room calibration. Not in the VPC, same reason as the poller.
+  # HTTP returns before the sample minute finishes; the function invokes
+  # itself asynchronously to read eero. This role is the only writer of
+  # the fingerprint table. The routes require the MCP bearer token.
+  # -------------------------------------------------------------------
+  EeroCalibrationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "deviceweave-eero-calibration-${StageName}"
+      CodeUri: src/
+      Handler: eero_calibration_handler.handler
+      Timeout: 120
+      MemorySize: 256
+      Description: >
+        Calibrate rooms from on-demand eero reads and store node plus
+        coarse signal samples. Authenticated HTTP and MCP only.
+      Environment:
+        Variables:
+          EERO_SESSION_SECRET_NAME: !Ref EeroSessionSecretName
+          EERO_DEVICE_HMAC_SECRET_NAME: !Ref EeroDeviceHmacSecretName
+          EERO_TRACKED_TABLE: !Ref EeroTrackedDevicesTable
+          ROOM_FINGERPRINT_TABLE: !Ref RoomFingerprintTable
+          EERO_CALIBRATION_FUNCTION_NAME: !Sub "deviceweave-eero-calibration-${StageName}"
+          MCP_AUTH_TOKEN_SECRET_NAME: !Ref McpAuthTokenSecretName
+          EERO_NETWORK_ID: !If
+            - HasEeroNetwork
+            - !Ref EeroNetworkId
+            - !Ref AWS::NoValue
+      Policies:
+        - CloudWatchLogsFullAccess
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RoomFingerprintTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref EeroTrackedDevicesTable
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${EeroSessionSecretName}-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${EeroDeviceHmacSecretName}-*"
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${McpAuthTokenSecretName}-*"
+        - Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:deviceweave-eero-calibration-${StageName}"
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:deviceweave-eero-calibration-${StageName}:*"
+      Events:
+        CalibrateRoom:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence/rooms/calibrate
+            Method: POST
+        ListRoomFingerprints:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence/rooms
+            Method: GET
+        DeleteRoomFingerprint:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /presence/rooms/{room}
+            Method: DELETE
+
+  EeroCalibrationFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/deviceweave-eero-calibration-${StageName}"
+      RetentionInDays: 14
 
   # -------------------------------------------------------------------
   # Policy Authoring Lambda
@@ -876,6 +972,7 @@ Resources:
         Variables:
           # Merged with Globals, which supply table names and provider secret ARNs.
           MCP_AUTH_TOKEN_SECRET_NAME: !Ref McpAuthTokenSecretName
+          EERO_CALIBRATION_FUNCTION_NAME: !Sub "deviceweave-eero-calibration-${StageName}"
       VpcConfig:
         SecurityGroupIds:
           - !Ref LambdaSecurityGroup
@@ -914,6 +1011,12 @@ Resources:
           - !Ref AWS::NoValue
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${McpAuthTokenSecretName}-*"
+        - Statement:
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource:
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:deviceweave-eero-calibration-${StageName}"
+                - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:deviceweave-eero-calibration-${StageName}:*"
         - AWSSecretsManagerGetSecretValuePolicy:
             SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:deviceweave/kasa-credentials-*"
         - AWSSecretsManagerGetSecretValuePolicy:
@@ -1218,6 +1321,33 @@ Resources:
           KeyType: HASH
 
   # -------------------------------------------------------------------
+  # DynamoDB — room fingerprints (the calibration model).
+  # On-demand, encrypted at rest, point-in-time recovery off.
+  # Written only by the calibration Lambda. The poller may read it.
+  # No public route reaches this table without the MCP bearer token.
+  # -------------------------------------------------------------------
+  RoomFingerprintTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-room-fingerprints-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  # -------------------------------------------------------------------
   # DynamoDB — Policy Store
   # Stores validated Policy DSL rules with full version history.
   # -------------------------------------------------------------------
@@ -1414,6 +1544,12 @@ Outputs:
     Value: !GetAtt EeroPresenceFunction.Arn
     Export:
       Name: !Sub "DeviceWeaveEeroPresenceFunctionArn-${StageName}"
+
+  RoomFingerprintTableName:
+    Description: DynamoDB table of calibrated room fingerprints
+    Value: !Ref RoomFingerprintTable
+    Export:
+      Name: !Sub "DeviceWeaveRoomFingerprintTable-${StageName}"
 
   # The outputs below complete the set an automation harness needs to resolve
   # every coordinate from `describe-stacks` alone. scripts/stack_env.py reads

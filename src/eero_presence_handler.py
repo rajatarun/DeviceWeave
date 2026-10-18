@@ -27,6 +27,7 @@ import aws_clients
 import eero_client
 import eero_presence
 import presence_store
+import room_fingerprint
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(LOG_LEVEL)
@@ -116,12 +117,14 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
         return _mark_stale(table, "tracked eero devices were unusable")
 
+    _assign_rooms(updated, previous, tracked, clients)
     presence_store.write_home(table, updated)
     logger.info(
-        "eero presence updated is_home=%s freshness=%s zone=%s people=%s",
+        "eero presence updated is_home=%s freshness=%s zone=%s room=%s people=%s",
         updated.get("is_home"),
         updated.get("freshness"),
         updated.get("zone"),
+        updated.get("room"),
         [person.get("person") for person in updated.get("people") or []],
     )
     return {
@@ -129,6 +132,8 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "is_home": bool(updated.get("is_home")),
         "freshness": "fresh",
         "zone": updated.get("zone"),
+        "room": updated.get("room") or "unknown",
+        "room_confidence": updated.get("room_confidence") or 0,
     }
 
 
@@ -161,6 +166,73 @@ def _mark_stale(table: Any, reason: str) -> Dict[str, Any]:
         "freshness": "stale",
         "reason": reason,
     }
+
+
+def _assign_rooms(
+    updated: Dict[str, Any],
+    previous: Any,
+    tracked: List[Dict[str, Any]],
+    clients: List[Dict[str, Any]],
+) -> None:
+    """Classify the live reading. A missing table or key leaves room unset.
+
+    Occupancy is already decided. A failure here must not mark anyone away
+    and must not write a guessed room.
+    """
+    table_name = os.environ.get("ROOM_FINGERPRINT_TABLE", "").strip()
+    secret_name = os.environ.get("EERO_DEVICE_HMAC_SECRET_NAME", "").strip()
+    if not table_name or not secret_name:
+        return
+    try:
+        key = room_fingerprint.load_hmac_key(secret_name)
+    except Exception:
+        logger.error("room classification skipped reason=hmac_secret_unreadable")
+        room_fingerprint.carry_forward(updated, previous)
+        return
+    if not key:
+        logger.error("room classification skipped reason=hmac_secret_empty")
+        room_fingerprint.carry_forward(updated, previous)
+        return
+    try:
+        fingerprints = room_fingerprint.load_all(
+            aws_clients.get_dynamodb_resource().Table(table_name)
+        )
+    except Exception:
+        logger.error("room classification skipped reason=fingerprint_table_unreadable")
+        room_fingerprint.carry_forward(updated, previous)
+        return
+    readings = _readings(tracked, clients, key)
+    room_fingerprint.apply_rooms(updated, previous, readings, fingerprints)
+    logger.info(
+        "room classification room=%s confidence=%s",
+        updated.get("room"),
+        updated.get("room_confidence"),
+    )
+
+
+def _readings(
+    tracked: List[Dict[str, Any]],
+    clients: List[Dict[str, Any]],
+    key: str,
+) -> Dict[str, Dict[str, Any]]:
+    now = _now()
+    people: List[str] = []
+    for row in tracked:
+        person = str(row.get("person") or "").strip()
+        if person and person.casefold() not in {item.casefold() for item in people}:
+            people.append(person)
+    readings: Dict[str, Dict[str, Any]] = {}
+    for person in people:
+        match = eero_presence.connected_match(tracked, clients, person, now)
+        if not match:
+            continue
+        digest = room_fingerprint.device_hmac(str(match.get("mac") or ""), key)
+        readings[person.casefold()] = {
+            "node": match.get("node"),
+            "bucket": room_fingerprint.signal_bucket(match.get("device")),
+            "device_hmac": digest,
+        }
+    return readings
 
 
 def _load_tracked(table_name: str) -> List[Dict[str, Any]]:

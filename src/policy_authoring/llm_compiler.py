@@ -41,9 +41,9 @@ Policy DSL JSON object.
   },
   "conditions": [
     {
-      "field": "<EXACTLY ONE OF: temperature | humidity | time_hour | cloud_cover_pct | is_home | is_overcast>",
+      "field": "<EXACTLY ONE OF: temperature | humidity | time_hour | cloud_cover_pct | is_home | is_overcast | room>",
       "operator": "<EXACTLY ONE OF: > | < | >= | <= | == | !=",
-      "value": <number for temperature/humidity/time_hour/cloud_cover_pct  |  boolean for is_home/is_overcast>
+      "value": <number for temperature/humidity/time_hour/cloud_cover_pct  |  boolean for is_home/is_overcast  |  string for room>
     }
   ],
   "action": {
@@ -61,7 +61,7 @@ Policy DSL JSON object.
                      No other device types are accepted.
 3.  conditions     : MUST contain at least 1 item.  Empty list → reject.
 4.  field          : MUST be one of: temperature, humidity, time_hour,
-                     cloud_cover_pct, is_home, is_overcast.
+                     cloud_cover_pct, is_home, is_overcast, room.
 5.  operator       : MUST be one of: >, <, >=, <=, ==, !=
 6.  value types    :
       temperature      → Fahrenheit float/int  (e.g. 65.0 for "cold", 85 for "hot")
@@ -70,6 +70,10 @@ Policy DSL JSON object.
       cloud_cover_pct  → percentage float/int  (0-100, e.g. 70 for "mostly cloudy")
       is_home          → boolean               (true or false, NOT a string)
       is_overcast      → boolean               (true or false, NOT a string)
+      room             → string                (== or != only). The calibrated
+                                                room label, exactly, for example
+                                                "Office" or "Living Room".
+                                                "unknown" means not classified.
 7.  action.type    : MUST be one of: block, allow, modify.
 8.  action.reason  : non-empty string explaining the rule's intent.
 9.  params         : always an empty object {} unless you have explicit \
@@ -93,6 +97,10 @@ modification parameters.
   "at night" / "nighttime"                    → time_hour >= 21
   "nobody home" / "no one home" / "away"      → is_home == false
   "when I'm home" / "when home" / "at home"   → is_home == true
+  "in the office" / "when I'm in the kitchen" → room == "Office" / room == "Kitchen"
+      Use the room words the user said. The string must match the label stored
+      by room calibration, and it is case-sensitive. Do not invent a room the
+      user did not name. Do not map a room phrase onto is_home.
   "don't turn on" / "prevent" / "block"       → action.type = block
   "always on" / "keep on" / "ensure"          → action.type = allow
   "dim" / "reduce" / "lower"                  → action.type = modify

@@ -434,3 +434,15 @@ Departure waits for `EeroAwayMissThreshold` consecutive misses (default 3) of ev
 The API is unofficial and may change. The client pins the paths those libraries use (`/login`, `/login/verify` with cookie `s`, `/account`, `/networks/{id}/devices`) and tests them with mocked HTTP so CI never calls eero.
 
 Amazon sign-in is not supported: `POST /login` returns HTTP 401 and `error.login.unknown`. The login CLI is for a separate standard account (email or phone, one-time code) that the owner invites as a network admin. A login 401 is reported with those steps. A later session 401 (`error.session.invalid`, `error.session.refresh`) stays on the fail-safe path and is not described as an Amazon-login problem.
+
+---
+
+## 37. Room calibration stores node and coarse signal, and will not guess a room
+
+**Chosen**: a second Lambda, also outside the VPC, is the only writer of an on-demand fingerprint table (encrypted at rest, point-in-time recovery off). `calibrate_room(person, room, samples=5)` and `POST /presence/rooms/calibrate` queue about a minute of eero reads (every 12 seconds, at most 8) and return before that minute finishes, because API Gateway will not hold the request open. Calling it again for the same person and room replaces the samples. `list_room_fingerprints` and `delete_room_fingerprint(room)` read and delete. The HTTP routes require the same bearer token as `/mcp`. The poller may read the table and may not write it. The MCP function may invoke the calibration function and may not write the table.
+
+The cloud payload does not include a live RSSI or a signal-sample timestamp. Samples store the node plus a coarse bucket from `connectivity.score_bars` (1–5), else `connectivity.signal` / `signal_avg` (quality word or a negative dBm number). A fractional `score` is not mapped. Classification is nearest bucket among rooms that have a sample on the same node. A tie, an unseen node, or confidence below 0.5 yields `room=unknown` and leaves `zone` as the node. The displayed room changes only after two agreeing polls. Smoothing state sits on the current presence item. Live polls are not appended to the fingerprints.
+
+Device ids on fingerprints and presence are HMAC-SHA256 under `deviceweave/eero-device-hmac`, not the eero session token. The tracked-device table still stores the MAC the poller matches on. Logs for this path are counts and room labels.
+
+**Rejected**: blocking the HTTP request for the whole minute; deriving the HMAC from the rotating eero session; storing raw MACs on the fingerprint or presence items; keeping a history of live readings; letting the poller write fingerprints; guessing a room when two labels are equally near; inventing an RSSI field the cloud API does not return.
