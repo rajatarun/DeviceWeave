@@ -40,7 +40,7 @@ The stack does not create the session secret and it does not know which devices 
 
 ## What happens after merge
 
-Merging to `main` deploys the stack through GitHub Actions. The deploy role must be allowed to create an EventBridge Scheduler schedule and to pass the schedule's invoke role to `scheduler.amazonaws.com` (the same kind of IAM access the workflow already uses to create Lambda roles). The workflow passes:
+Merging to `main` deploys the stack through GitHub Actions. The schedule role has no custom name, so the workflow's `CAPABILITY_IAM` is enough. The deploy role still needs EventBridge Scheduler permissions it has not needed before: `scheduler:CreateSchedule`, `scheduler:GetSchedule`, `scheduler:UpdateSchedule`, and `scheduler:DeleteSchedule`, plus `iam:PassRole` on that role to `scheduler.amazonaws.com`. Creating the role uses the same IAM actions as the Lambda roles. The new tables and Lambdas use the same DynamoDB, Lambda, and logs actions as the rest of the stack. CloudFormation does not create the eero session secret or the device HMAC secret. The workflow passes:
 
 - `EeroSessionSecretName=deviceweave/eero-session`
 - `EeroPollSchedule="rate(5 minutes)"` (the quotes are part of the argument SAM parses; without them the space is cut and the value is `rate(5`)

@@ -765,7 +765,9 @@ Resources:
   EeroPresenceScheduleRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "deviceweave-eero-presence-schedule-${StageName}"
+      # No RoleName. A custom name makes CreateChangeSet require
+      # CAPABILITY_NAMED_IAM. CloudFormation names the role, and the
+      # schedule below takes its ARN with !GetAtt.
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
