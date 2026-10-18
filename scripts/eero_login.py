@@ -178,8 +178,10 @@ def _store_secret(secret_name: str, session_token: str, region: str) -> None:
 def _put_tracked(table_name: str, item: dict, region: str) -> None:
     import boto3
 
+    import presence_store
+
     table = boto3.resource("dynamodb", region_name=region).Table(table_name)
-    table.put_item(Item=item)
+    table.put_item(Item=presence_store.to_dynamo(item))
 
 
 def _region(args: argparse.Namespace) -> str:

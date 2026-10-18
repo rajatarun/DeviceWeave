@@ -485,10 +485,10 @@ def test_poller_names_a_room_only_after_two_readings(monkeypatch, fake_dynamodb,
     assert stored["people"][0]["room_pending"] == "Office"
     assert stored["people"][0]["device_hmac"] == room_fingerprint.device_hmac(MAC, HMAC_KEY)
     assert "mac" not in list(_walk_keys(stored["people"]))
-    _no_raw_mac(json.dumps({
+    _no_raw_mac(json.dumps(presence_store.from_dynamo({
         "presence": stored,
         "fingerprints": fake_dynamodb.Table("fingerprints").scan()["Items"],
-    }))
+    })))
     assert "strong" not in caplog.text
     assert "Raja phone" not in caplog.text
 
@@ -538,7 +538,7 @@ def test_unreadable_hmac_keeps_the_last_room(monkeypatch, fake_dynamodb):
     kept = fake_dynamodb.Table("presence").get_item(Key={"pk": "home_state"})["Item"]
     assert kept["room"] == "Office"
     assert kept["freshness"] == "fresh"
-    assert "secret unavailable" not in json.dumps(kept)
+    assert "secret unavailable" not in json.dumps(presence_store.from_dynamo(kept))
 
 
 def test_poller_does_not_guess_when_confidence_is_low(monkeypatch, fake_dynamodb):
