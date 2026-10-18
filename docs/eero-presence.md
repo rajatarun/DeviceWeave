@@ -43,7 +43,7 @@ The stack does not create the session secret and it does not know which devices 
 Merging to `main` deploys the stack through GitHub Actions. The deploy role must be allowed to create an EventBridge Scheduler schedule and to pass the schedule's invoke role to `scheduler.amazonaws.com` (the same kind of IAM access the workflow already uses to create Lambda roles). The workflow passes:
 
 - `EeroSessionSecretName=deviceweave/eero-session`
-- `EeroPollSchedule=rate(5 minutes)`
+- `EeroPollSchedule="rate(5 minutes)"` (the quotes are part of the argument SAM parses; without them the space is cut and the value is `rate(5`)
 - `EeroAwayMissThreshold=3`
 - `EeroDeviceHmacSecretName=deviceweave/eero-device-hmac`
 
@@ -94,7 +94,7 @@ A successful poll looks like:
 
 A phone that drops off Wi-Fi for one poll does not mark that person away. The poller counts consecutive misses of every device mapped to them. The default threshold is 3, so at a 5-minute schedule someone is marked away after about 15 minutes of absence. The next poll that sees any of their devices marks them home immediately and resets the count. `miss_count` on each person is how many misses are in the current streak.
 
-Change the schedule or the threshold in `.github/workflows/deploy.yml` (`EeroPollSchedule`, `EeroAwayMissThreshold`) and deploy. Both parameters reject a blank secret name and a blank schedule; an empty override is what broke earlier DeviceWeave deploys. Use a Scheduler expression such as `rate(5 minutes)` or `cron(0/5 * * * ? *)`.
+Change the schedule or the threshold in `.github/workflows/deploy.yml` (`EeroPollSchedule`, `EeroAwayMissThreshold`) and deploy. Both parameters reject a blank secret name and a blank schedule; an empty override is what broke earlier DeviceWeave deploys. Use a Scheduler expression such as `rate(5 minutes)` or `cron(0/5 * * * ? *)`. Keep a space inside SAM's quotes (`EeroPollSchedule="rate(5 minutes)"`). Quotes that only wrap the whole `Key=value` are removed by the shell, and SAM then splits the value on the space.
 
 ## When the session dies
 

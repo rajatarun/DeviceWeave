@@ -562,7 +562,8 @@ def test_template_requires_a_secret_name_and_keeps_the_poller_serverless():
     assert "AWS::Scheduler::Schedule" in _resource_block(template, "EeroPresencePollSchedule")
 
     assert "EeroSessionSecretName=deviceweave/eero-session" in workflow
-    assert "EeroPollSchedule=rate(5 minutes)" in workflow
+    assert 'EeroPollSchedule="rate(5 minutes)"' in workflow
+    assert '"EeroPollSchedule=rate(5 minutes)"' not in workflow
     assert 'ParameterValue=""' not in workflow.split("EeroSessionSecretName")[1][:80]
 
 

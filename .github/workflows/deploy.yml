@@ -271,6 +271,12 @@ jobs:
       #     VpcConfig SubnetIds stays on LambdaSubnetIds even if a list is
       #     still stored. Public subnets have no DynamoDB/AWS-service
       #     egress and need NAT or endpoints.
+      #
+      #     EeroPollSchedule contains a space. CfnParameterOverridesType
+      #     (aws-sam-cli 1.121.0) splits an unquoted value on that space, so
+      #     shell quotes around the whole Key=value are not enough: bash
+      #     removes them and SAM stores rate(5. The quotes have to be inside
+      #     the argv SAM receives: EeroPollSchedule="rate(5 minutes)".
       # ----------------------------------------------------------------
       - name: SAM deploy
         run: |
@@ -294,7 +300,7 @@ jobs:
               ObservatoryMetricsTableName="${{ steps.observatory.outputs.observatory_table_name }}" \
               MemgraphSecretArn="${{ steps.memgraph.outputs.memgraph_secret_arn }}" \
               EeroSessionSecretName=deviceweave/eero-session \
-              "EeroPollSchedule=rate(5 minutes)" \
+              'EeroPollSchedule="rate(5 minutes)"' \
               EeroAwayMissThreshold=3 \
               EeroDeviceHmacSecretName=deviceweave/eero-device-hmac
 

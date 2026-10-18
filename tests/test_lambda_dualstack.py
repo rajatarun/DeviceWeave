@@ -95,6 +95,48 @@ def test_deploy_clears_public_subnets_and_does_not_discover_them():
     assert "steps.vpc.outputs.subnet_ids" in step["run"]
 
 
+# aws-sam-cli==1.121.0 samcli/cli/types.py — CfnParameterOverridesType.
+# The deploy workflow pins that version. This copy runs without installing
+# SAM. test_vendored_parser_matches_sam_cli checks it against the package
+# when that exact version is installed.
+_PARAM_AND_METADATA_KEY_REGEX = """([A-Za-z0-9\\"\']+)"""
+
+
+def _generate_match_regex(match_pattern, delim):
+    return (
+        f"""(\\"(?:\\\\{match_pattern}|[^\\"\\\\]+)*\\"|"""
+        + f"""\'(?:\\\\{match_pattern}|[^\'\\\\]+)*\'|"""
+        + f"""(?:\\\\{match_pattern}|[^{delim}\\"\\\\]+)+)"""
+    )
+
+
+def _unquote_wrapped_quotes(value):
+    if value and value[0] == value[-1] and value[0] in ('"', "'"):
+        value = value[1:-1]
+    return value.replace("\\ ", " ").replace('\\"', '"').replace("\\'", "'")
+
+
+def parse_cfn_parameter_overrides(values):
+    """Space-delimited ParameterKey=...,ParameterValue=... or Key=Value."""
+    value_regex = _generate_match_regex(".", " ")
+    patterns = [
+        rf"(?:ParameterKey={_PARAM_AND_METADATA_KEY_REGEX},ParameterValue={value_regex})",
+        rf"(?:(?: ){_PARAM_AND_METADATA_KEY_REGEX}={value_regex})",
+    ]
+    result = {}
+    if values == ("",):
+        return result
+    seq = (values,) if isinstance(values, str) else values
+    for val in seq:
+        normalized = " " + val.strip()
+        pattern = next((item for item in patterns if re.findall(item, normalized)), None)
+        if pattern is None:
+            raise ValueError(f"{val} is not a valid parameter override")
+        for key, param_value in re.findall(pattern, normalized):
+            result[_unquote_wrapped_quotes(key)] = _unquote_wrapped_quotes(param_value)
+    return result
+
+
 def _sam_deploy_argv(tmp_path) -> list[str]:
     """Shell-split the workflow's sam deploy line the way Actions will."""
     wf = yaml.safe_load(WORKFLOW.read_text())
@@ -135,9 +177,59 @@ def test_sam_parameter_overrides_parser_accepts_the_workflow_string(tmp_path):
     result = CliRunner().invoke(_cmd, ["--parameter-overrides", *overrides])
     assert result.exit_code == 0, result.output
     parsed = json.loads(result.output)
+    assert parsed == parse_cfn_parameter_overrides(overrides)
+    _assert_deploy_overrides(parsed, overrides)
+
+
+def _assert_deploy_overrides(parsed: dict, overrides: list[str]) -> None:
+    assert parsed["EeroPollSchedule"] == "rate(5 minutes)"
     assert parsed["LambdaPublicSubnetIds"] == ""
     assert parsed["LambdaUsePublicSubnets"] == "false"
     assert parsed["LambdaSubnetIds"] == "gha-value"
+    assert parsed["EeroSessionSecretName"] == "deviceweave/eero-session"
+    assert parsed["EeroAwayMissThreshold"] == "3"
+    spaced = {key: value for key, value in parsed.items() if any(ch.isspace() for ch in value)}
+    assert spaced == {"EeroPollSchedule": "rate(5 minutes)"}
+    for token in overrides:
+        if token.startswith("EeroPollSchedule="):
+            assert token == 'EeroPollSchedule="rate(5 minutes)"'
+        else:
+            assert " " not in token, token
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_eero_poll_schedule_override_parses_to_the_full_value(tmp_path):
+    """Shell-split the workflow, then parse it the way SAM 1.121.0 does."""
+    argv = _sam_deploy_argv(tmp_path)
+    overrides = argv[argv.index("--parameter-overrides") + 1:]
+    parsed = parse_cfn_parameter_overrides(overrides)
+    _assert_deploy_overrides(parsed, overrides)
+    # The form that failed run 39145288741: bash strips the outer quotes and
+    # SAM's space delimiter keeps only rate(5.
+    broken = parse_cfn_parameter_overrides(["EeroPollSchedule=rate(5 minutes)"])
+    assert broken["EeroPollSchedule"] == "rate(5"
+
+
+def test_vendored_parser_matches_sam_cli():
+    """The in-repo copy is the aws-sam-cli 1.121.0 CfnParameterOverridesType."""
+    pytest.importorskip("samcli")
+    import importlib.metadata
+
+    version = importlib.metadata.version("aws-sam-cli")
+    if version != "1.121.0":
+        pytest.skip(f"deploy pins aws-sam-cli==1.121.0, found {version}")
+    from samcli.cli.types import CfnParameterOverridesType
+
+    samples = [
+        ['EeroPollSchedule="rate(5 minutes)"'],
+        ["EeroPollSchedule=rate(5 minutes)"],
+        ['ParameterKey=EeroPollSchedule,ParameterValue="rate(5 minutes)"'],
+        ['ParameterKey=LambdaPublicSubnetIds,ParameterValue=""', "StageName=prod"],
+        ["EeroSessionSecretName=deviceweave/eero-session", "EeroAwayMissThreshold=3"],
+    ]
+    real = CfnParameterOverridesType()
+    for sample in samples:
+        assert parse_cfn_parameter_overrides(sample) == real.convert(tuple(sample), None, None)
 
 
 def _check_step_script() -> str:
