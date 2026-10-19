@@ -394,7 +394,7 @@ issuing clients and keys is CipherWeave's side (its `docs/token-issuer.md`).
 | `CipherWeaveJwksUrl` | template parameter → `CIPHERWEAVE_JWKS_URL` | read by the deploy workflow from the `cipherweave-prod` stack output `IssuerJwksUrl`. Empty: CipherWeave tokens are refused |
 | `CipherWeaveIssuer` | template parameter → `CIPHERWEAVE_ISSUER` | `IssuerId` output, default `urn:cipherweave:prod` |
 | `AcceptLegacyToken` | template parameter → `ACCEPT_LEGACY_TOKEN` | default `true`: the static token below still works. Set by the repository variable `ACCEPT_LEGACY_TOKEN` |
-| `CIPHERWEAVE_READ_TOKEN` | repository secret | read-only access to the private CipherWeave repo, so the workflow can install `cipherweave_verify` (pinned in `requirements-cipherweave.txt`) |
+| `src/cipherweave_verify/` | vendored copy of the verifier, pinned by commit in `requirements-cipherweave.txt`, checksummed in `VENDORED.json`. Never edit it; upgrade with `scripts/sync_cipherweave_verify.sh` |
 
 Each request logs `mcp auth method=jwt` or `method=legacy`. When no
 `method=legacy` line has appeared for a full usage cycle, set the repository

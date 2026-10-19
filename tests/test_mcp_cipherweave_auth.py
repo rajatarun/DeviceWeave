@@ -113,8 +113,7 @@ def test_template_and_workflow_wire_the_verifier():
     for needle in ("CipherWeaveJwksUrl", "CIPHERWEAVE_JWKS_URL", "AcceptLegacyToken", "ACCEPT_LEGACY_TOKEN"):
         assert needle in template
     workflow = (REPO_ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
-    assert "requirements-cipherweave.txt" in workflow
-    assert "--target src/" in workflow
+    assert "CIPHERWEAVE_READ_TOKEN" not in workflow  # vendored: CI needs no CipherWeave credential
     assert "IssuerJwksUrl" in workflow
     pin = (REPO_ROOT / "requirements-cipherweave.txt").read_text(encoding="utf-8")
     # Pinned to a full commit, not a branch that can move under a deploy.

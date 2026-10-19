@@ -1,0 +1,11 @@
+{
+  "source": "cipherweave-verify @ git+https://github.com/rajatarun/CipherWeave.git@e734d9bfe339d66c4aa9b4648ae7e93ffabeda31#subdirectory=cipherweave_verify",
+  "sha256": {
+    "__init__.py": "2c959bc21364a409af7acee0f44a5fcc97e7e11495408a19ce76499103d4860a",
+    "bearer.py": "c95a60fd6aae9ed9ee7e761cc07d12314472cfa63dcc495af4cdb8461356b1fc",
+    "errors.py": "67a8ebecfbd6e7650d42d621dc30e9dc471d25686c0b41f7ff85de28361abb28",
+    "jwks.py": "3a965b9149e5ef8e1b19b08be26627f4132fceb7bf1012ab182a97622532d278",
+    "testing.py": "03f027d79cf3e50cbf282c4e035bc3b4cdd2b9b89a3ba81e839419008210f7d0",
+    "verify.py": "eb66f5a2c47540bf6a33e9615cf498c7007ca2693d1481318095dd732c0906ed"
+  }
+}

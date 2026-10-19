@@ -7,8 +7,6 @@
 # import it lazily even on code paths the tests take (e.g. aws_clients).
 
 pytest>=7.4
-# CipherWeave token verifier (git URL, pinned) — mcp_handler imports it.
--r requirements-cipherweave.txt
 boto3>=1.26.0
 hypothesis>=6.100
 moto>=5.0.0

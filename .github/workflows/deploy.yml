@@ -302,27 +302,6 @@ jobs:
           echo "CipherWeave JWKS: ${JWKS_URL:-(none)}  legacy token accepted: $ACCEPT_LEGACY_TOKEN"
 
       # ----------------------------------------------------------------
-      # 7c. cipherweave_verify into src/
-      #
-      #     Installed on the runner, not via requirements.txt: SAM builds
-      #     with --use-container, and pip inside that container has none of
-      #     the runner's git credentials for the private CipherWeave repo.
-      #     The package is pure Python; its one dependency (cryptography)
-      #     is in src/requirements.txt and is built for Lambda as usual.
-      # ----------------------------------------------------------------
-      - name: Install cipherweave_verify into the Lambda source
-        env:
-          CIPHERWEAVE_READ_TOKEN: ${{ secrets.CIPHERWEAVE_READ_TOKEN }}
-        run: |
-          if [ -z "$CIPHERWEAVE_READ_TOKEN" ]; then
-            echo "::error::Repository secret CIPHERWEAVE_READ_TOKEN is not set. It needs read-only Contents access to rajatarun/CipherWeave (see CipherWeave docs/token-issuer.md)."
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${CIPHERWEAVE_READ_TOKEN}@github.com/rajatarun/CipherWeave".insteadOf "https://github.com/rajatarun/CipherWeave"
-          pip install --no-deps --target src/ -r requirements-cipherweave.txt
-          python -c "import sys; sys.path.insert(0, 'src'); import cipherweave_verify; print('cipherweave_verify', cipherweave_verify.__version__)"
-
-      # ----------------------------------------------------------------
       # 8. Validate SAM template
       # ----------------------------------------------------------------
       - name: Validate SAM template
