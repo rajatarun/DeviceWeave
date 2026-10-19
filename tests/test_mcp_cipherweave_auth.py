@@ -120,3 +120,15 @@ def test_template_and_workflow_wire_the_verifier():
     # Pinned to a full commit, not a branch that can move under a deploy.
     assert "#subdirectory=cipherweave_verify" in pin
     assert any(len(part.split("#")[0]) == 40 for part in pin.split("@"))
+
+
+def test_wrong_audience_is_401_even_when_the_static_secret_is_unavailable(issuer, monkeypatch):
+    """A rejected JWT is final; it must not turn into the legacy path's 500."""
+
+    def _unavailable():
+        raise mcp_handler.McpAuthUnavailable("secret deleted")
+
+    monkeypatch.setattr(mcp_handler, "_load_expected_token", _unavailable)
+    assert _health(issuer.mint(audience="modelweave"))["statusCode"] == 401
+    # A non-JWT token still needs the static secret, and its absence is still a 500.
+    assert _health("opaque-static-looking-token")["statusCode"] == 500
