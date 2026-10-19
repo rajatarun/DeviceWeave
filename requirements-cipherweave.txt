@@ -1,0 +1,7 @@
+# Source of the vendored copy in src/cipherweave_verify/ (the CipherWeave
+# token verifier), pinned to a commit. Not installed by CI or the build:
+# CipherWeave is private, so the copy is committed instead, guarded by its
+# checksums in src/cipherweave_verify/VENDORED.json and
+# tests/test_cipherweave_vendored.py. To upgrade, bump the commit and run
+# scripts/sync_cipherweave_verify.sh (needs read access to CipherWeave).
+cipherweave-verify @ git+https://github.com/rajatarun/CipherWeave.git@a070edba84589caacc2202ac63c743c554611bab#subdirectory=cipherweave_verify

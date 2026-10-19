@@ -44,6 +44,12 @@ jobs:
       # Cross-stack source names (override via repo secrets if they differ per env)
       SHARED_STACK_NAME: ${{ secrets.SHARED_STACK_NAME || 'tarun-teamweave-shared' }}
       MEMGRAPH_STACK_NAME: ${{ secrets.MEMGRAPH_STACK_NAME || 'contextweave-rag-prod' }}
+      # CipherWeave token issuer. The JWKS URL is read from this stack.
+      CIPHERWEAVE_STACK_NAME: ${{ vars.CIPHERWEAVE_STACK_NAME || 'cipherweave-prod' }}
+      # Legacy static bearer token on /mcp during the move to CipherWeave
+      # tokens. A repository *variable*, not a dispatch input, so that once
+      # the owner sets it to false a later push cannot turn it back on.
+      ACCEPT_LEGACY_TOKEN: ${{ vars.ACCEPT_LEGACY_TOKEN || 'true' }}
 
     steps:
       # ----------------------------------------------------------------
@@ -245,6 +251,57 @@ jobs:
           echo "Resolved MemgraphInstanceId=$MEMGRAPH_INSTANCE_ID"
 
       # ----------------------------------------------------------------
+      # 7b. CipherWeave token issuer — JWKS URL and issuer id
+      #
+      #     Missing stack or output is not fatal: the MCP endpoint then
+      #     refuses CipherWeave tokens and accepts only the legacy token,
+      #     exactly as before. Said loudly, because it is a degraded state.
+      #     The CLI prints "None" for an absent output, which is not empty.
+      # ----------------------------------------------------------------
+      - name: Resolve CipherWeave token issuer
+        id: cipherweave
+        run: |
+          OUTPUTS=$(aws cloudformation describe-stacks \
+            --stack-name "$CIPHERWEAVE_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs" \
+            --output json 2>/dev/null || echo "[]")
+          get() { echo "$OUTPUTS" | jq -r --arg k "$1" '.[]? | select(.OutputKey==$k) | .OutputValue'; }
+          JWKS_URL=$(get IssuerJwksUrl)
+          ISSUER_ID=$(get IssuerId)
+          [ "$JWKS_URL" = "None" ] && JWKS_URL=""
+          [ "$ISSUER_ID" = "None" ] && ISSUER_ID=""
+          if [ -z "$JWKS_URL" ]; then
+            echo "::warning title=CipherWeave tokens disabled::No IssuerJwksUrl output on $CIPHERWEAVE_STACK_NAME. /mcp accepts only the legacy static token."
+          fi
+          if [ -z "$JWKS_URL" ] && [ "$ACCEPT_LEGACY_TOKEN" != "true" ]; then
+            echo "::error::ACCEPT_LEGACY_TOKEN is $ACCEPT_LEGACY_TOKEN and there is no CipherWeave JWKS URL: /mcp would accept no token at all."
+            exit 1
+          fi
+          # Take the JWKS now, on the runner, so /mcp needs no network call to
+          # verify (the function's VPC reaches the internet only through the
+          # NAT instance). Public keys only. A failed download is a warning:
+          # the URL is still passed, and the function fetches at runtime.
+          JWKS_B64=""
+          if [ -n "$JWKS_URL" ]; then
+            if JWKS_BODY=$(curl -sS --fail --max-time 15 "$JWKS_URL"); then
+              JWKS_MIN=$(printf '%s' "$JWKS_BODY" | jq -c '{keys: [.keys[]? | select(.kty == "EC" and .crv == "P-256" and (has("d") | not)) | {kid, kty, crv, x, y, use, alg}]}')
+              if [ "$(printf '%s' "$JWKS_MIN" | jq '.keys | length')" -gt 0 ]; then
+                JWKS_B64=$(printf '%s' "$JWKS_MIN" | base64 -w0)
+                echo "Deploy-time JWKS: $(printf '%s' "$JWKS_MIN" | jq -r '[.keys[].kid] | join(", ")')"
+              else
+                echo "::warning::$JWKS_URL has no ES256 key; /mcp will fetch the JWKS at runtime."
+              fi
+            else
+              echo "::warning::Could not download $JWKS_URL; /mcp will fetch the JWKS at runtime."
+            fi
+          fi
+          echo "jwks_b64=$JWKS_B64" >> "$GITHUB_OUTPUT"
+          echo "jwks_url=$JWKS_URL"                              >> "$GITHUB_OUTPUT"
+          echo "issuer_id=${ISSUER_ID:-urn:cipherweave:prod}"    >> "$GITHUB_OUTPUT"
+          echo "CipherWeave JWKS: ${JWKS_URL:-(none)}  legacy token accepted: $ACCEPT_LEGACY_TOKEN"
+
+      # ----------------------------------------------------------------
       # 8. Validate SAM template
       # ----------------------------------------------------------------
       - name: Validate SAM template
@@ -280,6 +337,19 @@ jobs:
       # ----------------------------------------------------------------
       - name: SAM deploy
         run: |
+          # An empty value needs the ParameterKey= form (see note above).
+          JWKS_URL="${{ steps.cipherweave.outputs.jwks_url }}"
+          JWKS_B64="${{ steps.cipherweave.outputs.jwks_b64 }}"
+          if [ -n "$JWKS_B64" ]; then
+            JWKS_JSON_ARG="CipherWeaveJwks=$JWKS_B64"
+          else
+            JWKS_JSON_ARG='ParameterKey=CipherWeaveJwks,ParameterValue=""'
+          fi
+          if [ -n "$JWKS_URL" ]; then
+            JWKS_ARG="CipherWeaveJwksUrl=$JWKS_URL"
+          else
+            JWKS_ARG='ParameterKey=CipherWeaveJwksUrl,ParameterValue=""'
+          fi
           sam deploy \
             --stack-name "$STACK_NAME" \
             --capabilities CAPABILITY_IAM \
@@ -302,7 +372,11 @@ jobs:
               EeroSessionSecretName=deviceweave/eero-session \
               'EeroPollSchedule="rate(5 minutes)"' \
               EeroAwayMissThreshold=3 \
-              EeroDeviceHmacSecretName=deviceweave/eero-device-hmac
+              EeroDeviceHmacSecretName=deviceweave/eero-device-hmac \
+              "$JWKS_ARG" \
+              "$JWKS_JSON_ARG" \
+              "CipherWeaveIssuer=${{ steps.cipherweave.outputs.issuer_id }}" \
+              "AcceptLegacyToken=${ACCEPT_LEGACY_TOKEN:-true}"
 
       # ----------------------------------------------------------------
       # 11. Open Memgraph Bolt ingress from the new Lambda SG

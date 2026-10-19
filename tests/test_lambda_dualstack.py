@@ -137,11 +137,18 @@ def parse_cfn_parameter_overrides(values):
     return result
 
 
-def _sam_deploy_argv(tmp_path) -> list[str]:
-    """Shell-split the workflow's sam deploy line the way Actions will."""
+def _sam_deploy_argv(tmp_path, expressions: dict[str, str] | None = None) -> list[str]:
+    """Shell-split the workflow's sam deploy line the way Actions will.
+
+    ``expressions`` maps a ``${{ ... }}`` body to the value Actions would put
+    there; any other expression becomes ``gha-value``.
+    """
     wf = yaml.safe_load(WORKFLOW.read_text())
     step = next(s for s in wf["jobs"]["deploy"]["steps"] if s.get("name") == "SAM deploy")
-    script = re.sub(r"\$\{\{.*?\}\}", "gha-value", step["run"])
+    script = step["run"]
+    for expression, value in (expressions or {}).items():
+        script = script.replace("${{ " + expression + " }}", value)
+    script = re.sub(r"\$\{\{.*?\}\}", "gha-value", script)
     fake = tmp_path / "bin"
     fake.mkdir()
     out = tmp_path / "argv"
@@ -188,6 +195,9 @@ def _assert_deploy_overrides(parsed: dict, overrides: list[str]) -> None:
     assert parsed["LambdaSubnetIds"] == "gha-value"
     assert parsed["EeroSessionSecretName"] == "deviceweave/eero-session"
     assert parsed["EeroAwayMissThreshold"] == "3"
+    assert parsed["CipherWeaveJwksUrl"] == "gha-value"
+    assert parsed["CipherWeaveIssuer"] == "gha-value"
+    assert parsed["AcceptLegacyToken"] == "true"
     spaced = {key: value for key, value in parsed.items() if any(ch.isspace() for ch in value)}
     assert spaced == {"EeroPollSchedule": "rate(5 minutes)"}
     for token in overrides:
@@ -208,6 +218,21 @@ def test_eero_poll_schedule_override_parses_to_the_full_value(tmp_path):
     # SAM's space delimiter keeps only rate(5.
     broken = parse_cfn_parameter_overrides(["EeroPollSchedule=rate(5 minutes)"])
     assert broken["EeroPollSchedule"] == "rate(5"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_missing_cipherweave_jwks_url_is_passed_as_an_explicit_empty_value(tmp_path):
+    """No CipherWeave stack: SAM rejects a bare Key=, so the ParameterKey form is used."""
+    argv = _sam_deploy_argv(
+        tmp_path,
+        {"steps.cipherweave.outputs.jwks_url": "", "steps.cipherweave.outputs.jwks_b64": ""},
+    )
+    overrides = argv[argv.index("--parameter-overrides") + 1:]
+    assert 'ParameterKey=CipherWeaveJwksUrl,ParameterValue=""' in overrides
+    assert 'ParameterKey=CipherWeaveJwks,ParameterValue=""' in overrides
+    assert "CipherWeaveJwksUrl=" not in overrides
+    parsed = parse_cfn_parameter_overrides(overrides)
+    assert parsed["CipherWeaveJwksUrl"] == "" and parsed["CipherWeaveJwks"] == ""
 
 
 def test_vendored_parser_matches_sam_cli():

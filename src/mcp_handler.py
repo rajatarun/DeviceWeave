@@ -12,12 +12,19 @@ GET /mcp
     Streamable HTTP allows a server-sent event stream here. This server
     does not open one and returns HTTP 405, which the transport permits.
 
-Every /mcp request must send ``Authorization: Bearer <token>``. The token
-is the SecretString of the Secrets Manager secret named by
-``MCP_AUTH_TOKEN_SECRET_NAME`` (template parameter ``McpAuthTokenSecretName``).
-A missing or wrong token is HTTP 401 with a JSON-RPC error body. The
-comparison hashes both sides and then uses ``hmac.compare_digest``, so it
-does not short-circuit on the secret.
+Every /mcp request must send ``Authorization: Bearer <token>``, where the
+token is one of:
+
+* a CipherWeave access token (ES256 JWT) with ``aud`` = ``deviceweave``,
+  verified locally against CipherWeave's JWKS (``CIPHERWEAVE_JWKS_URL``,
+  cached 10 minutes); or
+* while ``ACCEPT_LEGACY_TOKEN`` is true (the default, for the migration), the
+  old static token: the SecretString of the Secrets Manager secret named by
+  ``MCP_AUTH_TOKEN_SECRET_NAME`` (template parameter ``McpAuthTokenSecretName``),
+  compared on fixed-length digests with ``hmac.compare_digest``.
+
+``cipherweave_verify.BearerAuth`` makes that decision, the same code the other
+Weaves run. A missing or wrong token is HTTP 401 with a JSON-RPC error body.
 
 Tools call the same in-process service functions as the REST handlers.
 They do not make HTTP requests back to the API.
@@ -35,6 +42,8 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from cipherweave_verify import BearerAuth
+
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(LOG_LEVEL)
 for _noisy in ("botocore", "boto3", "urllib3", "s3transfer", "neo4j"):
@@ -48,6 +57,8 @@ PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_HEADER_VERSIONS = frozenset({PROTOCOL_VERSION, "2025-03-26"})
 SERVER_VERSION = "1.0.0"
 UNAUTHORIZED_CODE = -32001
+# The aud a CipherWeave token must carry to be accepted here.
+TOKEN_AUDIENCE = "deviceweave"
 _TOKEN_CACHE_TTL_SECONDS = 300
 _TOKEN_CACHE: Dict[str, Any] = {}
 
@@ -145,6 +156,11 @@ def _load_expected_token() -> str:
     _TOKEN_CACHE["value"] = token
     _TOKEN_CACHE["until"] = now + _TOKEN_CACHE_TTL_SECONDS
     return token
+
+
+# The legacy loader is looked up at call time, so a request with a good JWT
+# never reads Secrets Manager, and tests can replace _load_expected_token.
+_AUTH = BearerAuth(TOKEN_AUDIENCE, legacy_token=lambda: _load_expected_token())
 
 
 def _bearer_token(headers: Dict[str, str]) -> str:
@@ -1186,15 +1202,17 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     ).upper()
     headers = _normalize_headers(event.get("headers"))
 
+    provided = _bearer_token(headers)
     try:
-        expected = _load_expected_token()
+        decision = _AUTH.check(provided)
     except McpAuthUnavailable:
+        # Only reached on the legacy path: the token was not an acceptable
+        # JWT and the static secret could not be read.
         logger.exception("MCP authentication is unavailable")
         req_id = _peek_id(event) if method == "POST" else None
         return _rpc_error(500, -32603, "MCP authentication is unavailable", req_id)
 
-    provided = _bearer_token(headers)
-    if not tokens_equal(provided, expected):
+    if not decision.ok:
         logger.warning("MCP unauthorized")
         req_id = _peek_id(event) if method == "POST" else None
         return _unauthorized(req_id)
