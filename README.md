@@ -371,7 +371,37 @@ Each tool calls the same in-process service function as the matching HTTP route.
 
 A tool result is the service's JSON body. `isError` is true when that service returns an HTTP status of 400 or higher.
 
-### Create the token
+### CipherWeave access tokens
+
+`/mcp` accepts a short-lived token from the CipherWeave token issuer: an ES256
+JWT whose `aud` is `deviceweave`, checked in-process against CipherWeave's
+public keys (JWKS, cached 10 minutes). Get one with the caller's CipherWeave
+client credential, then send it as the bearer token:
+
+```bash
+TOKEN=$(curl -s -u "$CLIENT_ID:$CLIENT_SECRET" -H 'content-type: application/json' \
+  -d '{"audience":"deviceweave"}' "$CIPHERWEAVE_API/token" | jq -r .access_token)
+curl -s -H "Authorization: Bearer $TOKEN" ... /mcp
+```
+
+A token for another Weave, an expired one (15 minutes, 60 s skew), or one not
+signed by CipherWeave is HTTP **401**, the same body as a wrong static token.
+The check is `cipherweave_verify.BearerAuth`, the package all four Weaves run;
+issuing clients and keys is CipherWeave's side (its `docs/token-issuer.md`).
+
+| Setting | Where | |
+|---|---|---|
+| `CipherWeaveJwksUrl` | template parameter → `CIPHERWEAVE_JWKS_URL` | read by the deploy workflow from the `cipherweave-prod` stack output `IssuerJwksUrl`. Empty: CipherWeave tokens are refused |
+| `CipherWeaveIssuer` | template parameter → `CIPHERWEAVE_ISSUER` | `IssuerId` output, default `urn:cipherweave:prod` |
+| `AcceptLegacyToken` | template parameter → `ACCEPT_LEGACY_TOKEN` | default `true`: the static token below still works. Set by the repository variable `ACCEPT_LEGACY_TOKEN` |
+| `CIPHERWEAVE_READ_TOKEN` | repository secret | read-only access to the private CipherWeave repo, so the workflow can install `cipherweave_verify` (pinned in `requirements-cipherweave.txt`) |
+
+Each request logs `mcp auth method=jwt` or `method=legacy`. When no
+`method=legacy` line has appeared for a full usage cycle, set the repository
+variable `ACCEPT_LEGACY_TOKEN` to `false` and redeploy; the static secret is
+then never read and can be deleted.
+
+### Create the (legacy) static token
 
 The token is a Secrets Manager secret. It is not in this repository and it is not a CloudFormation parameter value. The parameter `McpAuthTokenSecretName` is only the **name** (default `deviceweave/mcp-auth-token`).
 
@@ -404,7 +434,7 @@ aws secretsmanager get-secret-value \
   --output text
 ```
 
-Every `/mcp` request must send `Authorization: Bearer <token>`. A missing or wrong token is HTTP **401** with a JSON-RPC error body (`code` `-32001`, message `Unauthorized`). The server hashes both strings and compares the digests with a constant-time compare. If the secret cannot be read, the response is HTTP **500** and the endpoint stays closed.
+Every `/mcp` request must send `Authorization: Bearer <token>`. A missing or wrong token is HTTP **401** with a JSON-RPC error body (`code` `-32001`, message `Unauthorized`). The server hashes both strings and compares the digests with a constant-time compare. If the static secret is needed (the token is not a valid CipherWeave token and `ACCEPT_LEGACY_TOKEN` is true) but cannot be read, the response is HTTP **500** and the endpoint stays closed.
 
 ### Deploy
 

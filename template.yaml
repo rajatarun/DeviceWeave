@@ -304,6 +304,33 @@ Parameters:
       this template or in a deploy parameter.
 
   # -----------------------------------------------------------------------
+  # MCP — CipherWeave access tokens (ES256 JWT, aud=deviceweave). The deploy
+  # workflow reads the JWKS URL from the CipherWeave stack. Empty means
+  # CipherWeave tokens are refused and only the legacy token above works.
+  # -----------------------------------------------------------------------
+  CipherWeaveJwksUrl:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^https://[^\\s]+$"
+    Description: >
+      IssuerJwksUrl output of the CipherWeave stack. Public keys only; it is
+      not a secret.
+
+  CipherWeaveIssuer:
+    Type: String
+    Default: "urn:cipherweave:prod"
+    Description: The iss a CipherWeave token must carry (IssuerId output).
+
+  AcceptLegacyToken:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Also accept the static bearer token from McpAuthTokenSecretName during
+      the move to CipherWeave tokens. Set false once every caller uses
+      CipherWeave; the static secret is then never read and can be deleted.
+
+  # -----------------------------------------------------------------------
   # Eero presence — unofficial cloud API, polled by a Lambda outside the VPC.
   # The secret name must not be blank: an empty override is rejected by
   # AllowedPattern and MinLength, which is the failure mode that broke
@@ -1046,6 +1073,9 @@ Resources:
         Variables:
           # Merged with Globals, which supply table names and provider secret ARNs.
           MCP_AUTH_TOKEN_SECRET_NAME: !Ref McpAuthTokenSecretName
+          CIPHERWEAVE_JWKS_URL: !Ref CipherWeaveJwksUrl
+          CIPHERWEAVE_ISSUER: !Ref CipherWeaveIssuer
+          ACCEPT_LEGACY_TOKEN: !Ref AcceptLegacyToken
           EERO_CALIBRATION_FUNCTION_NAME: !Sub "deviceweave-eero-calibration-${StageName}"
       VpcConfig:
         SecurityGroupIds:

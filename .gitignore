@@ -8,6 +8,10 @@ __pycache__/
 # SAM build artifacts
 .aws-sam/
 
+# Installed into src/ by the deploy workflow from requirements-cipherweave.txt
+src/cipherweave_verify/
+src/cipherweave_verify-*.dist-info/
+
 # Local env
 .env
 .env.*
