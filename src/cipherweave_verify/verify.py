@@ -56,6 +56,8 @@ DEFAULT_LEEWAY_SECONDS = 60
 # not minted by it under its current policy, whatever the signature says.
 DEFAULT_MAX_LIFETIME_SECONDS = 3600
 MAX_TOKEN_LENGTH = 8192
+# Order of the P-256 group: valid ECDSA r and s are in [1, n-1].
+_P256_ORDER = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 
 ENV_JWKS_URL = "CIPHERWEAVE_JWKS_URL"
 ENV_JWKS = "CIPHERWEAVE_JWKS"
@@ -222,13 +224,16 @@ class Verifier:
         if key is None:
             raise UnknownKeyError("kid not in JWKS")
 
-        der = encode_dss_signature(
-            int.from_bytes(signature[:32], "big"), int.from_bytes(signature[32:], "big")
-        )
+        r = int.from_bytes(signature[:32], "big")
+        s = int.from_bytes(signature[32:], "big")
+        if not (0 < r < _P256_ORDER and 0 < s < _P256_ORDER):
+            # Out of range can never verify, and encode_dss_signature raises
+            # ValueError on zero -- which would surface as a 500, not a 401.
+            raise InvalidSignatureError("signature out of range")
         signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
         try:
-            key.verify(der, signing_input, ec.ECDSA(hashes.SHA256()))
-        except InvalidSignature as exc:
+            key.verify(encode_dss_signature(r, s), signing_input, ec.ECDSA(hashes.SHA256()))
+        except (InvalidSignature, ValueError) as exc:
             raise InvalidSignatureError("signature does not verify") from exc
 
         claims = _decode_json_segment(payload_b64, "payload")

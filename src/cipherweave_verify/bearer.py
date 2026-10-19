@@ -127,6 +127,9 @@ class BearerAuth:
                 if is_jws(presented):
                     return AuthDecision(False, None, reason=exc.reason)
                 reason = exc.reason
+            except Exception as exc:  # a verifier bug must be a 401, not a 500
+                logger.error("cipherweave token check raised type=%s", type(exc).__name__)
+                return AuthDecision(False, None, reason="verifier_error")
 
         if not legacy_accepted():
             return AuthDecision(
