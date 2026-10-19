@@ -4,4 +4,4 @@
 #     `sam build` (pip inside the build container has no git credentials).
 # CipherWeave is private: pip needs a token with read access (CI uses the
 # CIPHERWEAVE_READ_TOKEN repository secret). Bump the commit to upgrade.
-cipherweave-verify @ git+https://github.com/rajatarun/CipherWeave.git@63f306dc7f5900f9df0aba7e7ce04a9c910a6fc0#subdirectory=cipherweave_verify
+cipherweave-verify @ git+https://github.com/rajatarun/CipherWeave.git@03820d19a1b86117e525595c5b60da5701cc5f6f#subdirectory=cipherweave_verify
