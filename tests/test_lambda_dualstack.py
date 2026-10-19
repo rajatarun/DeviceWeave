@@ -223,11 +223,16 @@ def test_eero_poll_schedule_override_parses_to_the_full_value(tmp_path):
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 def test_missing_cipherweave_jwks_url_is_passed_as_an_explicit_empty_value(tmp_path):
     """No CipherWeave stack: SAM rejects a bare Key=, so the ParameterKey form is used."""
-    argv = _sam_deploy_argv(tmp_path, {"steps.cipherweave.outputs.jwks_url": ""})
+    argv = _sam_deploy_argv(
+        tmp_path,
+        {"steps.cipherweave.outputs.jwks_url": "", "steps.cipherweave.outputs.jwks_b64": ""},
+    )
     overrides = argv[argv.index("--parameter-overrides") + 1:]
     assert 'ParameterKey=CipherWeaveJwksUrl,ParameterValue=""' in overrides
+    assert 'ParameterKey=CipherWeaveJwks,ParameterValue=""' in overrides
     assert "CipherWeaveJwksUrl=" not in overrides
-    assert parse_cfn_parameter_overrides(overrides)["CipherWeaveJwksUrl"] == ""
+    parsed = parse_cfn_parameter_overrides(overrides)
+    assert parsed["CipherWeaveJwksUrl"] == "" and parsed["CipherWeaveJwks"] == ""
 
 
 def test_vendored_parser_matches_sam_cli():

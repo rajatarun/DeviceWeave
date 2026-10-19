@@ -316,6 +316,17 @@ Parameters:
       IssuerJwksUrl output of the CipherWeave stack. Public keys only; it is
       not a secret.
 
+  CipherWeaveJwks:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    AllowedPattern: "^[A-Za-z0-9+/=]*$"
+    Description: >
+      The CipherWeave JWKS itself (base64 of the JSON), downloaded by the deploy
+      workflow on the runner. /mcp verifies against it with no network call;
+      CipherWeaveJwksUrl is then only the fallback for a key id it lacks.
+      Public keys only; not a secret.
+
   CipherWeaveIssuer:
     Type: String
     Default: "urn:cipherweave:prod"
@@ -1074,6 +1085,7 @@ Resources:
           # Merged with Globals, which supply table names and provider secret ARNs.
           MCP_AUTH_TOKEN_SECRET_NAME: !Ref McpAuthTokenSecretName
           CIPHERWEAVE_JWKS_URL: !Ref CipherWeaveJwksUrl
+          CIPHERWEAVE_JWKS: !Ref CipherWeaveJwks
           CIPHERWEAVE_ISSUER: !Ref CipherWeaveIssuer
           ACCEPT_LEGACY_TOKEN: !Ref AcceptLegacyToken
           EERO_CALIBRATION_FUNCTION_NAME: !Sub "deviceweave-eero-calibration-${StageName}"

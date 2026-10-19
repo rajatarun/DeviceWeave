@@ -132,3 +132,29 @@ def test_wrong_audience_is_401_even_when_the_static_secret_is_unavailable(issuer
     assert _health(issuer.mint(audience="modelweave"))["statusCode"] == 401
     # A non-JWT token still needs the static secret, and its absence is still a 500.
     assert _health("opaque-static-looking-token")["statusCode"] == 500
+
+
+def _b64_jwks(issuer):
+    import base64
+
+    return base64.b64encode(json.dumps(issuer.jwks()).encode()).decode()
+
+
+def _offline(_url):
+    raise AssertionError("with a deploy-time JWKS the verifier must not fetch")
+
+
+def test_deploy_time_jwks_alone_verifies_with_no_network(issuer, monkeypatch):
+    monkeypatch.delenv("CIPHERWEAVE_JWKS_URL")
+    monkeypatch.setenv("CIPHERWEAVE_JWKS", _b64_jwks(issuer))
+    monkeypatch.setattr(cw_jwks, "http_fetcher", _offline)
+    reset_default_verifier()
+    assert _is_healthy(_health(issuer.mint(audience="deviceweave")))
+    assert _health(issuer.mint(audience="modelweave"))["statusCode"] == 401
+
+
+def test_template_carries_the_deploy_time_jwks():
+    template = (REPO_ROOT / "template.yaml").read_text(encoding="utf-8")
+    assert "CIPHERWEAVE_JWKS: !Ref CipherWeaveJwks" in template
+    workflow = (REPO_ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    assert "jwks_b64=" in workflow and "CipherWeaveJwks=" in workflow

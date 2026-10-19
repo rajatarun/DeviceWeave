@@ -278,6 +278,25 @@ jobs:
             echo "::error::ACCEPT_LEGACY_TOKEN is $ACCEPT_LEGACY_TOKEN and there is no CipherWeave JWKS URL: /mcp would accept no token at all."
             exit 1
           fi
+          # Take the JWKS now, on the runner, so /mcp needs no network call to
+          # verify (the function's VPC reaches the internet only through the
+          # NAT instance). Public keys only. A failed download is a warning:
+          # the URL is still passed, and the function fetches at runtime.
+          JWKS_B64=""
+          if [ -n "$JWKS_URL" ]; then
+            if JWKS_BODY=$(curl -sS --fail --max-time 15 "$JWKS_URL"); then
+              JWKS_MIN=$(printf '%s' "$JWKS_BODY" | jq -c '{keys: [.keys[]? | select(.kty == "EC" and .crv == "P-256" and (has("d") | not)) | {kid, kty, crv, x, y, use, alg}]}')
+              if [ "$(printf '%s' "$JWKS_MIN" | jq '.keys | length')" -gt 0 ]; then
+                JWKS_B64=$(printf '%s' "$JWKS_MIN" | base64 -w0)
+                echo "Deploy-time JWKS: $(printf '%s' "$JWKS_MIN" | jq -r '[.keys[].kid] | join(", ")')"
+              else
+                echo "::warning::$JWKS_URL has no ES256 key; /mcp will fetch the JWKS at runtime."
+              fi
+            else
+              echo "::warning::Could not download $JWKS_URL; /mcp will fetch the JWKS at runtime."
+            fi
+          fi
+          echo "jwks_b64=$JWKS_B64" >> "$GITHUB_OUTPUT"
           echo "jwks_url=$JWKS_URL"                              >> "$GITHUB_OUTPUT"
           echo "issuer_id=${ISSUER_ID:-urn:cipherweave:prod}"    >> "$GITHUB_OUTPUT"
           echo "CipherWeave JWKS: ${JWKS_URL:-(none)}  legacy token accepted: $ACCEPT_LEGACY_TOKEN"
@@ -341,6 +360,12 @@ jobs:
         run: |
           # An empty value needs the ParameterKey= form (see note above).
           JWKS_URL="${{ steps.cipherweave.outputs.jwks_url }}"
+          JWKS_B64="${{ steps.cipherweave.outputs.jwks_b64 }}"
+          if [ -n "$JWKS_B64" ]; then
+            JWKS_JSON_ARG="CipherWeaveJwks=$JWKS_B64"
+          else
+            JWKS_JSON_ARG='ParameterKey=CipherWeaveJwks,ParameterValue=""'
+          fi
           if [ -n "$JWKS_URL" ]; then
             JWKS_ARG="CipherWeaveJwksUrl=$JWKS_URL"
           else
@@ -370,6 +395,7 @@ jobs:
               EeroAwayMissThreshold=3 \
               EeroDeviceHmacSecretName=deviceweave/eero-device-hmac \
               "$JWKS_ARG" \
+              "$JWKS_JSON_ARG" \
               "CipherWeaveIssuer=${{ steps.cipherweave.outputs.issuer_id }}" \
               "AcceptLegacyToken=${ACCEPT_LEGACY_TOKEN:-true}"
 
