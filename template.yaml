@@ -540,8 +540,18 @@ Resources:
                 - bedrock:InvokeModel
                 - bedrock:Converse
               Resource:
+                # Every candidate of ModelWeave's "reasoning" role, so the
+                # model the pin names can be called (modelweave_roles).
                 - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/meta.llama3-3-70b-instruct-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.meta.llama3-3-70b-instruct-v1:0"
+            # ModelWeave role pins: which model to call. Read only.
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/modelweave/roles/*"
         - Statement:
             - Effect: Allow
               Action:
@@ -726,8 +736,18 @@ Resources:
             - Effect: Allow
               Action: bedrock:InvokeModel
               Resource:
+                # Every candidate of ModelWeave's "reasoning" role, so the
+                # model the pin names can be called (modelweave_roles).
                 - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/meta.llama3-3-70b-instruct-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.meta.llama3-3-70b-instruct-v1:0"
+            # ModelWeave role pins: which model to call. Read only.
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/modelweave/roles/*"
         - Statement:
             - Effect: Allow
               Action:
@@ -1042,8 +1062,18 @@ Resources:
             - Effect: Allow
               Action: bedrock:InvokeModel
               Resource:
+                # Every candidate of ModelWeave's "reasoning" role, so the
+                # model the pin names can be called (modelweave_roles).
                 - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/meta.llama3-3-70b-instruct-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.meta.llama3-3-70b-instruct-v1:0"
+            # ModelWeave role pins: which model to call. Read only.
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/modelweave/roles/*"
         - Statement:
             - Effect: Allow
               Action:
@@ -1190,8 +1220,18 @@ Resources:
                 - bedrock:InvokeModel
                 - bedrock:Converse
               Resource:
+                # Every candidate of ModelWeave's "reasoning" role, so the
+                # model the pin names can be called (modelweave_roles).
                 - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/meta.llama3-3-70b-instruct-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.meta.llama3-3-70b-instruct-v1:0"
+            # ModelWeave role pins: which model to call. Read only.
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/modelweave/roles/*"
         - Statement:
             - Effect: Allow
               Action:
@@ -1347,8 +1387,18 @@ Resources:
                 - bedrock:InvokeModel
                 - bedrock:Converse
               Resource:
+                # Every candidate of ModelWeave's "reasoning" role, so the
+                # model the pin names can be called (modelweave_roles).
                 - "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0"
+                - "arn:aws:bedrock:*::foundation-model/meta.llama3-3-70b-instruct-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.meta.llama3-3-70b-instruct-v1:0"
+            # ModelWeave role pins: which model to call. Read only.
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/modelweave/roles/*"
         - Statement:
             - Effect: Allow
               Action: sms-voice:SendTextMessage
