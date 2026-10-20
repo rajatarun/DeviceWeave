@@ -23,6 +23,10 @@ Secrets Manager, and with the flag off the old secret is never read at all,
 so it can be deleted without breaking the Weave. Whatever the loader raises
 propagates, so each Weave keeps its own "secret unavailable" behaviour.
 
+An accepted decision carries a ``Principal`` for per-tool authorization
+(``cipherweave_verify.authz.ToolAuthorizer``): scopes, ``iat`` and ``jti`` for a
+JWT; ``LEGACY_TOKEN_SCOPES`` and no freshness for the legacy token.
+
 Every decision is logged as ``mcp auth method=jwt|legacy`` or
 ``mcp auth rejected reason=...``: the owner flips the flag once no
 ``method=legacy`` line appears.
@@ -38,6 +42,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from cipherweave_verify.authz import Principal, legacy_scopes
 from cipherweave_verify.errors import TokenVerificationError
 from cipherweave_verify.jwks import b64url_decode
 from cipherweave_verify.verify import (
@@ -89,6 +94,8 @@ class AuthDecision:
     method: str | None  # "jwt" | "legacy" | None
     subject: str | None = None
     reason: str | None = None
+    # Set when ok: what ToolAuthorizer needs (scopes, iat, jti).
+    principal: Principal | None = None
 
 
 class BearerAuth:
@@ -108,7 +115,13 @@ class BearerAuth:
     def check(self, presented: str | None) -> AuthDecision:
         decision = self._decide(presented)
         if decision.ok:
-            logger.info("mcp auth method=%s sub=%s", decision.method, decision.subject or "-")
+            jti = decision.principal.jti if decision.principal else None
+            logger.info(
+                "mcp auth method=%s sub=%s jti=%s",
+                decision.method,
+                decision.subject or "-",
+                jti or "-",
+            )
         else:
             logger.warning("mcp auth rejected reason=%s", decision.reason)
         return decision
@@ -122,7 +135,15 @@ class BearerAuth:
             try:
                 verifier = self._verifier or default_verifier()
                 token = verifier.verify(presented, self.audience)
-                return AuthDecision(True, "jwt", subject=token.subject)
+                principal = Principal(
+                    method="jwt",
+                    subject=token.subject,
+                    scopes=token.scopes,
+                    issued_at=token.issued_at,
+                    expires_at=token.expires_at,
+                    jti=token.jti,
+                )
+                return AuthDecision(True, "jwt", subject=token.subject, principal=principal)
             except TokenVerificationError as exc:
                 if is_jws(presented):
                     return AuthDecision(False, None, reason=exc.reason)
@@ -139,7 +160,9 @@ class BearerAuth:
             return AuthDecision(False, None, reason=reason)
         expected = self._legacy_token()
         if isinstance(expected, str) and expected and tokens_equal(presented, expected):
-            return AuthDecision(True, "legacy")
+            return AuthDecision(
+                True, "legacy", principal=Principal("legacy", None, legacy_scopes())
+            )
         if not expected:
             # Still compare so the failure path takes the same time.
             tokens_equal(presented, "\x00")

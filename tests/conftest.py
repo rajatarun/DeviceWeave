@@ -229,3 +229,42 @@ def fake_mcp_observatory(monkeypatch):
     fake_module.instrument_wrapper_api = lambda service_name, **kwargs: sentinel
     monkeypatch.setitem(sys.modules, "mcp_observatory", fake_module)
     return sentinel
+
+
+# ---------------------------------------------------------------------------
+# CipherWeave tokens for /mcp
+# ---------------------------------------------------------------------------
+
+ALL_SCOPES = ("read", "execute", "destructive")
+
+
+@pytest.fixture
+def cw_issuer(monkeypatch):
+    """A local CipherWeave issuer the MCP handler trusts, and an in-memory jti ledger."""
+    from cipherweave_verify import MemoryJtiLedger, reset_default_verifier
+    from cipherweave_verify import jwks as cw_jwks
+    from cipherweave_verify.testing import LocalIssuer
+
+    import mcp_handler
+
+    issuer = LocalIssuer()
+    issuer.ledger = MemoryJtiLedger()
+    monkeypatch.setenv("CIPHERWEAVE_JWKS_URL", "https://cipherweave.test/prod/.well-known/jwks.json")
+    monkeypatch.setenv("CIPHERWEAVE_ISSUER", "urn:cipherweave:prod")
+    monkeypatch.delenv("CIPHERWEAVE_SCOPE_MODE", raising=False)
+    monkeypatch.delenv("LEGACY_TOKEN_SCOPES", raising=False)
+    monkeypatch.setattr(cw_jwks, "http_fetcher", issuer.fetcher)
+    monkeypatch.setattr(mcp_handler, "_jti_ledger", lambda: issuer.ledger)
+    reset_default_verifier()
+    yield issuer
+    reset_default_verifier()
+
+
+@pytest.fixture
+def fresh_token(cw_issuer):
+    """mint(scopes=ALL_SCOPES) -> a deviceweave token minted now, with a new jti."""
+
+    def mint(scopes=ALL_SCOPES, **kwargs):
+        return cw_issuer.mint(audience="deviceweave", scopes=tuple(scopes), **kwargs)
+
+    return mint

@@ -223,7 +223,7 @@ def test_poller_applies_the_night_rule_and_writes_one_checkin_per_hour(monkeypat
         assert len(checkins.scan()["Items"]) == 2
 
 
-def test_mcp_schedule_tools_invoke_the_calibration_function(monkeypatch):
+def test_mcp_schedule_tools_invoke_the_calibration_function(monkeypatch, fresh_token):
     monkeypatch.setattr(mcp_handler, "_load_expected_token", lambda: TOKEN)
     seen = []
 
@@ -241,7 +241,7 @@ def test_mcp_schedule_tools_invoke_the_calibration_function(monkeypatch):
     ):
         response = mcp_handler.handler({
             "requestContext": {"http": {"method": "POST", "path": "/mcp"}},
-            "headers": {"authorization": f"Bearer {TOKEN}"},
+            "headers": {"authorization": f"Bearer {fresh_token()}"},
             "body": json.dumps({
                 "jsonrpc": "2.0",
                 "id": 1,

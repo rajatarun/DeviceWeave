@@ -50,6 +50,10 @@ jobs:
       # tokens. A repository *variable*, not a dispatch input, so that once
       # the owner sets it to false a later push cannot turn it back on.
       ACCEPT_LEGACY_TOKEN: ${{ vars.ACCEPT_LEGACY_TOKEN || 'true' }}
+      # Per-tool scopes on /mcp. 'audit' only while existing clients are being
+      # granted scopes (issuer_admin.py set-scopes); anything else enforces.
+      # Step-up for destructive tools and unlock/open is on in both modes.
+      TOOL_SCOPE_MODE: ${{ vars.TOOL_SCOPE_MODE || 'enforce' }}
 
     steps:
       # ----------------------------------------------------------------
@@ -376,7 +380,8 @@ jobs:
               "$JWKS_ARG" \
               "$JWKS_JSON_ARG" \
               "CipherWeaveIssuer=${{ steps.cipherweave.outputs.issuer_id }}" \
-              "AcceptLegacyToken=${ACCEPT_LEGACY_TOKEN:-true}"
+              "AcceptLegacyToken=${ACCEPT_LEGACY_TOKEN:-true}" \
+              "ToolScopeMode=$([ "${TOOL_SCOPE_MODE}" = audit ] && echo audit || echo enforce)"
 
       # ----------------------------------------------------------------
       # 11. Open Memgraph Bolt ingress from the new Lambda SG
