@@ -4,4 +4,4 @@
 # checksums in src/cipherweave_verify/VENDORED.json and
 # tests/test_cipherweave_vendored.py. To upgrade, bump the commit and run
 # scripts/sync_cipherweave_verify.sh (needs read access to CipherWeave).
-cipherweave-verify @ git+https://github.com/rajatarun/CipherWeave.git@a070edba84589caacc2202ac63c743c554611bab#subdirectory=cipherweave_verify
+cipherweave-verify @ git+https://github.com/rajatarun/CipherWeave.git@4d080d0891313063d5b88bf501a301dfbb52b52d#subdirectory=cipherweave_verify

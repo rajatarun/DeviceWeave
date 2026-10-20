@@ -26,6 +26,24 @@ token is one of:
 ``cipherweave_verify.BearerAuth`` makes that decision, the same code the other
 Weaves run. A missing or wrong token is HTTP 401 with a JSON-RPC error body.
 
+Authorization is per tool (``cipherweave_verify.ToolAuthorizer``). Every tool
+needs one scope: ``read`` (readOnlyHint), ``execute`` (state changes), or
+``destructive`` (destructiveHint, plus ``ingest``). Destructive tools also
+need **step-up**: a token minted at most 60 seconds ago whose ``jti`` has not
+been spent on a step-up call before (``TOKEN_JTI_TABLE``, DynamoDB). The
+legacy static token can never step up. ``tools/list`` shows only the tools the
+token can call. A refused call is HTTP 403 with ``WWW-Authenticate`` naming
+the scope (``insufficient_scope``) or the age (``insufficient_user_authentication``,
+``max_age=60``), per RFC 6750 and RFC 9470.
+
+``execute`` takes natural language, so it needs only ``execute`` — but a step
+it resolves to that grants physical access (unlock, open) is refused unless
+the same token would pass a destructive call (``access_control``).
+
+Every tools/call is logged as one JSON line, ``event: mcp_tool_call``, with
+the tool, outcome, and the token's ``sub`` and ``jti``: "who did what" is
+answerable per token, not only per Weave.
+
 Tools call the same in-process service functions as the REST handlers.
 They do not make HTTP requests back to the API.
 """
@@ -42,7 +60,20 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from cipherweave_verify import BearerAuth
+from cipherweave_verify import (
+    DESTRUCTIVE,
+    EXECUTE,
+    READ,
+    AuthorizationError,
+    BearerAuth,
+    DynamoJtiLedger,
+    Principal,
+    StepUpRequiredError,
+    ToolAuthorizer,
+    ToolPolicy,
+)
+
+import access_control
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(LOG_LEVEL)
@@ -57,6 +88,7 @@ PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_HEADER_VERSIONS = frozenset({PROTOCOL_VERSION, "2025-03-26"})
 SERVER_VERSION = "1.0.0"
 UNAUTHORIZED_CODE = -32001
+FORBIDDEN_CODE = -32003
 # The aud a CipherWeave token must carry to be accepted here.
 TOKEN_AUDIENCE = "deviceweave"
 _TOKEN_CACHE_TTL_SECONDS = 300
@@ -74,7 +106,10 @@ INSTRUCTIONS = (
     "delete_room_checkin, and delete_room_schedule_rule remove state. "
     "create_device, update_device, set_presence, calibrate_room, record_room_checkin, "
     "capture_room_reading, label_room_checkin, set_room_schedule_rule, learn_phrase, "
-    "author_policy, and ingest change state."
+    "author_policy, and ingest change state. "
+    "Each tool needs one CipherWeave token scope: read, execute, or destructive. "
+    "Destructive tools, and any unlock or open that execute resolves to, also need a "
+    "token minted in the last 60 seconds and not used for such a call before."
 )
 
 _READ_ONLY = {"readOnlyHint": True, "destructiveHint": False}
@@ -161,6 +196,22 @@ def _load_expected_token() -> str:
 # The legacy loader is looked up at call time, so a request with a good JWT
 # never reads Secrets Manager, and tests can replace _load_expected_token.
 _AUTH = BearerAuth(TOKEN_AUDIENCE, legacy_token=lambda: _load_expected_token())
+
+_LEDGER_CACHE: Dict[str, Any] = {}
+
+
+def _jti_ledger() -> Optional[DynamoJtiLedger]:
+    """The step-up replay ledger, or None (then every step-up call is refused)."""
+    name = os.environ.get("TOKEN_JTI_TABLE", "").strip()
+    if not name:
+        return None
+    if _LEDGER_CACHE.get("name") != name:
+        import boto3
+
+        table = boto3.resource("dynamodb").Table(name)
+        _LEDGER_CACHE["name"] = name
+        _LEDGER_CACHE["ledger"] = DynamoJtiLedger(table, audience=TOKEN_AUDIENCE)
+    return _LEDGER_CACHE["ledger"]
 
 
 def _bearer_token(headers: Dict[str, str]) -> str:
@@ -273,6 +324,21 @@ def _result(req_id: Any, result: Dict[str, Any]) -> Dict[str, Any]:
 
 def _accepted() -> Dict[str, Any]:
     return _response(202, None)
+
+
+def _forbidden(req_id: Any, exc: AuthorizationError, policy: ToolPolicy) -> Dict[str, Any]:
+    realm = f'Bearer realm="{TOKEN_AUDIENCE}"'
+    if isinstance(exc, StepUpRequiredError):
+        challenge = f'{realm}, error="insufficient_user_authentication", max_age="60"'
+    else:
+        challenge = f'{realm}, error="insufficient_scope", scope="{policy.scope}"'
+    return _rpc_error(
+        403,
+        FORBIDDEN_CODE,
+        f"Forbidden: {exc.reason}",
+        req_id,
+        extra_headers={"WWW-Authenticate": challenge},
+    )
 
 
 def _unauthorized(req_id: Any) -> Dict[str, Any]:
@@ -1080,6 +1146,30 @@ _TOOLS_BY_NAME = {tool["name"]: tool for tool in TOOLS}
 if len(_TOOLS_BY_NAME) != len(TOOLS):
     raise RuntimeError("duplicate MCP tool name")
 
+# execute keeps destructiveHint for clients (it can actuate), but it is what the
+# execute scope is for: turning on a lamp must not need a 60-second token. The
+# steps it resolves to that open something are gated on their own, in
+# access_control. ingest is annotated as mutating (it upserts), but a full
+# ingest marks every device it did not see offline and can store a provider
+# refresh token: it is step-up territory with the deletes.
+_POLICY_OVERRIDES: Dict[str, ToolPolicy] = {"execute": EXECUTE, "ingest": DESTRUCTIVE}
+
+
+def _policy_for(tool: Dict[str, Any]) -> ToolPolicy:
+    if tool["name"] in _POLICY_OVERRIDES:
+        return _POLICY_OVERRIDES[tool["name"]]
+    annotations = tool["annotations"]
+    if annotations.get("destructiveHint"):
+        return DESTRUCTIVE
+    if annotations.get("readOnlyHint"):
+        return READ
+    return EXECUTE
+
+
+TOOL_POLICIES: Dict[str, ToolPolicy] = {tool["name"]: _policy_for(tool) for tool in TOOLS}
+# Looked up at call time so tests can replace _jti_ledger.
+_AUTHORIZER = ToolAuthorizer(TOOL_POLICIES, ledger=lambda: _jti_ledger())
+
 
 def _public_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -1131,7 +1221,11 @@ def _tools_list(req_id: Any, params: Any) -> Dict[str, Any]:
         return _rpc_error(200, -32602, "Invalid params", req_id)
     if params.get("cursor") not in (None, ""):
         return _rpc_error(200, -32602, "Invalid params: pagination cursor is not supported", req_id)
-    return _result(req_id, {"tools": [_public_tool(tool) for tool in TOOLS]})
+    auth = access_control.current()
+    visible = set(_AUTHORIZER.visible(auth.principal, _TOOLS_BY_NAME)) if auth else set()
+    return _result(
+        req_id, {"tools": [_public_tool(tool) for tool in TOOLS if tool["name"] in visible]}
+    )
 
 
 def _tools_call(req_id: Any, params: Any) -> Dict[str, Any]:
@@ -1148,9 +1242,22 @@ def _tools_call(req_id: Any, params: Any) -> Dict[str, Any]:
     tool = _TOOLS_BY_NAME.get(name)
     if tool is None:
         return _rpc_error(200, -32602, f"Unknown tool: {name}", req_id)
+    auth = access_control.current()
+    principal = auth.principal if auth else None
+    if auth is None:
+        # handler() always binds one; reaching here without it is a bug, and
+        # a bug in authorization must refuse.
+        _audit_call(name, None, "denied", "no_principal")
+        return _rpc_error(403, FORBIDDEN_CODE, "Forbidden", req_id)
+    try:
+        auth.authorize_tool(name)
+    except AuthorizationError as exc:
+        _audit_call(name, principal, "denied", exc.reason)
+        return _forbidden(req_id, exc, _AUTHORIZER.policy(name))
     try:
         service_response = tool["call"](arguments)
     except InvalidParams as exc:
+        _audit_call(name, principal, "invalid_params", None)
         return _rpc_error(200, -32602, str(exc), req_id)
     except Exception:
         logger.exception("Tool %s failed", name)
@@ -1158,7 +1265,22 @@ def _tools_call(req_id: Any, params: Any) -> Dict[str, Any]:
             "statusCode": 500,
             "body": json.dumps({"error": "Tool execution failed"}),
         }
-    return _result(req_id, _tool_result(service_response))
+    result = _tool_result(service_response)
+    _audit_call(name, principal, "error" if result["isError"] else "ok", None)
+    return _result(req_id, result)
+
+
+def _audit_call(
+    tool: str, principal: Optional[Principal], outcome: str, reason: Optional[str]
+) -> None:
+    """One line per tools/call: which token (sub, jti) did what. Never the token."""
+    fields = principal.log_fields() if principal else {"method": None, "sub": None, "jti": None}
+    logger.info(
+        json.dumps(
+            {"event": "mcp_tool_call", "tool": tool, "outcome": outcome, "reason": reason, **fields},
+            sort_keys=True,
+        )
+    )
 
 
 def _dispatch(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -1250,4 +1372,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     header_error = _protocol_header_error(headers, _echo_id(message))
     if header_error is not None:
         return header_error
-    return _dispatch(message)
+    principal = decision.principal or Principal("unknown", None, frozenset())
+    with access_control.bind(access_control.RequestAuth(principal, _AUTHORIZER)):
+        return _dispatch(message)

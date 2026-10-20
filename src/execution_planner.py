@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import access_control
 from providers import ProviderError, get_provider
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,15 @@ async def _execute_one(step: ExecutionStep) -> StepResult:
     device_id = device["id"]
     logger.info("_execute_one: device_id=%s action=%s provider_type=%s", device_id, step.action, device.get("device_type"))
     t0 = time.monotonic()
+    denied = access_control.check_step(device, step.action)
+    if denied is not None:
+        return StepResult(
+            device_id=device_id,
+            device_name=device["name"],
+            action=step.action,
+            success=False,
+            error=denied,
+        )
     try:
         provider = get_provider(device["device_type"])
         result = await provider.execute(device, step.action, step.params)

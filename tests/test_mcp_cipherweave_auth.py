@@ -61,7 +61,7 @@ def test_cipherweave_token_calls_the_health_tool(issuer, monkeypatch):
         raise AssertionError("a valid JWT must not read the legacy secret")
 
     monkeypatch.setattr(mcp_handler, "_load_expected_token", _no_secret)
-    assert _is_healthy(_health(issuer.mint(audience="deviceweave")))
+    assert _is_healthy(_health(issuer.mint(audience="deviceweave", scopes=("read",))))
 
 
 @pytest.mark.parametrize("audience", ["modelweave", "contextweave", "toolweave"])
@@ -91,13 +91,13 @@ def test_legacy_flag_off_rejects_the_static_token_and_keeps_jwts(issuer, monkeyp
 
     monkeypatch.setattr(mcp_handler, "_load_expected_token", _no_secret)
     assert _health(LEGACY)["statusCode"] == 401
-    assert _is_healthy(_health(issuer.mint(audience="deviceweave")))
+    assert _is_healthy(_health(issuer.mint(audience="deviceweave", scopes=("read",))))
 
 
 def test_without_a_jwks_url_only_the_legacy_token_works(issuer, monkeypatch):
     monkeypatch.delenv("CIPHERWEAVE_JWKS_URL")
     reset_default_verifier()
-    assert _health(issuer.mint(audience="deviceweave"))["statusCode"] == 401
+    assert _health(issuer.mint(audience="deviceweave", scopes=("read",)))["statusCode"] == 401
     assert _is_healthy(_health(LEGACY))
 
 
@@ -148,7 +148,7 @@ def test_deploy_time_jwks_alone_verifies_with_no_network(issuer, monkeypatch):
     monkeypatch.setenv("CIPHERWEAVE_JWKS", _b64_jwks(issuer))
     monkeypatch.setattr(cw_jwks, "http_fetcher", _offline)
     reset_default_verifier()
-    assert _is_healthy(_health(issuer.mint(audience="deviceweave")))
+    assert _is_healthy(_health(issuer.mint(audience="deviceweave", scopes=("read",))))
     assert _health(issuer.mint(audience="modelweave"))["statusCode"] == 401
 
 

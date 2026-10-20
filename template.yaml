@@ -341,6 +341,25 @@ Parameters:
       the move to CipherWeave tokens. Set false once every caller uses
       CipherWeave; the static secret is then never read and can be deleted.
 
+  ToolScopeMode:
+    Type: String
+    Default: "enforce"
+    AllowedValues: ["enforce", "audit"]
+    Description: >
+      enforce: each MCP tool needs its scope (read, execute, destructive) in
+      the CipherWeave token. audit: scope failures are logged, not refused --
+      only while granting scopes to existing clients (issuer_admin.py
+      set-scopes). Step-up (60 s, single-use jti) for destructive tools and
+      unlock/open is enforced in both modes.
+
+  LegacyTokenScopes:
+    Type: String
+    Default: "read execute destructive"
+    Description: >
+      Scopes the static legacy token carries while AcceptLegacyToken is true.
+      Whatever this says, the legacy token can never step up, so it cannot
+      delete, ingest, unlock or open.
+
   # -----------------------------------------------------------------------
   # Eero presence — unofficial cloud API, polled by a Lambda outside the VPC.
   # The secret name must not be blank: an empty override is rejected by
@@ -1088,6 +1107,9 @@ Resources:
           CIPHERWEAVE_JWKS: !Ref CipherWeaveJwks
           CIPHERWEAVE_ISSUER: !Ref CipherWeaveIssuer
           ACCEPT_LEGACY_TOKEN: !Ref AcceptLegacyToken
+          CIPHERWEAVE_SCOPE_MODE: !Ref ToolScopeMode
+          LEGACY_TOKEN_SCOPES: !Ref LegacyTokenScopes
+          TOKEN_JTI_TABLE: !Ref TokenJtiTable
           EERO_CALIBRATION_FUNCTION_NAME: !Sub "deviceweave-eero-calibration-${StageName}"
       VpcConfig:
         SecurityGroupIds:
@@ -1116,6 +1138,12 @@ Resources:
             TableName: !Ref SceneTable
         - DynamoDBCrudPolicy:
             TableName: !Ref ConversationTable
+        # Step-up replay ledger: a conditional put per destructive call. No
+        # read, update or delete -- a spent jti cannot be un-spent.
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt TokenJtiTable.Arn
         - !If
           - HasObservatoryTable
           - Statement:
@@ -1586,6 +1614,26 @@ Resources:
           AttributeType: S
       KeySchema:
         - AttributeName: session_id
+          KeyType: HASH
+
+  # jti of every CipherWeave token spent on a step-up call (delete_*, ingest,
+  # unlock/open), keyed "deviceweave#<jti>". A conditional put makes each
+  # fresh token single-use across every Lambda instance; TTL drops the item
+  # shortly after the token would have expired anyway.
+  TokenJtiTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "deviceweave-token-jti-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      TableClass: STANDARD
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: jti
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jti
           KeyType: HASH
 
 Conditions:

@@ -1,8 +1,9 @@
 {
-  "source": "cipherweave-verify @ git+https://github.com/rajatarun/CipherWeave.git@a070edba84589caacc2202ac63c743c554611bab#subdirectory=cipherweave_verify",
+  "source": "cipherweave-verify @ git+https://github.com/rajatarun/CipherWeave.git@4d080d0891313063d5b88bf501a301dfbb52b52d#subdirectory=cipherweave_verify",
   "sha256": {
-    "__init__.py": "2c959bc21364a409af7acee0f44a5fcc97e7e11495408a19ce76499103d4860a",
-    "bearer.py": "da3882dec59de4bea89ca64e6715598ce63c9449d341faaf82eee58ba5181e5f",
+    "__init__.py": "8dc9637c7e3da993cd36ca8bc7d7cd31e7b6b71428bd5979f3f0e20ac5005441",
+    "authz.py": "ad7976698214ea106ca2d7999b4327c460a325d8d1cddfc65596a568ce366118",
+    "bearer.py": "522815bf77a7edbb01ae6b07e65162d2b4228446dc135f46aa0ad58f77661437",
     "errors.py": "67a8ebecfbd6e7650d42d621dc30e9dc471d25686c0b41f7ff85de28361abb28",
     "jwks.py": "3a965b9149e5ef8e1b19b08be26627f4132fceb7bf1012ab182a97622532d278",
     "testing.py": "03f027d79cf3e50cbf282c4e035bc3b4cdd2b9b89a3ba81e839419008210f7d0",

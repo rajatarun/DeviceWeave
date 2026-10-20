@@ -406,7 +406,7 @@ def test_http_requires_the_bearer_and_does_not_call_eero(monkeypatch):
         assert missing["statusCode"] == 404
 
 
-def test_mcp_tools_invoke_the_calibration_function_without_a_mac(monkeypatch):
+def test_mcp_tools_invoke_the_calibration_function_without_a_mac(monkeypatch, fresh_token):
     monkeypatch.setattr(mcp_handler, "_load_expected_token", lambda: TOKEN)
     seen = []
 
@@ -435,7 +435,7 @@ def test_mcp_tools_invoke_the_calibration_function_without_a_mac(monkeypatch):
     for name, arguments in calls:
         response = mcp_handler.handler({
             "requestContext": {"http": {"method": "POST", "path": "/mcp"}},
-            "headers": {"authorization": f"Bearer {TOKEN}"},
+            "headers": {"authorization": f"Bearer {fresh_token()}"},
             "body": json.dumps({
                 "jsonrpc": "2.0",
                 "id": 1,
