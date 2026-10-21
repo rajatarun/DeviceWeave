@@ -159,12 +159,15 @@ def validate_modern(message: dict, headers: dict | None) -> str:
     return version
 
 
-def check_legacy_header(headers: dict | None) -> None:
+def check_legacy_header(headers: dict | None, method: Any = None) -> None:
     """Refuse a handshake-era request whose version header this server cannot serve.
 
     A modern version in the header with no ``_meta`` is a modern request
-    missing its required fields, not a legacy one.
+    missing its required fields, not a legacy one. ``initialize`` is exempt:
+    the version is what it negotiates, so no header can be wrong for it yet.
     """
+    if method == "initialize":
+        return
     sent = header(headers, "MCP-Protocol-Version")
     if sent is None or not sent.strip():
         return  # 2025-03-26 clients predate the header

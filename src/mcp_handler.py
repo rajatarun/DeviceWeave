@@ -1341,7 +1341,7 @@ def _dispatch(message: Dict[str, Any], headers: Optional[Dict[str, str]] = None)
     if mcp_era.modern_version(message) is not None:
         return _dispatch_modern(message, headers or {})
     try:
-        mcp_era.check_legacy_header(headers)
+        mcp_era.check_legacy_header(headers, rpc_method)
     except mcp_era.Rejection as rejection:
         return _rejected(req_id, rejection)
     if rpc_method == "initialize":

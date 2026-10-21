@@ -148,4 +148,4 @@ def test_vendored_protocol_module_matches_the_other_weaves():
 
 
 # The same bytes as ContextWeave's src/mcp_server/mcp_era.py and ModelWeave's.
-MCP_ERA_SHA256 = "5a2dd240dfd11e9408a77da73143a4186af154b5367489a77e8fee59ac4bd86b"
+MCP_ERA_SHA256 = "ff733427e2de38963a26f952f2291254b7c834357548e60a88ef383950a87e3e"
