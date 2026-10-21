@@ -1,16 +1,22 @@
 """
-Amazon Bedrock LLM provider (Anthropic Claude via cross-region inference).
+Amazon Bedrock LLM provider.
 
-Default backend. Reads credentials from the Lambda execution role — no
-explicit key management required.
+The model comes from ModelWeave's "reasoning" role pin (``modelweave_roles``);
+the model id this provider is built with is only the fallback when no pin can
+be read. The call is the Converse API rather than ``invoke_model``: the old
+request body was Anthropic's own message format, so a pin naming Nova or
+Llama would have been sent a body it cannot read. Reads credentials from the
+Lambda execution role.
 """
 
-import json
 import logging
 
+import modelweave_roles
 from llm_provider.base import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
+
+MODEL_ROLE = "reasoning"
 
 
 class BedrockLLMProvider(BaseLLMProvider):
@@ -21,20 +27,22 @@ class BedrockLLMProvider(BaseLLMProvider):
 
     @property
     def model_id(self) -> str:
-        return self._model_id
+        """The model a call would use now: the role pin, else the fallback."""
+        return modelweave_roles.model_for(MODEL_ROLE, self._model_id)
 
     def invoke(self, system_prompt: str, user_message: str, max_tokens: int = 512) -> str:
         import boto3
 
         client = boto3.client("bedrock-runtime", region_name=self._region)
-        body = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_message}],
-        })
-        resp = client.invoke_model(modelId=self._model_id, body=body)
-        payload = json.loads(resp["body"].read())
-        text = payload["content"][0]["text"].strip()
-        logger.debug("Bedrock (%s) response: %d chars", self._model_id, len(text))
+        resp, used = modelweave_roles.converse(
+            client,
+            MODEL_ROLE,
+            self._model_id,
+            system=[{"text": system_prompt}],
+            messages=[{"role": "user", "content": [{"text": user_message}]}],
+            inferenceConfig={"maxTokens": max_tokens},
+        )
+        blocks = resp.get("output", {}).get("message", {}).get("content", [])
+        text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict)).strip()
+        logger.debug("Bedrock (%s) response: %d chars", used, len(text))
         return text

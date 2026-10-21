@@ -18,10 +18,14 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import modelweave_roles
 from observatory_wrapper import observe_bedrock_converse
 
 logger = logging.getLogger(__name__)
 
+# The model comes from ModelWeave's "reasoning" role pin (modelweave_roles);
+# LLM_MODEL_ID is only the fallback when no pin can be read.
+MODEL_ROLE = "reasoning"
 _MODEL_ID: str = os.environ.get(
     "LLM_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 )
@@ -448,10 +452,20 @@ async def _dispatch_tool(name: str, tool_input: Dict[str, Any]) -> Dict[str, Any
     return {"error": f"Unknown tool: {name}"}
 
 
-@observe_bedrock_converse(model_id=_MODEL_ID)
 def _call_bedrock_converse(client, **kwargs) -> Dict[str, Any]:
-    """Wrap Bedrock converse call for observatory instrumentation."""
-    return client.converse(**kwargs)
+    """One Converse call on the role's model, instrumented and gated by the observatory.
+
+    The decorator is applied per call so the span names the model actually
+    resolved, not the fallback the module was imported with.
+    """
+    model_id = modelweave_roles.model_for(MODEL_ROLE, _MODEL_ID)
+
+    @observe_bedrock_converse(model_id=model_id)
+    def _call() -> Dict[str, Any]:
+        response, _used = modelweave_roles.converse(client, MODEL_ROLE, _MODEL_ID, **kwargs)
+        return response
+
+    return _call()
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +494,10 @@ async def run_agent(
     import boto3
 
     client = boto3.client("bedrock-runtime", region_name=_REGION)
-    logger.info("Bedrock agent invoked: model=%s history_turns=%d", _MODEL_ID, len(history))
+    logger.info(
+        "Bedrock agent invoked: model=%s history_turns=%d",
+        modelweave_roles.model_for(MODEL_ROLE, _MODEL_ID), len(history),
+    )
     system_text = _SYSTEM_PROMPT + system_prompt_extra if system_prompt_extra else _SYSTEM_PROMPT
 
     # Append the new user turn
@@ -497,7 +514,6 @@ async def run_agent(
             resp = await asyncio.to_thread(
                 _call_bedrock_converse,
                 client,
-                modelId=_MODEL_ID,
                 system=[{"text": system_text}],
                 messages=messages,
                 toolConfig={"tools": _TOOLS},
