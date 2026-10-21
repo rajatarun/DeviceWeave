@@ -9,7 +9,7 @@ info:
     policy engine, and is executed against a provider.
 
     `POST /mcp` is the remote MCP Streamable HTTP endpoint (protocol
-    2025-06-18). `GET /mcp` returns 405. Both require a bearer token.
+    2026-07-28; handshake revisions via initialize). `GET /mcp` returns 405. Both require a bearer token.
 
     **Resolving the server and the data stores.** Do not hardcode anything:
 
@@ -50,7 +50,7 @@ tags:
   - name: presence
     description: Home-occupancy state, consumed by the policy engine
   - name: mcp
-    description: Remote MCP Streamable HTTP endpoint (protocol 2025-06-18)
+    description: Remote MCP Streamable HTTP endpoint (protocol 2026-07-28; handshake revisions via initialize)
 
 paths:
 
@@ -1217,7 +1217,7 @@ paths:
       operationId: mcpPost
       summary: MCP Streamable HTTP JSON-RPC
       description: |
-        One JSON-RPC 2.0 message per request, protocol `2025-06-18`.
+        One JSON-RPC 2.0 message per request, protocol `2026-07-28` or a handshake revision.
         Methods: `initialize`, `tools/list`, and `tools/call`.
         Notifications (no `id`), including `notifications/initialized`,
         are answered with `202` and an empty body. JSON-RPC batches are
@@ -1237,8 +1237,12 @@ paths:
           required: false
           schema:
             type: string
-            example: "2025-06-18"
-          description: Protocol version. `2025-06-18` or `2025-03-26`. Omit on initialize.
+            example: "2026-07-28"
+          description: >
+            Protocol version. `2026-07-28` (must equal `params._meta`'s
+            `io.modelcontextprotocol/protocolVersion`, with `Mcp-Method` and,
+            for tools/call, `Mcp-Name`), or a handshake version
+            `2025-11-25`, `2025-06-18`, `2025-03-26`. Omit on initialize.
       requestBody:
         required: true
         content:

@@ -319,7 +319,9 @@ HTTP 403
 
 ## Remote MCP server
 
-`POST /mcp` is a remote [MCP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) endpoint on the same HTTP API. The transport is Streamable HTTP, protocol **`2025-06-18`**. An MCP client sends one JSON-RPC 2.0 message per POST. `GET /mcp` returns **405** — this server does not open an SSE stream, which the transport allows.
+`POST /mcp` is a remote [MCP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http) endpoint on the same HTTP API. The transport is Streamable HTTP, protocol **`2026-07-28`**. An MCP client sends one JSON-RPC 2.0 message per POST. `GET /mcp` returns **405**: 2026-07-28 removed the SSE stream, and the earlier revisions allow 405.
+
+The server is dual-era (`src/mcp_era.py`, the same file in ContextWeave and ModelWeave). A 2026-07-28 request has no handshake. It carries `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in `params._meta`, plus `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call`, `Mcp-Name` headers that must match the body. A mismatch is `400`/`-32020` before anything runs. `server/discover` lists the versions, capabilities and instructions. Results carry `resultType: "complete"`, and `tools/list` carries `ttlMs` and `cacheScope: "private"`, because it is filtered by the token. A client that opens with `initialize` gets 2025-11-25, 2025-06-18 or 2025-03-26 as before. Invalid tool arguments come back as a tool result with `isError: true`, so the model can correct them.
 
 The URL is the `McpEndpoint` stack output:
 
@@ -496,9 +498,21 @@ In Cursor: **Settings → MCP → Add new MCP server** (or edit the MCP config f
 }
 ```
 
-Set `DEVICEWEAVE_MCP_TOKEN` to the secret string. The client should send `Accept: application/json, text/event-stream` and, after `initialize`, `MCP-Protocol-Version: 2025-06-18`. `GET /mcp` answering 405 is expected.
+Set `DEVICEWEAVE_MCP_TOKEN` to the secret string. The client should send `Accept: application/json, text/event-stream` and either the 2026-07-28 headers on every request or, after `initialize`, `MCP-Protocol-Version: 2025-06-18`. `GET /mcp` answering 405 is expected.
 
-Check the handshake:
+Check discovery (2026-07-28):
+
+```bash
+curl -sS "$MCP_URL" \
+  -H "Authorization: Bearer $DEVICEWEAVE_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: server/discover" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
+```
+
+Or the handshake (2025-06-18):
 
 ```bash
 curl -sS "$MCP_URL" \

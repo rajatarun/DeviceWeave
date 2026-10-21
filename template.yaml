@@ -458,6 +458,8 @@ Resources:
           - Content-Type
           - Authorization
           - MCP-Protocol-Version
+          - Mcp-Method
+          - Mcp-Name
         AllowOrigins:
           - '*'
 
@@ -1127,7 +1129,7 @@ Resources:
       Timeout: 120
       MemorySize: 1024
       Description: >
-        DeviceWeave MCP Streamable HTTP endpoint (protocol 2025-06-18).
+        DeviceWeave MCP Streamable HTTP endpoint (protocol 2026-07-28; handshake revisions via initialize).
         POST /mcp accepts JSON-RPC. GET /mcp returns 405.
       Environment:
         Variables:
@@ -1711,7 +1713,7 @@ Outputs:
 
   McpEndpoint:
     Description: >
-      POST /mcp — MCP Streamable HTTP endpoint (protocol 2025-06-18).
+      POST /mcp — MCP Streamable HTTP endpoint (protocol 2026-07-28; handshake revisions via initialize).
       Requires an Authorization header and the secret named by McpAuthTokenSecretName.
     Value: !Sub "https://${DeviceWeaveApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/mcp"
     Export:

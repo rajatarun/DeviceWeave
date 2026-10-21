@@ -1,16 +1,21 @@
 """
-DeviceWeave remote MCP server (Streamable HTTP, protocol 2025-06-18).
+DeviceWeave remote MCP server (Streamable HTTP, protocol 2026-07-28 and the
+handshake revisions 2025-11-25, 2025-06-18 and 2025-03-26).
 
 POST /mcp
-    One JSON-RPC 2.0 message. ``initialize``, ``tools/list``, and
-    ``tools/call`` are answered with ``Content-Type: application/json``.
-    A notification (no ``id``), including ``notifications/initialized``,
-    is answered with HTTP 202 and an empty body. JSON-RPC batches are
-    rejected: protocol 2025-06-18 does not include them.
+    One JSON-RPC 2.0 message, answered with ``Content-Type: application/json``.
+    A request whose ``params._meta`` names a protocol version is served
+    statelessly under 2026-07-28 (``server/discover``, ``tools/list``,
+    ``tools/call``), with the version, method and tool name mirrored in
+    headers that must match the body (``mcp_era``). Anything else is served
+    under the version ``initialize`` negotiated: ``initialize``, ``ping``,
+    ``tools/list``, ``tools/call``. A notification (no ``id``), including
+    ``notifications/initialized``, is answered with HTTP 202 and an empty
+    body. JSON-RPC batches are rejected: no supported revision includes them.
 
 GET /mcp
-    Streamable HTTP allows a server-sent event stream here. This server
-    does not open one and returns HTTP 405, which the transport permits.
+    HTTP 405. 2026-07-28 removed the server-sent event stream, and the
+    handshake revisions allow a server not to open one.
 
 Every /mcp request must send ``Authorization: Bearer <token>``, where the
 token is one of:
@@ -74,6 +79,7 @@ from cipherweave_verify import (
 )
 
 import access_control
+import mcp_era
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.getLogger().setLevel(LOG_LEVEL)
@@ -81,11 +87,11 @@ for _noisy in ("botocore", "boto3", "urllib3", "s3transfer", "neo4j"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = "2025-06-18"
-# Header values we accept. initialize always answers 2025-06-18.
-# 2025-03-26 is accepted on the header so a client that has not finished
-# negotiation is not rejected; the response shape is the 2025-06-18 one.
-SUPPORTED_HEADER_VERSIONS = frozenset({PROTOCOL_VERSION, "2025-03-26"})
+PROTOCOL_VERSION = mcp_era.LATEST_VERSION
+SUPPORTED_HEADER_VERSIONS = frozenset(mcp_era.SUPPORTED_VERSIONS)
+# How long a client may reuse tools/list and server/discover. The tool set
+# changes only with a deploy; the list is per token, so the scope is private.
+LIST_TTL_MS = 300_000
 SERVER_VERSION = "1.0.0"
 UNAUTHORIZED_CODE = -32001
 FORBIDDEN_CODE = -32003
@@ -351,18 +357,10 @@ def _unauthorized(req_id: Any) -> Dict[str, Any]:
     )
 
 
-def _protocol_header_error(headers: Dict[str, str], req_id: Any) -> Optional[Dict[str, Any]]:
-    version = headers.get("mcp-protocol-version")
-    if version is None or version == "":
-        return None
-    if version not in SUPPORTED_HEADER_VERSIONS:
-        return _rpc_error(
-            400,
-            -32600,
-            f"Unsupported MCP-Protocol-Version: {version}",
-            req_id,
-        )
-    return None
+def _rejected(req_id: Any, rejection: mcp_era.Rejection) -> Dict[str, Any]:
+    return _response(
+        rejection.status, {"jsonrpc": "2.0", "id": req_id, "error": rejection.error()}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1181,15 +1179,18 @@ def _public_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _initialize_result(_params: Any) -> Dict[str, Any]:
+CAPABILITIES = {"tools": {"listChanged": False}}
+SERVER_INFO = {"name": "deviceweave", "title": "DeviceWeave", "version": SERVER_VERSION}
+
+
+def _initialize_result(params: Any) -> Dict[str, Any]:
+    requested = params.get("protocolVersion") if isinstance(params, dict) else None
     return {
-        "protocolVersion": PROTOCOL_VERSION,
-        "capabilities": {"tools": {"listChanged": False}},
-        "serverInfo": {
-            "name": "deviceweave",
-            "title": "DeviceWeave",
-            "version": SERVER_VERSION,
-        },
+        # The client's version when it is a handshake one, else the newest
+        # handshake version; a client that cannot use the answer disconnects.
+        "protocolVersion": mcp_era.negotiate_legacy(requested),
+        "capabilities": CAPABILITIES,
+        "serverInfo": SERVER_INFO,
         "instructions": INSTRUCTIONS,
     }
 
@@ -1257,8 +1258,10 @@ def _tools_call(req_id: Any, params: Any) -> Dict[str, Any]:
     try:
         service_response = tool["call"](arguments)
     except InvalidParams as exc:
+        # A tool execution error, not a protocol error, so the model can read
+        # what was wrong with its arguments and retry (SEP-1303).
         _audit_call(name, principal, "invalid_params", None)
-        return _rpc_error(200, -32602, str(exc), req_id)
+        return _result(req_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
     except Exception:
         logger.exception("Tool %s failed", name)
         service_response = {
@@ -1283,7 +1286,39 @@ def _audit_call(
     )
 
 
-def _dispatch(message: Dict[str, Any]) -> Dict[str, Any]:
+def _dispatch_modern(message: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+    """One stateless 2026-07-28 request: validated against its headers, then served."""
+    rpc_method = message["method"]
+    req_id = message["id"]
+    try:
+        version = mcp_era.validate_modern(message, headers)
+    except mcp_era.Rejection as rejection:
+        return _rejected(req_id, rejection)
+
+    if rpc_method == "server/discover":
+        response = _result(
+            req_id, mcp_era.discover_result(CAPABILITIES, INSTRUCTIONS, LIST_TTL_MS)
+        )
+    elif rpc_method == "tools/list":
+        response = _tools_list(req_id, message.get("params"))
+    elif rpc_method == "tools/call":
+        response = _tools_call(req_id, message.get("params"))
+    else:
+        # Includes initialize, ping and logging/setLevel, which 2026-07-28 removed.
+        return _rpc_error(404, mcp_era.METHOD_NOT_FOUND, f"Method not found: {rpc_method}", req_id)
+
+    body = json.loads(response["body"])
+    if "result" in body:
+        result = body["result"]
+        if rpc_method == "tools/list":
+            result = mcp_era.cacheable(result, LIST_TTL_MS)
+        body["result"] = mcp_era.complete(result, SERVER_INFO)
+        response["body"] = json.dumps(body)
+    response["headers"]["MCP-Protocol-Version"] = version
+    return response
+
+
+def _dispatch(message: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     if message.get("jsonrpc") != "2.0":
         return _rpc_error(400, -32600, "Invalid Request", _echo_id(message))
     if "id" in message and not _is_valid_id(message["id"]):
@@ -1303,6 +1338,12 @@ def _dispatch(message: Dict[str, Any]) -> Dict[str, Any]:
         return _accepted()
 
     logger.info("MCP method %s", rpc_method)
+    if mcp_era.modern_version(message) is not None:
+        return _dispatch_modern(message, headers or {})
+    try:
+        mcp_era.check_legacy_header(headers)
+    except mcp_era.Rejection as rejection:
+        return _rejected(req_id, rejection)
     if rpc_method == "initialize":
         return _result(req_id, _initialize_result(message.get("params")))
     if rpc_method == "ping":
@@ -1340,9 +1381,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return _unauthorized(req_id)
 
     if method == "GET":
-        header_error = _protocol_header_error(headers, None)
-        if header_error is not None:
-            return header_error
         return _rpc_error(
             405,
             -32601,
@@ -1369,9 +1407,6 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if not isinstance(message, dict):
         return _rpc_error(400, -32600, "Invalid Request", None)
 
-    header_error = _protocol_header_error(headers, _echo_id(message))
-    if header_error is not None:
-        return header_error
     principal = decision.principal or Principal("unknown", None, frozenset())
     with access_control.bind(access_control.RequestAuth(principal, _AUTHORIZER)):
-        return _dispatch(message)
+        return _dispatch(message, headers)
