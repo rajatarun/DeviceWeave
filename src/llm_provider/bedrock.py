@@ -11,6 +11,7 @@ Lambda execution role.
 
 import logging
 
+import bedrock_cost
 import modelweave_roles
 from llm_provider.base import BaseLLMProvider
 
@@ -33,7 +34,8 @@ class BedrockLLMProvider(BaseLLMProvider):
     def invoke(self, system_prompt: str, user_message: str, max_tokens: int = 512) -> str:
         import boto3
 
-        client = boto3.client("bedrock-runtime", region_name=self._region)
+        # Billed to DeviceWeave through its tagged inference profiles (bedrock_cost.py).
+        client = bedrock_cost.attribute(boto3.client("bedrock-runtime", region_name=self._region))
         resp, used = modelweave_roles.converse(
             client,
             MODEL_ROLE,

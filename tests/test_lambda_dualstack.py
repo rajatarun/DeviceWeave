@@ -137,6 +137,18 @@ def parse_cfn_parameter_overrides(values):
     return result
 
 
+def _option_values(argv: list[str], option: str) -> list[str]:
+    """The values of one multi-value option, up to the next ``--`` option, as click reads them."""
+    rest = argv[argv.index(option) + 1:]
+    end = next((i for i, item in enumerate(rest) if item.startswith("--")), len(rest))
+    return rest[:end]
+
+
+def test_the_stack_is_tagged_with_its_repo(tmp_path):
+    argv = _sam_deploy_argv(tmp_path)
+    assert _option_values(argv, "--tags") == ["repo=DeviceWeave"]
+
+
 def _sam_deploy_argv(tmp_path, expressions: dict[str, str] | None = None) -> list[str]:
     """Shell-split the workflow's sam deploy line the way Actions will.
 
@@ -172,7 +184,7 @@ def test_sam_parameter_overrides_parser_accepts_the_workflow_string(tmp_path):
     from samcli.commands._utils.options import parameter_override_click_option
 
     argv = _sam_deploy_argv(tmp_path)
-    overrides = argv[argv.index("--parameter-overrides") + 1:]
+    overrides = _option_values(argv, "--parameter-overrides")
     assert 'ParameterKey=LambdaPublicSubnetIds,ParameterValue=""' in overrides
     assert "LambdaPublicSubnetIds=" not in overrides
 
@@ -211,7 +223,7 @@ def _assert_deploy_overrides(parsed: dict, overrides: list[str]) -> None:
 def test_eero_poll_schedule_override_parses_to_the_full_value(tmp_path):
     """Shell-split the workflow, then parse it the way SAM 1.121.0 does."""
     argv = _sam_deploy_argv(tmp_path)
-    overrides = argv[argv.index("--parameter-overrides") + 1:]
+    overrides = _option_values(argv, "--parameter-overrides")
     parsed = parse_cfn_parameter_overrides(overrides)
     _assert_deploy_overrides(parsed, overrides)
     # The form that failed run 39145288741: bash strips the outer quotes and
@@ -227,7 +239,7 @@ def test_missing_cipherweave_jwks_url_is_passed_as_an_explicit_empty_value(tmp_p
         tmp_path,
         {"steps.cipherweave.outputs.jwks_url": "", "steps.cipherweave.outputs.jwks_b64": ""},
     )
-    overrides = argv[argv.index("--parameter-overrides") + 1:]
+    overrides = _option_values(argv, "--parameter-overrides")
     assert 'ParameterKey=CipherWeaveJwksUrl,ParameterValue=""' in overrides
     assert 'ParameterKey=CipherWeaveJwks,ParameterValue=""' in overrides
     assert "CipherWeaveJwksUrl=" not in overrides

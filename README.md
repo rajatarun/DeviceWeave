@@ -1289,3 +1289,17 @@ sam local invoke DeviceWeaveFunction \
 ```
 
 `boto3` is pre-installed in the Lambda Python 3.11 runtime and is *also* pinned in `src/requirements.txt` (`boto3>=1.26.0`, added with the MCP Observatory telemetry path), so SAM bundles it — roughly 10 MB of the deployment package. See DECISIONS.md #12 for the trade-off.
+
+## Cost attribution
+
+The stack is deployed with `repo=DeviceWeave`, which CloudFormation copies onto
+every resource. When the LLM provider is Bedrock, calls go through this stack's
+own application inference profiles (Claude Haiku 4.5, Nova Pro, Llama 3.3 70B),
+tagged the same way. `src/bedrock_cost.py` is vendored from ModelWeave and
+checksummed in `BEDROCK_COST_VENDORED.json`. A refused profile falls back to the
+model id and is logged. `BedrockCostAttribution=off` disables the rewrite.
+Read the costs back with ModelWeave's `scripts/weave_costs.py --repo DeviceWeave [--llm]`.
+
+Prod runs the agent and the LLM fallback on **Gemini**. Google bills those
+calls, so they are not on the AWS bill or in that report. The AWS side of
+DeviceWeave (Lambda, DynamoDB, API Gateway, logs) is.
