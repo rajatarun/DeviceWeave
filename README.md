@@ -319,7 +319,9 @@ HTTP 403
 
 ## Remote MCP server
 
-`POST /mcp` is a remote [MCP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) endpoint on the same HTTP API. The transport is Streamable HTTP, protocol **`2025-06-18`**. An MCP client sends one JSON-RPC 2.0 message per POST. `GET /mcp` returns **405** — this server does not open an SSE stream, which the transport allows.
+`POST /mcp` is a remote [MCP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http) endpoint on the same HTTP API. The transport is Streamable HTTP, protocol **`2026-07-28`**. An MCP client sends one JSON-RPC 2.0 message per POST. `GET /mcp` returns **405**: 2026-07-28 removed the SSE stream, and the earlier revisions allow 405.
+
+The server is dual-era (`src/mcp_era.py`, the same file in ContextWeave and ModelWeave). A 2026-07-28 request has no handshake. It carries `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in `params._meta`, plus `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call`, `Mcp-Name` headers that must match the body. A mismatch is `400`/`-32020` before anything runs. `server/discover` lists the versions, capabilities and instructions. Results carry `resultType: "complete"`, and `tools/list` carries `ttlMs` and `cacheScope: "private"`, because it is filtered by the token. A client that opens with `initialize` gets 2025-11-25, 2025-06-18 or 2025-03-26 as before. Invalid tool arguments come back as a tool result with `isError: true`, so the model can correct them.
 
 The URL is the `McpEndpoint` stack output:
 
@@ -496,9 +498,21 @@ In Cursor: **Settings → MCP → Add new MCP server** (or edit the MCP config f
 }
 ```
 
-Set `DEVICEWEAVE_MCP_TOKEN` to the secret string. The client should send `Accept: application/json, text/event-stream` and, after `initialize`, `MCP-Protocol-Version: 2025-06-18`. `GET /mcp` answering 405 is expected.
+Set `DEVICEWEAVE_MCP_TOKEN` to the secret string. The client should send `Accept: application/json, text/event-stream` and either the 2026-07-28 headers on every request or, after `initialize`, `MCP-Protocol-Version: 2025-06-18`. `GET /mcp` answering 405 is expected.
 
-Check the handshake:
+Check discovery (2026-07-28):
+
+```bash
+curl -sS "$MCP_URL" \
+  -H "Authorization: Bearer $DEVICEWEAVE_MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: server/discover" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
+```
+
+Or the handshake (2025-06-18):
 
 ```bash
 curl -sS "$MCP_URL" \
@@ -1275,3 +1289,17 @@ sam local invoke DeviceWeaveFunction \
 ```
 
 `boto3` is pre-installed in the Lambda Python 3.11 runtime and is *also* pinned in `src/requirements.txt` (`boto3>=1.26.0`, added with the MCP Observatory telemetry path), so SAM bundles it — roughly 10 MB of the deployment package. See DECISIONS.md #12 for the trade-off.
+
+## Cost attribution
+
+The stack is deployed with `repo=DeviceWeave`, which CloudFormation copies onto
+every resource. When the LLM provider is Bedrock, calls go through this stack's
+own application inference profiles (Claude Haiku 4.5, Nova Pro, Llama 3.3 70B),
+tagged the same way. `src/bedrock_cost.py` is vendored from ModelWeave and
+checksummed in `BEDROCK_COST_VENDORED.json`. A refused profile falls back to the
+model id and is logged. `BedrockCostAttribution=off` disables the rewrite.
+Read the costs back with ModelWeave's `scripts/weave_costs.py --repo DeviceWeave [--llm]`.
+
+Prod runs the agent and the LLM fallback on **Gemini**. Google bills those
+calls, so they are not on the AWS bill or in that report. The AWS side of
+DeviceWeave (Lambda, DynamoDB, API Gateway, logs) is.

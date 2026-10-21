@@ -1,4 +1,4 @@
-"""Unit tests for the remote MCP endpoint (Streamable HTTP, protocol 2025-06-18)."""
+"""Unit tests for the remote MCP endpoint (Streamable HTTP, handshake revisions)."""
 
 from __future__ import annotations
 
@@ -330,7 +330,9 @@ def test_unsupported_protocol_header_is_400():
         headers={"MCP-Protocol-Version": "1999-01-01"},
     ), None)
     assert response["statusCode"] == 400
-    assert "1999-01-01" in _body(response)["error"]["message"]
+    error = _body(response)["error"]
+    assert error["code"] == -32022
+    assert error["data"]["requested"] == "1999-01-01"
 
 
 def test_template_adds_mcp_routes_and_does_not_embed_a_token():

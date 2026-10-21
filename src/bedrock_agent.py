@@ -18,6 +18,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import bedrock_cost
 import modelweave_roles
 from observatory_wrapper import observe_bedrock_converse
 
@@ -493,7 +494,8 @@ async def run_agent(
     """
     import boto3
 
-    client = boto3.client("bedrock-runtime", region_name=_REGION)
+    # Billed to DeviceWeave through its tagged inference profiles (bedrock_cost.py).
+    client = bedrock_cost.attribute(boto3.client("bedrock-runtime", region_name=_REGION))
     logger.info(
         "Bedrock agent invoked: model=%s history_turns=%d",
         modelweave_roles.model_for(MODEL_ROLE, _MODEL_ID), len(history),

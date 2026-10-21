@@ -106,6 +106,7 @@ def test_every_bedrock_grant_covers_the_reasoning_candidates_and_the_pin_read():
     assert grants == 5
     for model in ("amazon.nova-pro-v1:0", "meta.llama3-3-70b-instruct-v1:0"):
         assert template.count(f'foundation-model/{model}"') == grants
-        assert template.count(f"inference-profile/us.{model}") == grants
+        # The grants' form; the tagged profiles name the same ARN with the region.
+        assert template.count(f":${{AWS::AccountId}}:inference-profile/us.{model}\"") == grants
     assert template.count("parameter/modelweave/roles/*") == grants
     assert "ssm:PutParameter" not in template

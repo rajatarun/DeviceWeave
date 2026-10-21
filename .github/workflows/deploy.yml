@@ -381,7 +381,12 @@ jobs:
               "$JWKS_JSON_ARG" \
               "CipherWeaveIssuer=${{ steps.cipherweave.outputs.issuer_id }}" \
               "AcceptLegacyToken=${ACCEPT_LEGACY_TOKEN:-true}" \
-              "ToolScopeMode=$([ "${TOOL_SCOPE_MODE}" = audit ] && echo audit || echo enforce)"
+              "ToolScopeMode=$([ "${TOOL_SCOPE_MODE}" = audit ] && echo audit || echo enforce)" \
+            --tags repo=DeviceWeave
+          # repo=<RepoName> on the stack is copied onto every resource it
+          # creates, so Cost Explorer splits the bill by repository; the
+          # Bedrock profiles carry the same tag (ModelWeave scripts/weave_costs.py).
+          # Gemini calls are billed by Google and are not on this bill.
 
       # ----------------------------------------------------------------
       # 11. Open Memgraph Bolt ingress from the new Lambda SG
