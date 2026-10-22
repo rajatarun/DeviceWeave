@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 _RING_SECRET_ARN: str = os.environ.get("RING_SECRET_ARN", "")
 _RING_API_URL = "https://api.ring.com/clients_api"
+
+# Paths under _RING_API_URL, from ring_doorbell.const (0.9.x). Ring has no
+# per-device GET for a light: ring_doorbell reads led_status from the
+# ring_devices listing (DEVICES_ENDPOINT), indexed by family and id, and
+# switches the light with LIGHTS_ENDPOINT, which is under doorbots/ for every
+# family. GET other/{id} or stickup_cams/{id} answers 404.
+_DEVICES_PATH = "ring_devices"
+_LIGHT_SWITCH_PATH = "doorbots/{0}/floodlight_light_{1}"
 _USER_AGENT = "android:com.ringapp:2.0.67(423)"
 
 _cred_cache: Optional[Dict[str, str]] = None
@@ -207,13 +215,13 @@ class RingAdapter(BaseDeviceProvider):
         if action == "turn_on":
             if device_type != "RingLight":
                 raise ValueError(f"turn_on not supported for '{device_type}'.")
-            await _api_put(session, token, hw_id, f"{category}/{ring_id}/floodlight_light_on")
+            await _api_put(session, token, hw_id, _LIGHT_SWITCH_PATH.format(ring_id, "on"))
             return {"state": "on", "changed": True}
 
         if action == "turn_off":
             if device_type != "RingLight":
                 raise ValueError(f"turn_off not supported for '{device_type}'.")
-            await _api_put(session, token, hw_id, f"{category}/{ring_id}/floodlight_light_off")
+            await _api_put(session, token, hw_id, _LIGHT_SWITCH_PATH.format(ring_id, "off"))
             return {"state": "off", "changed": True}
 
         if action == "set_brightness":
@@ -261,9 +269,17 @@ class RingAdapter(BaseDeviceProvider):
                 result["wifi_rssi"] = h["wifi_signal_strength"]
 
         else:  # RingLight
-            data = await _api_get(session, token, hw_id, f"{category}/{ring_id}")
+            listing = await _api_get(session, token, hw_id, _DEVICES_PATH)
+            data = _find_in_listing(listing, category, ring_id)
+            if data is None:
+                raise ProviderError(
+                    ring_id,
+                    f"Ring device not found in ring_devices (family '{category}').",
+                )
             logger.info("Ring light raw response: %s", json.dumps(data))
             desc = data.get("description", data)
+            if not isinstance(desc, dict):
+                desc = data
             led_status = desc.get("led_status", "")
             is_on = led_status == "on" or bool(desc.get("is_on", False))
             result["state"] = "on" if is_on else "off"
@@ -271,3 +287,15 @@ class RingAdapter(BaseDeviceProvider):
                 result["brightness"] = desc["brightness"]
 
         return result
+
+
+def _find_in_listing(
+    listing: Dict[str, Any], family: str, ring_id: str
+) -> Optional[Dict[str, Any]]:
+    """Return the ring_devices entry for ring_id, preferring its discovered family."""
+    families = [family] + [f for f in listing if f != family]
+    for name in families:
+        for entry in listing.get(name) or []:
+            if isinstance(entry, dict) and str(entry.get("id")) == str(ring_id):
+                return entry
+    return None
