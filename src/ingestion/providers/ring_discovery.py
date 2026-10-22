@@ -98,6 +98,27 @@ _SKIP_OTHER_KINDS = frozenset({
     "chime", "chime_v2", "chime_pro", "chime_pro_v2",
 })
 
+# Kinds ring-doorbell gives the LIGHT capability (stickup_cam.has_capability):
+# the floodlight and spotlight cameras. They are in the stickup_cams family,
+# and their light is switched at doorbots/{id}/floodlight_light_{on,off} and
+# reported as led_status in ring_devices -- exactly the RingLight paths in
+# ring_adapter. Registered as RingCamera they could not be switched at all.
+# Mirrors ring_doorbell.const; tests/test_ring_discovery_types.py fails if
+# the installed library disagrees.
+_LIGHT_CAM_KINDS = frozenset({
+    "hp_cam_v1", "floodlight_v2",          # Floodlight Cam
+    "floodlight_pro",                      # Floodlight Cam Pro
+    "cocoa_floodlight",                    # Floodlight Cam Plus
+    "stickup_cam_v4",                      # Spotlight Cam Battery
+    "hp_cam_v2", "spotlightw_v2",          # Spotlight Cam Wired
+    "cocoa_spotlight",                     # Spotlight Cam Plus
+    "stickup_cam_longfin",                 # Spotlight Cam Pro
+})
+
+# ring-doorbell's "other" family is intercoms. DeviceWeave has no intercom
+# actions, and registering one as a RingLight sent light commands to it.
+_INTERCOM_KINDS = frozenset({"intercom_handset_audio", "intercom_handset_video"})
+
 
 def _get_credentials() -> Optional[Dict[str, str]]:
     global _cred_cache
@@ -249,21 +270,13 @@ class RingDiscovery(AbstractDiscoveryProvider):
         now = datetime.now(timezone.utc).isoformat()
         records: List[DeviceRecord] = []
 
-        for device in raw.get("doorbots", []):
-            self._convert_and_append(device, "doorbots", "RingDoorbell", records, now)
-
-        for device in raw.get("authorized_doorbots", []):
-            self._convert_and_append(device, "doorbots", "RingDoorbell", records, now)
-
-        for device in raw.get("stickup_cams", []):
-            self._convert_and_append(device, "stickup_cams", "RingCamera", records, now)
-
-        for device in raw.get("other", []):
-            kind = device.get("kind", "")
-            if kind in _SKIP_OTHER_KINDS:
-                logger.debug("Skipping Ring other device kind=%r", kind)
-                continue
-            self._convert_and_append(device, "other", "RingLight", records, now)
+        families = (("doorbots", "doorbots"), ("authorized_doorbots", "doorbots"),
+                    ("stickup_cams", "stickup_cams"), ("other", "other"))
+        for family, category in families:
+            for device in raw.get(family, []):
+                device_type = _device_type(family, device)
+                if device_type is not None:
+                    self._convert_and_append(device, category, device_type, records, now)
 
         logger.info(
             "Ring discovery complete — %d device(s): %s",
@@ -332,6 +345,25 @@ class RingDiscovery(AbstractDiscoveryProvider):
                 "kind": device.get("kind", ""),
             },
         )
+
+
+def _device_type(family: str, device: Dict[str, Any]) -> Optional[str]:
+    """The DeviceWeave type for a ring_devices entry, or None to skip it."""
+    kind = device.get("kind", "")
+    if family in ("doorbots", "authorized_doorbots"):
+        return "RingDoorbell"
+    if family == "stickup_cams":
+        return "RingLight" if kind in _LIGHT_CAM_KINDS else "RingCamera"
+    if family == "other":
+        if kind in _SKIP_OTHER_KINDS:
+            logger.debug("Skipping Ring other device kind=%r", kind)
+            return None
+        if kind in _INTERCOM_KINDS:
+            logger.info("Skipping Ring intercom id=%s kind=%r: no intercom actions",
+                        device.get("id"), kind)
+            return None
+        return "RingLight"
+    return None
 
 
 def _capabilities(device_type: str) -> List[str]:
