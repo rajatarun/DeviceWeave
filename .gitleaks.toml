@@ -1,0 +1,19 @@
+# gitleaks configuration for the deploy workflow's `secrets` job.
+#
+# The default ruleset applies in full. Each allowlist below is scoped to one
+# file and/or one literal value, and says why the match is not a credential.
+# Never add a whole directory here: allowlist the specific finding, or
+# rotate the credential and remove it from history.
+
+[extend]
+useDefault = true
+
+# src/cipherweave_verify/VENDORED.json records the sha256 of each vendored
+# cipherweave_verify file. Keys such as "authz.py" / "bearer.py" trip the
+# generic-api-key rule, but the values are content hashes of public source
+# files, checked by scripts/sync_cipherweave_verify.sh, not credentials.
+[[allowlists]]
+description = "sha256 checksums of vendored cipherweave_verify files"
+condition = "AND"
+paths = ['''^src/cipherweave_verify/VENDORED\.json$''']
+regexes = ['''^[0-9a-f]{64}$''']

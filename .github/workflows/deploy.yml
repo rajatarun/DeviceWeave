@@ -41,6 +41,37 @@ jobs:
           python -m pip install pip-audit
           pip-audit -r src/requirements.txt --progress-spinner off --ignore-vuln PYSEC-2026-4114
 
+  # Committed credentials block the deploy, like a known-vulnerable
+  # dependency. gitleaks scans the full git history, not just HEAD, because a
+  # secret removed in a later commit is still published. The binary is a
+  # pinned release checked against its sha256 (not gitleaks-action, which
+  # needs a license key for org accounts). Every allowlisted finding is in
+  # .gitleaks.toml with the reason it is not a secret.
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GITLEAKS_VERSION: 8.28.0
+      GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfLo "$RUNNER_TEMP/$tarball" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+      - name: gitleaks (full history)
+        run: |
+          "$RUNNER_TEMP/gitleaks" version
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --exit-code 1 .
+
   # The suite runs offline (tests/conftest.py stubs AWS, Memgraph and the
   # network), so it gates every deploy: a red suite never ships.
   test:
@@ -61,7 +92,7 @@ jobs:
 
   deploy:
     name: Build & Deploy via AWS SAM
-    needs: [test, audit]
+    needs: [test, audit, secrets]
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
