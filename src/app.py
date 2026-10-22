@@ -958,6 +958,7 @@ def _execute_device(
                 "device_name": device["name"],
                 "action": action,
                 "rule_id": policy_decision.rule_id,
+                "error_code": "policy_blocked",
             },
         )
     if policy_decision.is_modified:
@@ -976,7 +977,10 @@ def _execute_device(
 
     result = results[0]
     if not result.success:
-        return _error(502, result.error, extra={"device_id": device["id"]})
+        return _error(
+            502, result.error,
+            extra={"device_id": device["id"], "error_code": result.error_code or "step_failed"},
+        )
 
     logger.info(
         "Executed via %s tier — %s/%s → %s (final=%.4f cosine=%.4f behavior=%.4f)",

@@ -1298,17 +1298,45 @@ def _tools_call(req_id: Any, params: Any) -> Dict[str, Any]:
     except InvalidParams as exc:
         # A tool execution error, not a protocol error, so the model can read
         # what was wrong with its arguments and retry (SEP-1303).
-        _audit_call(name, principal, "invalid_params", None)
+        _audit_call(name, principal, "invalid_params", "invalid_params")
         return _result(req_id, {"content": [{"type": "text", "text": str(exc)}], "isError": True})
-    except Exception:
+    except Exception as exc:
         logger.exception("Tool %s failed", name)
         service_response = {
             "statusCode": 500,
             "body": json.dumps({"error": "Tool execution failed"}),
         }
+        _audit_call(name, principal, "error", f"exception:{type(exc).__name__}")
+        return _result(req_id, _tool_result(service_response))
     result = _tool_result(service_response)
-    _audit_call(name, principal, "error" if result["isError"] else "ok", None)
+    if result["isError"]:
+        _audit_call(name, principal, "error", _failure_reason(service_response))
+    else:
+        _audit_call(name, principal, "ok", None)
     return _result(req_id, result)
+
+
+def _failure_reason(response: Any) -> str:
+    """
+    Short machine-readable reason for a failed tool call's audit line.
+
+    The service's ``error_code`` when it set one (``access_denied``,
+    ``provider_error:ProviderError``, ``policy_blocked``), else the HTTP
+    status. Never the error message, which can carry provider URLs.
+    """
+    if not isinstance(response, dict):
+        return "invalid_response"
+    body = response.get("body")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            body = None
+    if isinstance(body, dict):
+        code = body.get("error_code")
+        if isinstance(code, str) and code:
+            return code[:100]
+    return f"http_{response.get('statusCode')}"
 
 
 def _audit_call(

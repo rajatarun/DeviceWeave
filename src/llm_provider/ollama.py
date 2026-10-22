@@ -21,7 +21,7 @@ import logging
 import urllib.error
 import urllib.request
 
-from llm_provider.base import BaseLLMProvider
+from llm_provider.base import STOP_MAX_TOKENS, BaseLLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,8 @@ class OllamaLLMProvider(BaseLLMProvider):
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 body = json.loads(resp.read())
+            done = body.get("done_reason")
+            self.last_stop_reason = STOP_MAX_TOKENS if done == "length" else done
             text = body["message"]["content"].strip()
             logger.debug("Ollama (%s) response: %d chars", self._model, len(text))
             return text

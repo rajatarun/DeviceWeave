@@ -41,6 +41,8 @@ class StepResult:
     success: bool
     result: Dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    # Machine-readable failure class for audit lines; never the message.
+    error_code: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +136,7 @@ async def _execute_one(step: ExecutionStep) -> StepResult:
             action=step.action,
             success=False,
             error=denied,
+            error_code="access_denied",
         )
     try:
         provider = get_provider(device["device_type"])
@@ -160,6 +163,7 @@ async def _execute_one(step: ExecutionStep) -> StepResult:
             action=step.action,
             success=False,
             error=str(exc),
+            error_code=f"provider_error:{type(exc).__name__}",
         )
     except ValueError as exc:
         logger.error(
@@ -172,6 +176,7 @@ async def _execute_one(step: ExecutionStep) -> StepResult:
             action=step.action,
             success=False,
             error=str(exc),
+            error_code=f"step_error:{type(exc).__name__}",
         )
     except Exception as exc:
         logger.exception(
@@ -184,4 +189,5 @@ async def _execute_one(step: ExecutionStep) -> StepResult:
             action=step.action,
             success=False,
             error=f"Unexpected error: {exc}",
+            error_code=f"step_error:{type(exc).__name__}",
         )
