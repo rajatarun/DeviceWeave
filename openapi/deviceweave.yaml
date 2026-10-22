@@ -1211,6 +1211,44 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "503": { $ref: "#/components/responses/PolicyStoreUnconfigured" }
 
+  /.well-known/oauth-protected-resource:
+    get:
+      tags: [mcp]
+      operationId: mcpResourceMetadata
+      summary: RFC 9728 protected-resource metadata for /mcp
+      description: |
+        Unauthenticated. Names the authorization server (CipherWeave) that
+        mints tokens for `/mcp`, the scopes it understands, and DPoP
+        support. Every `401` from `/mcp` points here in its
+        `WWW-Authenticate` `resource_metadata` parameter. `404` when this
+        deployment has no CipherWeave configured.
+      security: []
+      responses:
+        "200":
+          description: Protected-resource metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [resource, authorization_servers]
+                properties:
+                  resource: { type: string }
+                  authorization_servers:
+                    type: array
+                    items: { type: string }
+                  scopes_supported:
+                    type: array
+                    items: { type: string }
+                  bearer_methods_supported:
+                    type: array
+                    items: { type: string }
+                  dpop_signing_alg_values_supported:
+                    type: array
+                    items: { type: string }
+                  audience: { type: string }
+        "404":
+          description: No CipherWeave authorization server configured
+
   /mcp:
     post:
       tags: [mcp]
@@ -1223,9 +1261,11 @@ paths:
         are answered with `202` and an empty body. JSON-RPC batches are
         rejected with `400`.
 
-        Requires `Authorization: Bearer <token>`. The token is the
+        Requires `Authorization: Bearer <token>` (a CipherWeave token, or the
         SecretString of the Secrets Manager secret named by the
-        `McpAuthTokenSecretName` stack parameter. A missing or wrong
+        `McpAuthTokenSecretName` stack parameter while legacy tokens are
+        accepted), or `Authorization: DPoP <token>` with a `DPoP` proof for a
+        sender-constrained CipherWeave token (RFC 9449). A missing or wrong
         token is `401` with a JSON-RPC error body. The comparison is
         constant-time. Existing REST routes are unchanged and do not use
         this token.

@@ -69,6 +69,7 @@ from cipherweave_verify import (
     DESTRUCTIVE,
     EXECUTE,
     READ,
+    WELL_KNOWN_PATH,
     AuthorizationError,
     BearerAuth,
     DynamoJtiLedger,
@@ -76,6 +77,10 @@ from cipherweave_verify import (
     StepUpRequiredError,
     ToolAuthorizer,
     ToolPolicy,
+    api_gateway_request,
+    default_authorization_server,
+    protected_resource_metadata,
+    www_authenticate,
 )
 
 import access_control
@@ -347,14 +352,47 @@ def _forbidden(req_id: Any, exc: AuthorizationError, policy: ToolPolicy) -> Dict
     )
 
 
-def _unauthorized(req_id: Any) -> Dict[str, Any]:
+_DPOP_REASONS = frozenset({"dpop_required", "invalid_dpop_proof", "token_not_dpop_bound"})
+
+
+def _unauthorized(
+    req_id: Any, event: Optional[Dict[str, Any]] = None, reason: Optional[str] = None
+) -> Dict[str, Any]:
+    # The challenge names where to get a token (RFC 9728) and switches to the
+    # DPoP scheme only when the presented token itself was DPoP-bound.
+    _method, _url, base = api_gateway_request(event or {})
+    challenge = www_authenticate(
+        realm=TOKEN_AUDIENCE,
+        error="invalid_token" if reason not in (None, "missing") else None,
+        resource_metadata=(base + WELL_KNOWN_PATH)
+        if base and default_authorization_server()
+        else None,
+        dpop=reason in _DPOP_REASONS,
+    )
     return _rpc_error(
         401,
         UNAUTHORIZED_CODE,
         "Unauthorized",
         req_id,
-        extra_headers={"WWW-Authenticate": 'Bearer realm="deviceweave"'},
+        extra_headers={"WWW-Authenticate": challenge},
     )
+
+
+def _resource_metadata(event: Dict[str, Any]) -> Dict[str, Any]:
+    """RFC 9728 document for /mcp. 404 when no CipherWeave is configured."""
+    server = default_authorization_server()
+    _method, _url, base = api_gateway_request(event)
+    if not server or not base:
+        return _response(404, {"error": "not_found"})
+    document = protected_resource_metadata(
+        resource=base + "/mcp",
+        authorization_servers=[server],
+        scopes_supported=["destructive", "execute", "read"],
+        resource_name="DeviceWeave",
+    )
+    # RFC 9728 names the resource by URL; CipherWeave mints for Weave names.
+    document["audience"] = TOKEN_AUDIENCE
+    return _response(200, document)
 
 
 def _rejected(req_id: Any, rejection: mcp_era.Rejection) -> Dict[str, Any]:
@@ -1364,10 +1402,14 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         event.get("requestContext", {}).get("http", {}).get("method", "POST")
     ).upper()
     headers = _normalize_headers(event.get("headers"))
+    if str(event.get("rawPath") or "").rstrip("/").endswith(WELL_KNOWN_PATH):
+        if method != "GET":
+            return _response(405, {"error": "method_not_allowed"})
+        return _resource_metadata(event)
 
-    provided = _bearer_token(headers)
     try:
-        decision = _AUTH.check(provided)
+        # Bearer or DPoP scheme, and the DPoP proof over this method and URL.
+        decision = _AUTH.check_event(event)
     except McpAuthUnavailable:
         # Only reached on the legacy path: the token was not an acceptable
         # JWT and the static secret could not be read.
@@ -1376,9 +1418,9 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return _rpc_error(500, -32603, "MCP authentication is unavailable", req_id)
 
     if not decision.ok:
-        logger.warning("MCP unauthorized")
+        logger.warning("MCP unauthorized reason=%s", decision.reason)
         req_id = _peek_id(event) if method == "POST" else None
-        return _unauthorized(req_id)
+        return _unauthorized(req_id, event, decision.reason)
 
     if method == "GET":
         return _rpc_error(

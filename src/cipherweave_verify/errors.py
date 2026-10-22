@@ -83,3 +83,19 @@ class VerifierNotConfiguredError(TokenVerificationError):
     """No JWKS URL or issuer configured. Fail closed."""
 
     reason = "not_configured"
+
+
+class InvalidDPoPProofError(TokenVerificationError):
+    """A DPoP proof is missing a check it must pass (RFC 9449 §4.3)."""
+
+    reason = "invalid_dpop_proof"
+
+
+class DPoPRequiredError(TokenVerificationError):
+    """The token is bound to a key (``cnf.jkt``) and the request carries no proof.
+
+    Answered as a 401 with a ``DPoP`` challenge: without the proof, the
+    request is indistinguishable from one made with a stolen token.
+    """
+
+    reason = "dpop_required"

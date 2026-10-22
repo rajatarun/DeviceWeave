@@ -1319,6 +1319,13 @@ Resources:
             ApiId: !Ref DeviceWeaveApi
             Path: /mcp
             Method: GET
+        # RFC 9728: where to get a token for /mcp. Unauthenticated by design.
+        McpResourceMetadataGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DeviceWeaveApi
+            Path: /.well-known/oauth-protected-resource
+            Method: GET
 
   DeviceWeaveMcpFunctionLogGroup:
     Type: AWS::Logs::LogGroup

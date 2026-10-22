@@ -79,6 +79,12 @@ class ReplayedTokenError(AuthorizationError):
     reason = "token_replayed"
 
 
+class DelegationNotAllowedError(AuthorizationError):
+    """A delegated (token-exchange) token asked for a tool that must be called first-hand."""
+
+    reason = "delegation_not_allowed"
+
+
 class LedgerUnavailableError(AuthorizationError):
     """The jti ledger could not be written. Fail closed: no replay check, no call."""
 
@@ -89,6 +95,15 @@ class LedgerUnavailableError(AuthorizationError):
 class ToolPolicy:
     scope: str
     step_up: bool = False
+    # May a token obtained by RFC 8693 exchange -- an agent acting on someone
+    # else's behalf -- call this tool? Defaults to "only if it is not a
+    # step-up tool": a destructive call is the confused deputy's payoff, so it
+    # has to come from the principal itself unless a Weave opts in by name.
+    delegable: bool | None = None
+
+    @property
+    def allows_delegation(self) -> bool:
+        return (not self.step_up) if self.delegable is None else self.delegable
 
     def __post_init__(self) -> None:
         if self.scope not in TOOL_SCOPES:
@@ -110,10 +125,19 @@ class Principal:
     issued_at: int | None = None  # None for the legacy token: never fresh
     expires_at: int | None = None
     jti: str | None = None
+    # Delegation chain from the token's ``act`` claim, current actor first.
+    actors: tuple[str, ...] = ()
+    # True when the token was key-bound and its DPoP proof checked.
+    dpop_bound: bool = False
 
     def log_fields(self) -> dict[str, Any]:
         """Identifiers for an audit line. jti names a token; it is not one."""
-        return {"method": self.method, "sub": self.subject, "jti": self.jti}
+        fields: dict[str, Any] = {"method": self.method, "sub": self.subject, "jti": self.jti}
+        if self.actors:
+            fields["act"] = list(self.actors)
+        if self.dpop_bound:
+            fields["dpop"] = True
+        return fields
 
 
 def legacy_scopes() -> frozenset[str]:
@@ -220,6 +244,12 @@ class ToolAuthorizer:
                 )
             else:
                 raise ScopeRequiredError(f"{what} requires scope {policy.scope}")
+        if principal.actors and not policy.allows_delegation:
+            # Enforced in audit mode too, like step-up: audit mode rolls out
+            # scope grants, it does not widen what a deputy may do.
+            raise DelegationNotAllowedError(
+                f"{what} cannot be called with a delegated token; the principal must call it"
+            )
         if policy.step_up:
             self._step_up(principal, what)
 
