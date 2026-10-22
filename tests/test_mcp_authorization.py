@@ -303,3 +303,56 @@ def test_template_wires_scopes_and_a_put_only_jti_ledger():
     assert "DeleteItem" not in ledger_grant and "UpdateItem" not in ledger_grant
     workflow = (root / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
     assert "ToolScopeMode=" in workflow
+
+
+# ---------------------------------------------------------------------------
+# Audit reason for failed execute calls
+# ---------------------------------------------------------------------------
+
+def _execute_events(token, device, action, caplog, monkeypatch):
+    import app
+
+    def _route_execute(_event):
+        return app._execute_device(device, action, {}, f"{action} {device['name']}", 0.9, "cosine")
+
+    monkeypatch.setattr(app, "_route_execute", _route_execute)
+    with caplog.at_level(logging.INFO, logger="mcp_handler"):
+        response = _call(token, "execute", {"command": f"{action} {device['name']}"})
+    events = [
+        json.loads(r.getMessage())
+        for r in caplog.records
+        if r.name == "mcp_handler" and '"mcp_tool_call"' in r.getMessage()
+    ]
+    return response, events
+
+
+def test_execute_refused_by_physical_access_is_audited_with_a_reason(
+    cw_issuer, fresh_token, provider, caplog, monkeypatch
+):
+    token = fresh_token(("execute",))
+    response, events = _execute_events(token, LOCK, "unlock", caplog, monkeypatch)
+    assert json.loads(response["body"])["result"]["isError"] is True
+    assert [(e["tool"], e["outcome"], e["reason"]) for e in events] == [
+        ("execute", "error", "access_denied"),
+    ]
+    assert provider == []
+    for part in token.split("."):
+        assert part not in caplog.text
+
+
+def test_execute_provider_failure_is_audited_with_the_exception_class(
+    cw_issuer, fresh_token, caplog, monkeypatch
+):
+    from providers import ProviderError
+
+    class _Failing:
+        async def execute(self, device, action, params):
+            raise ProviderError(device["id"], "Ring action 'get_status' failed: 404, url='https://x'")
+
+    monkeypatch.setattr(execution_planner, "get_provider", lambda _t: _Failing())
+    token = fresh_token(("execute",))
+    _, events = _execute_events(token, LAMP, "turn_on", caplog, monkeypatch)
+    assert [(e["tool"], e["outcome"], e["reason"]) for e in events] == [
+        ("execute", "error", "provider_error:ProviderError"),
+    ]
+    assert "https://x" not in events[0]["reason"]

@@ -1449,6 +1449,9 @@ components:
       required: [error]
       properties:
         error: { type: string }
+        error_code:
+          type: string
+          description: Machine-readable failure class (access_denied, policy_blocked, provider_error:<class>) when the failure came from a device step or policy.
 
     RoomCheckin:
       type: object
