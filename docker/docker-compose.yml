@@ -9,7 +9,7 @@ version: "3.9"
 #   dynamodb-local DynamoDB replacement (in-memory, persists while running)
 #   init-tables    One-shot: creates DynamoDB tables then exits
 #   ollama         Local LLM inference; pulls llama3.2 on first start
-#   app            Python 3.11 + Apache2 + mod_wsgi  →  http://localhost:8080
+#   app            Python 3.12 + Apache2 + mod_wsgi  →  http://localhost:8080
 #
 # Quick start
 # -----------
@@ -133,7 +133,7 @@ services:
       start_period: 120s
 
   # --------------------------------------------------------------------------
-  # DeviceWeave app — Python 3.11 + Apache2 + mod_wsgi
+  # DeviceWeave app — Python 3.12 + Apache2 + mod_wsgi
   # API available at http://localhost:8080
   # --------------------------------------------------------------------------
   app:

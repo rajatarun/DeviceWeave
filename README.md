@@ -773,7 +773,7 @@ DeviceWeave/
 │   └── workflows/
 │       └── deploy.yml               GitHub Actions CI/CD
 ├── docker/
-│   ├── Dockerfile                   Python 3.11 + Apache2 + mod_wsgi image
+│   ├── Dockerfile                   Python 3.12 + Apache2 + mod_wsgi image
 │   ├── docker-compose.yml           Local dev stack (DynamoDB Local, Memgraph, Ollama, app)
 │   ├── init_tables.py               One-shot DynamoDB Local table provisioner
 │   └── wsgi_handler.py              mod_wsgi adapter — HTTP request → Lambda event
@@ -852,7 +852,7 @@ DeviceWeave/
 ### Prerequisites
 
 - AWS account with Lambda, API Gateway, DynamoDB, CloudFormation, IAM, S3 permissions
-- Python 3.11
+- Python 3.12
 - Devices on the same LAN as the Lambda execution environment (or routed via VPC/VPN)
 
 ### AWS OIDC setup (one-time, per account)
@@ -1288,7 +1288,7 @@ sam local invoke DeviceWeaveFunction \
   --event '{"requestContext":{"http":{"method":"POST","path":"/execute"}},"body":"{\"command\":\"starting work\"}"}'
 ```
 
-`boto3` is pre-installed in the Lambda Python 3.11 runtime and is *also* pinned in `src/requirements.txt` (`boto3>=1.26.0`, added with the MCP Observatory telemetry path), so SAM bundles it — roughly 10 MB of the deployment package. See DECISIONS.md #12 for the trade-off.
+`boto3` is pre-installed in the Lambda Python 3.12 runtime and is *also* pinned in `src/requirements.txt` (`boto3>=1.26.0`, added with the MCP Observatory telemetry path), so SAM bundles it — roughly 10 MB of the deployment package. See DECISIONS.md #12 for the trade-off.
 
 ## Cost attribution
 

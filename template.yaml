@@ -4,7 +4,7 @@ Description: DeviceWeave IoT Pay-Per-Request Execution System
 
 Globals:
   Function:
-    Runtime: python3.11
+    Runtime: python3.12
     Timeout: 30
     MemorySize: 256
     Environment:

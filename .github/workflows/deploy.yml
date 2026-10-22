@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
       - name: pip-audit
         run: |
           # PYSEC-2026-4114: oauthlib server-side PKCE timing leak (token endpoint); DeviceWeave only uses oauthlib as a client through ring-doorbell, which pins oauthlib<4 so the 4.0.0 fix cannot be installed
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
       - name: Install test dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Run tests
@@ -106,10 +106,10 @@ jobs:
       # ----------------------------------------------------------------
       # 2. Python — must match Lambda runtime declared in template.yaml
       # ----------------------------------------------------------------
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       # ----------------------------------------------------------------
       # 3. Install AWS SAM CLI
