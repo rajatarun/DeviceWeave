@@ -43,7 +43,16 @@ _VALID_MODES = {m.value for m in SyncMode}
 
 
 def handler(event: Dict[str, Any], context: Any) -> Any:
-    """Lambda entry point — dispatch to _run() and shape the response."""
+    """Lambda entry point — dispatch to _run() and shape the response.
+
+    POST /ingest needs a destructive-scoped token (``rest_auth``); the
+    scheduled EventBridge invocations are not HTTP and are not checked.
+    """
+    import rest_auth
+
+    refusal, _principal = rest_auth.check(event)
+    if refusal is not None:
+        return refusal
     payload = _extract_payload(event)
 
     provider: str = payload.get("provider", "kasa").strip().lower()

@@ -114,6 +114,24 @@ LLM_CONFIDENCE_THRESHOLD = _resolve_threshold("LLM_CONFIDENCE_THRESHOLD")
 # ---------------------------------------------------------------------------
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    # Every route but GET /health needs the /mcp credential and a scope
+    # (rest_auth). The principal is bound for the physical-access gate in
+    # execution_planner, so POST /execute unlocks exactly when MCP would.
+    import rest_auth
+
+    refusal, principal = rest_auth.check(event)
+    if refusal is not None:
+        return refusal
+    if principal is None:
+        return _handle(event, context)
+    import access_control
+    import mcp_handler
+
+    with access_control.bind(access_control.RequestAuth(principal, mcp_handler._AUTHORIZER)):
+        return _handle(event, context)
+
+
+def _handle(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     ctx = event.get("requestContext", {}).get("http", {})
     method: str = ctx.get("method", "POST").upper()
     path: str = ctx.get("path", "/execute")

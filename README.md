@@ -329,7 +329,7 @@ The URL is the `McpEndpoint` stack output:
 https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp
 ```
 
-Existing REST routes are unchanged and do not use this token.
+The REST routes take the same credential (`src/rest_auth.py`): every route but `GET /health` needs a CipherWeave token for `deviceweave` (or the static token while `AcceptLegacyToken` is true) and the route's scope — `read` for every GET, `execute` for `/execute`, `/learn`, `POST /presence`, `PUT /devices/{id}`, `DELETE /learnings` and `/policies/author`, `destructive` for deleting a device, scene or policy and for `POST /ingest`. A delegated token cannot use the destructive routes. `RestAuthMode=audit` (repository variable `REST_AUTH_MODE`) lets read and execute routes through with a log line while REST clients are given a token; destructive routes are enforced in both modes. Before this the REST API answered anyone holding its URL.
 
 ### Tools
 

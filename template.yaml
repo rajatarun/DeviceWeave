@@ -10,6 +10,16 @@ Globals:
     Environment:
       Variables:
         LOG_LEVEL: INFO
+        # The REST routes take the /mcp credential (rest_auth.py), so every
+        # function that serves one needs the verifier's settings. The legacy
+        # secret is readable only by the functions granted it below.
+        MCP_AUTH_TOKEN_SECRET_NAME: !Ref McpAuthTokenSecretName
+        CIPHERWEAVE_JWKS_URL: !Ref CipherWeaveJwksUrl
+        CIPHERWEAVE_JWKS: !Ref CipherWeaveJwks
+        CIPHERWEAVE_ISSUER: !Ref CipherWeaveIssuer
+        ACCEPT_LEGACY_TOKEN: !Ref AcceptLegacyToken
+        LEGACY_TOKEN_SCOPES: !Ref LegacyTokenScopes
+        REST_AUTH_MODE: !Ref RestAuthMode
         BEDROCK_PROFILE_ARNS: !Sub '{"us.anthropic.claude-haiku-4-5-20251001-v1:0": "${BedrockProfileClaudeHaiku45.InferenceProfileArn}", "us.amazon.nova-pro-v1:0": "${BedrockProfileNovaPro.InferenceProfileArn}", "us.meta.llama3-3-70b-instruct-v1:0": "${BedrockProfileLlama3370B.InferenceProfileArn}"}'
         BEDROCK_COST_ATTRIBUTION: !Ref BedrockCostAttribution
         LEARNING_TABLE_NAME: !Ref LearningTable
@@ -363,6 +373,16 @@ Parameters:
       set-scopes). Step-up (60 s, single-use jti) for destructive tools and
       unlock/open is enforced in both modes.
 
+  RestAuthMode:
+    Type: String
+    Default: "enforce"
+    AllowedValues: ["enforce", "audit"]
+    Description: >
+      enforce: every REST route but GET /health needs the /mcp credential and
+      the route's scope. audit: read and execute routes log what would be
+      refused and run anyway, while REST clients are given a token.
+      Destructive routes are enforced in both modes.
+
   LegacyTokenScopes:
     Type: String
     Default: "read execute destructive"
@@ -539,6 +559,8 @@ Resources:
         # otherwise.
         Ipv6AllowedForDualStack: !If [LambdaDualStack, true, false]
       Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${McpAuthTokenSecretName}-*"
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
             TableName: !Ref LearningTable
@@ -749,6 +771,8 @@ Resources:
           MEMGRAPH_PORT: !Ref MemgraphPort
           MEMGRAPH_SECRET_ARN: !Ref MemgraphSecretArn
       Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${McpAuthTokenSecretName}-*"
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
             TableName: !Ref DeviceRegistryTable
@@ -1113,6 +1137,8 @@ Resources:
         # otherwise.
         Ipv6AllowedForDualStack: !If [LambdaDualStack, true, false]
       Policies:
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${McpAuthTokenSecretName}-*"
         - CloudWatchLogsFullAccess
         - DynamoDBCrudPolicy:
             TableName: !Ref PolicyTable

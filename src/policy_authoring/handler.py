@@ -107,6 +107,15 @@ def _json_dumps(payload: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    import rest_auth
+
+    refusal, _principal = rest_auth.check(event)
+    if refusal is not None:
+        return refusal
+    return _handle(event, context)
+
+
+def _handle(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     ctx = event.get("requestContext", {}).get("http", {})
     method: str = ctx.get("method", "POST").upper()
     path: str = ctx.get("path", "/policies/author")

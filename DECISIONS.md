@@ -476,3 +476,15 @@ Unlock is not a tool: `execute` takes natural language, and only the resolver kn
 A refusal is HTTP 403 with `WWW-Authenticate: Bearer error="insufficient_scope", scope=…` or `error="insufficient_user_authentication", max_age="60"` (RFC 6750, RFC 9470). Every `tools/call` and every physical-access step logs one JSON line with the token's `sub` and `jti`. `ToolScopeMode=audit` (repository variable `TOOL_SCOPE_MODE`) logs scope failures instead of refusing them, for the window while existing clients are granted scopes; step-up stays enforced in both modes.
 
 **Rejected**: requiring `destructive` + step-up for all of `execute` (every lamp would need a 60-second token); gating unlock in the MCP handler by guessing from the command text; letting the REST route keep unlocking without a token because it has no authorizer (it has none — that is the bigger hole, and closing the door path there is the part that cannot wait for an API authorizer); an in-process jti set (one per Lambda instance, so a replay to a second instance passes); treating scopes as a ladder.
+
+---
+
+## 41. The REST API takes the /mcp credential, and a scope per route
+
+**Chosen**: `rest_auth.check` runs first in the three functions that serve REST routes (`app`, `policy_authoring.handler`, `ingestion_handler`). Every route but `GET /health` needs what `/mcp` needs — a CipherWeave token for `deviceweave` (Bearer, or DPoP with its proof) or the legacy static token while `AcceptLegacyToken` is true — decided by the same `BearerAuth`, so the two doors cannot disagree. Each route then needs a scope: `read` for GETs, `execute` for writes, `destructive` (no step-up; not delegable) for deleting a device, scene or policy and for an ingest. An unlisted write route needs `execute`, never less. For `/execute` the principal is bound into `access_control`, so the REST route unlocks exactly when the MCP tool would — previously it could never unlock (no principal), and now it can only with the same fresh token. A non-HTTP invocation (the scheduled ingest) is IAM-authorized and is not checked.
+
+**Why now**: ADR 40 recorded the REST API as "the bigger hole" and closed only the door path. The rest stayed open: anyone with the API URL — which is in the stack outputs, the OpenAPI document and every client's configuration — could switch devices, read who is home from `/presence`, delete devices, and rewrite the automation policies that `policy_engine` enforces.
+
+**Rollout**: `RestAuthMode` (repository variable `REST_AUTH_MODE`) is `enforce` by default. `audit` lets read and execute routes through with a log line, for the window while existing REST clients are given a token; destructive routes and the delegation rule are enforced in both modes.
+
+**Rejected**: an API Gateway authorizer (a second implementation of the token check, and the SIWE authorizer answers a different question — a human wallet session, not an agent token); leaving `GET /presence` public (it is the most sensitive read on the API: whether the house is empty); step-up on REST deletes (the REST functions have no jti ledger, and a deleted device comes back on the next ingest).
