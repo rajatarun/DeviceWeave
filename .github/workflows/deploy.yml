@@ -418,8 +418,17 @@ jobs:
       #     the argv SAM receives: EeroPollSchedule="rate(5 minutes)".
       # ----------------------------------------------------------------
       - name: SAM deploy
+        env:
+          ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
         run: |
           # An empty value needs the ParameterKey= form (see note above).
+          # Ops alerts go to the repository variable ALERT_EMAIL; unset keeps
+          # the topic and alarm with no email subscription.
+          if [ -n "$ALERT_EMAIL" ]; then
+            ALERT_ARG="AlertEmail=$ALERT_EMAIL"
+          else
+            ALERT_ARG='ParameterKey=AlertEmail,ParameterValue=""'
+          fi
           JWKS_URL="${{ steps.cipherweave.outputs.jwks_url }}"
           JWKS_B64="${{ steps.cipherweave.outputs.jwks_b64 }}"
           if [ -n "$JWKS_B64" ]; then
@@ -461,6 +470,7 @@ jobs:
               "AcceptLegacyToken=${ACCEPT_LEGACY_TOKEN:-true}" \
               "ToolScopeMode=$([ "${TOOL_SCOPE_MODE}" = audit ] && echo audit || echo enforce)" \
               "RestAuthMode=$([ "${REST_AUTH_MODE}" = audit ] && echo audit || echo enforce)" \
+              "$ALERT_ARG" \
             --tags repo=DeviceWeave
           # repo=<RepoName> on the stack is copied onto every resource it
           # creates, so Cost Explorer splits the bill by repository; the
