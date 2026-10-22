@@ -442,6 +442,14 @@ Parameters:
       the eero session token. Must not be blank. Create the secret before
       calibrating a room. Do not put the key in this template.
 
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: >
+      Address subscribed to the ops alerts topic (error lines in any function
+      log). Empty: the topic and alarm exist, with no email subscription. Set
+      with the repository variable ALERT_EMAIL.
+
 Resources:
   # One application inference profile per model this stack's calls can resolve
   # to. A call through it is billed with its tags, so model spend lands under
@@ -1527,6 +1535,124 @@ Resources:
       RetentionInDays: 14
 
   # -------------------------------------------------------------------
+  # Ops alerts: error lines in any function log
+  #
+  # Errors here are mostly caught and logged (a provider failure is a 502,
+  # an expired Ring token a logged auth error), so Lambda's Errors metric
+  # does not see them. Each function's log feeds one ErrorLines metric (one
+  # custom metric, not one per function) and one alarm watches it. SNS
+  # notifies on the change to ALARM.
+  # -------------------------------------------------------------------
+  OpsAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "deviceweave-ops-alerts-${StageName}"
+      KmsMasterKeyId: alias/aws/sns
+
+  OpsAlertsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref OpsAlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  DeviceWeaveFunctionErrorLines:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref DeviceWeaveFunctionLogGroup
+      FilterPattern: '?"[ERROR]" ?"Task timed out" ?"Runtime.ExitError"'
+      MetricTransformations:
+        - MetricNamespace: DeviceWeave/Ops
+          MetricName: ErrorLines
+          MetricValue: "1"
+          Unit: Count
+
+  DeviceWeaveIngestionFunctionErrorLines:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref DeviceWeaveIngestionFunctionLogGroup
+      FilterPattern: '?"[ERROR]" ?"Task timed out" ?"Runtime.ExitError"'
+      MetricTransformations:
+        - MetricNamespace: DeviceWeave/Ops
+          MetricName: ErrorLines
+          MetricValue: "1"
+          Unit: Count
+
+  EeroPresenceFunctionErrorLines:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref EeroPresenceFunctionLogGroup
+      FilterPattern: '?"[ERROR]" ?"Task timed out" ?"Runtime.ExitError"'
+      MetricTransformations:
+        - MetricNamespace: DeviceWeave/Ops
+          MetricName: ErrorLines
+          MetricValue: "1"
+          Unit: Count
+
+  EeroCalibrationFunctionErrorLines:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref EeroCalibrationFunctionLogGroup
+      FilterPattern: '?"[ERROR]" ?"Task timed out" ?"Runtime.ExitError"'
+      MetricTransformations:
+        - MetricNamespace: DeviceWeave/Ops
+          MetricName: ErrorLines
+          MetricValue: "1"
+          Unit: Count
+
+  PolicyAuthoringFunctionErrorLines:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref PolicyAuthoringFunctionLogGroup
+      FilterPattern: '?"[ERROR]" ?"Task timed out" ?"Runtime.ExitError"'
+      MetricTransformations:
+        - MetricNamespace: DeviceWeave/Ops
+          MetricName: ErrorLines
+          MetricValue: "1"
+          Unit: Count
+
+  DeviceWeaveMcpFunctionErrorLines:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref DeviceWeaveMcpFunctionLogGroup
+      FilterPattern: '?"[ERROR]" ?"Task timed out" ?"Runtime.ExitError"'
+      MetricTransformations:
+        - MetricNamespace: DeviceWeave/Ops
+          MetricName: ErrorLines
+          MetricValue: "1"
+          Unit: Count
+
+  DeviceWeaveSmsFunctionErrorLines:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref DeviceWeaveSmsFunctionLogGroup
+      FilterPattern: '?"[ERROR]" ?"Task timed out" ?"Runtime.ExitError"'
+      MetricTransformations:
+        - MetricNamespace: DeviceWeave/Ops
+          MetricName: ErrorLines
+          MetricValue: "1"
+          Unit: Count
+
+  ErrorLinesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "deviceweave-error-lines-${StageName}"
+      AlarmDescription: >
+        A DeviceWeave function logged an [ERROR], timed out or crashed in the
+        last 5 minutes. Find it with Logs Insights over
+        /aws/lambda/deviceweave-*: filter @message like /\[ERROR\]|Task timed out/.
+      Namespace: DeviceWeave/Ops
+      MetricName: ErrorLines
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OpsAlertsTopic]
+
+  # -------------------------------------------------------------------
   # DynamoDB — Phrase Learning Store
   # -------------------------------------------------------------------
   LearningTable:
@@ -1790,6 +1916,7 @@ Resources:
           KeyType: HASH
 
 Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
   HasObservatoryTable: !Not [!Equals [!Ref ObservatoryMetricsTableName, ""]]
   HasMemgraphSecret: !Not [!Equals [!Ref MemgraphSecretArn, ""]]
   # A non-empty LambdaPublicSubnetIds used to replace the private subnets
