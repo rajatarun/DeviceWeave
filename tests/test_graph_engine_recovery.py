@@ -5,7 +5,9 @@ IP. Before this, "not found" was cached for the life of a warm container, so a
 container that started during an outage never used Memgraph again, and a
 cached driver kept a dead IP. These tests drive the module's connection state
 with a fake clock, a fake EC2 and a fake Bolt driver; the conftest stubs only
-replace the public functions, so the originals are taken at import time.
+replace the public functions, so the originals are taken at import time. The
+neo4j package is a runtime dependency the test environment does not install,
+so a stand-in with its two exception types is put in sys.modules.
 """
 from __future__ import annotations
 
@@ -13,9 +15,21 @@ import sys
 import types
 
 import pytest
-from neo4j.exceptions import ServiceUnavailable
 
 import graph_engine as ge
+
+
+class ServiceUnavailable(Exception):
+    """neo4j.exceptions.ServiceUnavailable stand-in."""
+
+
+class SessionExpired(Exception):
+    """neo4j.exceptions.SessionExpired stand-in."""
+
+
+_exceptions = types.ModuleType("neo4j.exceptions")
+_exceptions.ServiceUnavailable = ServiceUnavailable
+_exceptions.SessionExpired = SessionExpired
 
 QUERY_HISTORY = ge.query_behavior_history
 QUERY_TOP = ge.query_top_actions
@@ -100,11 +114,11 @@ def world(monkeypatch):
     monkeypatch.setattr(ge, "_retry_after", 0.0)
     monkeypatch.setattr(ge, "_cred_cache", {"username": "", "password": ""})
     monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=lambda name: ec2))
-    real_neo4j = sys.modules.get("neo4j")
     fake = types.ModuleType("neo4j")
     fake.GraphDatabase = bolt
-    fake.exceptions = real_neo4j.exceptions
+    fake.exceptions = _exceptions
     monkeypatch.setitem(sys.modules, "neo4j", fake)
+    monkeypatch.setitem(sys.modules, "neo4j.exceptions", _exceptions)
     return clock, ec2, bolt
 
 
@@ -171,7 +185,8 @@ def test_the_background_writer_drops_a_lost_connection_too(world):
     assert ge._driver is None and bolt.closed == ["10.0.0.5"]
 
 
-def test_errors_that_mean_the_server_is_gone():
+def test_errors_that_mean_the_server_is_gone(world):
     assert ge._connection_lost(ServiceUnavailable("x"))
+    assert ge._connection_lost(SessionExpired("x"))
     assert ge._connection_lost(ConnectionResetError())
     assert not ge._connection_lost(ValueError("syntax"))
