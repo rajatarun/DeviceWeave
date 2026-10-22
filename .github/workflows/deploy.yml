@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - main
+  # Pull requests run every check except the deploy, so a PR is tested
+  # before it merges rather than after.
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       stage:
@@ -93,6 +98,7 @@ jobs:
   deploy:
     name: Build & Deploy via AWS SAM
     needs: [test, audit, secrets]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
