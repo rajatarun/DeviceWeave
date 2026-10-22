@@ -15,16 +15,20 @@ Cost profile: ~100–200 tokens per call at Haiku 4.5 rates (~$0.0002/call).
 
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import weather_client
 from llm_provider import get_llm_provider
+from llm_provider.base import STOP_MAX_TOKENS
 
 logger = logging.getLogger(__name__)
 
 _CENTRAL_TZ = ZoneInfo("America/Chicago")
+_MAX_OUTPUT_TOKENS = 4096
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 _SYSTEM_PROMPT = """\
 You are a home automation assistant. Given a user's natural-language command, \
@@ -101,19 +105,22 @@ def llm_resolve(
         f"Return the JSON object."
     )
 
-    # Budget: ~20 tokens per device in the worst case (all devices returned) +
-    # ~100 fixed overhead for confidence/reasoning/JSON structure.
-    max_tokens = max(256, len(devices) * 20 + 100)
+    max_tokens = _output_budget(devices)
 
     try:
         llm = get_llm_provider()
         logger.debug("LLM resolver using provider: %s", llm.model_id)
         text = llm.invoke(_SYSTEM_PROMPT, user_msg, max_tokens=max_tokens)
 
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        if getattr(llm, "last_stop_reason", None) == STOP_MAX_TOKENS:
+            # The JSON is cut off; parsing it only produces a decode traceback.
+            logger.error(
+                "LLM resolver output truncated at max_tokens=%d (%d devices, %d chars) for %r",
+                max_tokens, len(devices), len(text), query,
+            )
+            return None
 
-        raw = json.loads(text)
+        raw = json.loads(_extract_json(text))
         result = _normalise(raw)
 
         logger.info(
@@ -126,6 +133,30 @@ def llm_resolve(
     except Exception as exc:
         logger.error("LLM resolver failed for %r: %s", query, exc, exc_info=True)
         return None
+
+
+def _output_budget(devices: List[Dict[str, Any]]) -> int:
+    """
+    Output tokens for a step per device ("for every device ..." returns all).
+
+    A step is ~15 tokens of JSON plus the id, which runs to ~25 tokens for a
+    40-hex Kasa id, so budget the ids by length (~3 chars a token). The old
+    flat 20 per device cut those requests off mid-string. Capped well under
+    every pinnable model's output limit.
+    """
+    per_device = sum(20 + len(str(d.get("id", ""))) // 3 for d in devices)
+    return min(_MAX_OUTPUT_TOKENS, max(256, per_device + 200))
+
+
+def _extract_json(text: str) -> str:
+    """Strip a ``` fence or prose around the object the prompt asked for."""
+    fenced = _FENCE_RE.search(text)
+    if fenced:
+        text = fenced.group(1)
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        return text[start:end + 1]
+    return text.strip()
 
 
 def _normalise(raw: Dict[str, Any]) -> Dict[str, Any]:

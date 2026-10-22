@@ -44,6 +44,7 @@ class BedrockLLMProvider(BaseLLMProvider):
             messages=[{"role": "user", "content": [{"text": user_message}]}],
             inferenceConfig={"maxTokens": max_tokens},
         )
+        self.last_stop_reason = resp.get("stopReason")
         blocks = resp.get("output", {}).get("message", {}).get("content", [])
         text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict)).strip()
         logger.debug("Bedrock (%s) response: %d chars", used, len(text))

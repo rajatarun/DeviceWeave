@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
-from llm_provider.base import BaseLLMProvider
+from llm_provider.base import STOP_MAX_TOKENS, BaseLLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,8 @@ class GeminiLLMProvider(BaseLLMProvider):
             raise RuntimeError(f"Gemini unreachable: {exc}") from exc
 
         try:
+            finish = payload["candidates"][0].get("finishReason")
+            self.last_stop_reason = STOP_MAX_TOKENS if finish == "MAX_TOKENS" else finish
             text = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
         except (KeyError, IndexError) as exc:
             raise RuntimeError(

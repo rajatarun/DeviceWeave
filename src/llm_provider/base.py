@@ -9,7 +9,15 @@ setting LLM_PROVIDER=bedrock|ollama (default: bedrock).
 from abc import ABC, abstractmethod
 
 
+# Normalised stop reason a provider records when its output hit max_tokens.
+STOP_MAX_TOKENS = "max_tokens"
+
+
 class BaseLLMProvider(ABC):
+
+    # Why the last invoke() stopped, normalised to STOP_MAX_TOKENS when the
+    # output was cut at the token budget; None when the backend did not say.
+    last_stop_reason = None
 
     @abstractmethod
     def invoke(self, system_prompt: str, user_message: str, max_tokens: int = 512) -> str:
