@@ -22,8 +22,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The suite runs offline (tests/conftest.py stubs AWS, Memgraph and the
+  # network), so it gates every deploy: a red suite never ships.
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest
+
   deploy:
     name: Build & Deploy via AWS SAM
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -54,6 +73,9 @@ jobs:
       # granted scopes (issuer_admin.py set-scopes); anything else enforces.
       # Step-up for destructive tools and unlock/open is on in both modes.
       TOOL_SCOPE_MODE: ${{ vars.TOOL_SCOPE_MODE || 'enforce' }}
+      # REST routes take the /mcp credential; audit only while REST clients
+      # are given a token (destructive routes are enforced either way).
+      REST_AUTH_MODE: ${{ vars.REST_AUTH_MODE || 'enforce' }}
 
     steps:
       # ----------------------------------------------------------------
@@ -382,6 +404,7 @@ jobs:
               "CipherWeaveIssuer=${{ steps.cipherweave.outputs.issuer_id }}" \
               "AcceptLegacyToken=${ACCEPT_LEGACY_TOKEN:-true}" \
               "ToolScopeMode=$([ "${TOOL_SCOPE_MODE}" = audit ] && echo audit || echo enforce)" \
+              "RestAuthMode=$([ "${REST_AUTH_MODE}" = audit ] && echo audit || echo enforce)" \
             --tags repo=DeviceWeave
           # repo=<RepoName> on the stack is copied onto every resource it
           # creates, so Cost Explorer splits the bill by repository; the

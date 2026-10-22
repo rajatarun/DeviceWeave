@@ -16,12 +16,31 @@ import json
 import pytest
 
 import app
+import mcp_handler
 from execution_planner import StepResult
+
+# REST routes take the /mcp credential (rest_auth); these tests are about
+# dispatch, so they present the legacy token. tests/test_rest_auth.py covers
+# what is refused.
+LEGACY = "legacy-static-token-value"
+
+
+@pytest.fixture(autouse=True)
+def _rest_token(monkeypatch):
+    import rest_auth
+
+    monkeypatch.setattr(mcp_handler, "_load_expected_token", lambda: LEGACY)
+    monkeypatch.delenv("ACCEPT_LEGACY_TOKEN", raising=False)
+    monkeypatch.delenv("REST_AUTH_MODE", raising=False)
+    rest_auth.reset()
+    yield
+    rest_auth.reset()
 
 
 def _event(method: str, path: str, body: dict | None = None) -> dict:
     return {
         "requestContext": {"http": {"method": method, "path": path}},
+        "headers": {"authorization": f"Bearer {LEGACY}"},
         "body": json.dumps(body) if body is not None else None,
     }
 
@@ -140,6 +159,7 @@ def test_execute_missing_body_is_400():
 def test_execute_invalid_json_body_is_400():
     event = {
         "requestContext": {"http": {"method": "POST", "path": "/execute"}},
+        "headers": {"authorization": f"Bearer {LEGACY}"},
         "body": "{not valid json",
     }
     response = app.handler(event, None)

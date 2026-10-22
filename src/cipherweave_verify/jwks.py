@@ -56,7 +56,7 @@ def http_fetcher(url: str) -> dict[str, Any]:
     if not url.startswith("https://"):
         raise JWKSUnavailableError("JWKS URL must be https")
     request = urllib.request.Request(  # noqa: S310 — scheme checked above
-        url, headers={"Accept": "application/json", "User-Agent": "cipherweave-verify/0.1"}
+        url, headers={"Accept": "application/json", "User-Agent": "cipherweave-verify/0.3"}
     )
     with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310
         body = response.read(_MAX_JWKS_BYTES + 1)

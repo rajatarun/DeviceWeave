@@ -98,6 +98,18 @@ class AuthDecision:
     principal: Principal | None = None
 
 
+def parse_authorization(header: str | None) -> tuple[str | None, str | None]:
+    """``Authorization`` → (scheme, token). Scheme is ``bearer``/``dpop`` lower-cased."""
+    if not isinstance(header, str) or not header.strip():
+        return None, None
+    scheme, _, value = header.strip().partition(" ")
+    scheme = scheme.lower()
+    value = value.strip()
+    if scheme not in ("bearer", "dpop") or not value or " " in value:
+        return None, None
+    return scheme, value
+
+
 class BearerAuth:
     def __init__(
         self,
@@ -112,21 +124,73 @@ class BearerAuth:
         self._legacy_token = legacy_token
         self._verifier = verifier
 
-    def check(self, presented: str | None) -> AuthDecision:
-        decision = self._decide(presented)
+    def check(
+        self,
+        presented: str | None,
+        *,
+        dpop_proof: str | None = None,
+        htm: str | None = None,
+        htu: str | None = None,
+        scheme: str | None = None,
+    ) -> AuthDecision:
+        """Decide on a presented token.
+
+        ``scheme`` is the Authorization scheme when the caller parsed it
+        (``bearer`` or ``dpop``); RFC 9449 §7 pins it: a key-bound token sent
+        as ``Bearer`` is refused (``dpop_required``), and the ``DPoP`` scheme
+        with an unbound token is refused too. ``None`` skips that check, for
+        callers that pass only the token.
+        """
+        decision = self._decide(presented, dpop_proof, htm, htu, scheme)
         if decision.ok:
             jti = decision.principal.jti if decision.principal else None
+            principal = decision.principal
             logger.info(
-                "mcp auth method=%s sub=%s jti=%s",
+                "mcp auth method=%s sub=%s jti=%s act=%s dpop=%s",
                 decision.method,
                 decision.subject or "-",
                 jti or "-",
+                ",".join(principal.actors) if principal and principal.actors else "-",
+                "yes" if principal and principal.dpop_bound else "no",
             )
         else:
             logger.warning("mcp auth rejected reason=%s", decision.reason)
         return decision
 
-    def _decide(self, presented: str | None) -> AuthDecision:
+    def check_event(self, event: dict) -> AuthDecision:
+        """Decide on an API Gateway HTTP API event: Authorization, DPoP, method and URL."""
+        from cipherweave_verify.metadata import api_gateway_request
+
+        headers = {str(k).lower(): v for k, v in (event.get("headers") or {}).items()}
+        method, url, _base = api_gateway_request(event)
+        return self.check_header(
+            headers.get("authorization"), dpop_proof=headers.get("dpop"), htm=method, htu=url
+        )
+
+    def check_header(
+        self,
+        authorization: str | None,
+        *,
+        dpop_proof: str | None = None,
+        htm: str | None = None,
+        htu: str | None = None,
+    ) -> AuthDecision:
+        """Decide on a raw ``Authorization`` header (``Bearer`` or ``DPoP`` scheme)."""
+        scheme, token = parse_authorization(authorization)
+        if token is None:
+            decision = AuthDecision(False, None, reason="missing")
+            logger.warning("mcp auth rejected reason=%s", decision.reason)
+            return decision
+        return self.check(token, dpop_proof=dpop_proof, htm=htm, htu=htu, scheme=scheme)
+
+    def _decide(
+        self,
+        presented: str | None,
+        dpop_proof: str | None = None,
+        htm: str | None = None,
+        htu: str | None = None,
+        scheme: str | None = None,
+    ) -> AuthDecision:
         if not isinstance(presented, str) or not presented:
             return AuthDecision(False, None, reason="missing")
 
@@ -134,7 +198,13 @@ class BearerAuth:
         if looks_like_jwt(presented) and (self._verifier is not None or jwt_configured()):
             try:
                 verifier = self._verifier or default_verifier()
-                token = verifier.verify(presented, self.audience)
+                token = verifier.verify(
+                    presented, self.audience, dpop_proof=dpop_proof, htm=htm, htu=htu
+                )
+                if scheme == "bearer" and token.cnf_jkt is not None:
+                    return AuthDecision(False, None, reason="dpop_required")
+                if scheme == "dpop" and token.cnf_jkt is None:
+                    return AuthDecision(False, None, reason="token_not_dpop_bound")
                 principal = Principal(
                     method="jwt",
                     subject=token.subject,
@@ -142,6 +212,8 @@ class BearerAuth:
                     issued_at=token.issued_at,
                     expires_at=token.expires_at,
                     jti=token.jti,
+                    actors=token.actors,
+                    dpop_bound=token.cnf_jkt is not None,
                 )
                 return AuthDecision(True, "jwt", subject=token.subject, principal=principal)
             except TokenVerificationError as exc:
@@ -152,6 +224,9 @@ class BearerAuth:
                 logger.error("cipherweave token check raised type=%s", type(exc).__name__)
                 return AuthDecision(False, None, reason="verifier_error")
 
+        if scheme == "dpop":
+            # The legacy static token is a bearer secret; it is never DPoP.
+            return AuthDecision(False, None, reason=reason)
         if not legacy_accepted():
             return AuthDecision(
                 False, None, reason=reason if reason != "invalid_token" else "legacy_disabled"

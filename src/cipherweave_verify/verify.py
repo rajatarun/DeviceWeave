@@ -34,7 +34,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
+from cipherweave_verify.dpop import ProofReplayLedger, verify_proof
 from cipherweave_verify.errors import (
+    DPoPRequiredError,
     ExpiredTokenError,
     InsufficientScopeError,
     InvalidAudienceError,
@@ -64,6 +66,9 @@ ENV_JWKS = "CIPHERWEAVE_JWKS"
 ENV_ISSUER = "CIPHERWEAVE_ISSUER"
 
 _ALLOWED_TYP = frozenset({"jwt", "at+jwt"})
+# A delegation chain longer than this is refused. The issuer caps exchange at
+# three hops; one more here is headroom, not an invitation.
+MAX_ACTOR_DEPTH = 4
 
 
 @dataclass(frozen=True)
@@ -76,9 +81,56 @@ class VerifiedToken:
     jti: str
     kid: str
     claims: dict[str, Any] = field(repr=False)
+    # RFC 8693 delegation: the clients acting on the subject's behalf, the
+    # current actor first. Empty for a token the subject obtained itself.
+    actors: tuple[str, ...] = ()
+    # RFC 9449: the thumbprint of the key this token is bound to, or None for
+    # a plain bearer token. When set, verify() has already checked the proof.
+    cnf_jkt: str | None = None
 
     def has_scopes(self, required: Iterable[str]) -> bool:
         return set(required) <= self.scopes
+
+    @property
+    def delegated(self) -> bool:
+        return bool(self.actors)
+
+    @property
+    def actor(self) -> str | None:
+        """The client presenting a delegated token, or None for the subject's own token."""
+        return self.actors[0] if self.actors else None
+
+
+def actor_chain(claims: dict[str, Any]) -> tuple[str, ...]:
+    """The ``act`` chain, current actor first (RFC 8693 §4.1). Malformed is refused."""
+    chain: list[str] = []
+    act = claims.get("act")
+    while act is not None:
+        if not isinstance(act, dict):
+            raise InvalidClaimsError("act must be an object")
+        sub = act.get("sub")
+        if not isinstance(sub, str) or not sub:
+            raise InvalidClaimsError("act.sub missing")
+        chain.append(sub)
+        if len(chain) > MAX_ACTOR_DEPTH:
+            raise InvalidClaimsError("delegation chain too deep")
+        act = act.get("act")
+    return tuple(chain)
+
+
+def confirmation_jkt(claims: dict[str, Any]) -> str | None:
+    """``cnf.jkt`` if the token is key-bound. Any other ``cnf`` shape is refused."""
+    cnf = claims.get("cnf")
+    if cnf is None:
+        return None
+    if not isinstance(cnf, dict):
+        raise InvalidClaimsError("cnf must be an object")
+    jkt = cnf.get("jkt")
+    if not isinstance(jkt, str) or not jkt or set(cnf) - {"jkt"}:
+        # x5t#S256 (mTLS) and jwk are not supported: a binding this verifier
+        # cannot check must not be read as no binding at all.
+        raise InvalidClaimsError("unsupported cnf")
+    return jkt
 
 
 def looks_like_jwt(token: str | None) -> bool:
@@ -186,7 +238,40 @@ class Verifier:
         expected_audience: str,
         *,
         required_scopes: Iterable[str] = (),
+        dpop_proof: str | None = None,
+        htm: str | None = None,
+        htu: str | None = None,
+        dpop_replay: ProofReplayLedger | None = None,
     ) -> VerifiedToken:
+        """Verify ``token`` for ``expected_audience``.
+
+        A token bound to a key (``cnf.jkt``) is accepted only with a DPoP
+        proof for this request: pass the ``DPoP`` header as ``dpop_proof`` and
+        the request method and absolute URL as ``htm``/``htu``. A proof sent
+        with an unbound token is ignored -- the token is a bearer token
+        either way, and refusing it would break clients that always sign.
+        """
+        verified = self._verify_signed(token, expected_audience, required_scopes)
+        if verified.cnf_jkt is not None:
+            if not dpop_proof:
+                raise DPoPRequiredError("token is DPoP-bound; send a DPoP proof")
+            if not htm or not htu:
+                raise VerifierNotConfiguredError("DPoP-bound token needs htm and htu")
+            verify_proof(
+                dpop_proof,
+                htm=htm,
+                htu=htu,
+                access_token=token,
+                expected_jkt=verified.cnf_jkt,
+                replay_ledger=dpop_replay,
+                clock=self._clock,
+            )
+        return verified
+
+    def _verify_signed(
+        self, token: str, expected_audience: str, required_scopes: Iterable[str]
+    ) -> VerifiedToken:
+        """Signature and claims; no DPoP binding check."""
         if not expected_audience:
             raise VerifierNotConfiguredError("no expected audience")
         if not isinstance(token, str) or not token or len(token) > MAX_TOKEN_LENGTH:
@@ -239,6 +324,21 @@ class Verifier:
         claims = _decode_json_segment(payload_b64, "payload")
         return self._check_claims(claims, kid, expected_audience, required_scopes)
 
+    def verify_subject_token(self, token: str, expected_audience: str) -> VerifiedToken:
+        """Verify a token presented to the *authorization server* as an RFC 8693 subject token.
+
+        Everything ``verify`` checks except the DPoP proof. A key-bound token
+        reaches the issuer in the hands of the resource server it was sent
+        to, which checked the client's proof when it arrived and cannot
+        produce the client's key now. The binding protected that hop; the
+        exchange is authenticated separately, by the actor's own credential,
+        and the audience check still pins the token to that actor.
+
+        A resource server must never call this: it would accept a stolen
+        bound token without its key. Use ``verify``.
+        """
+        return self._verify_signed(token, expected_audience, ())
+
     def _check_claims(
         self,
         claims: dict[str, Any],
@@ -275,6 +375,9 @@ class Verifier:
         if expires_at <= issued_at or expires_at - issued_at > self._max_lifetime:
             raise InvalidClaimsError("token lifetime out of range")
 
+        actors = actor_chain(claims)
+        cnf_jkt = confirmation_jkt(claims)
+
         scopes = frozenset(scope.split())
         missing = set(required_scopes) - scopes
         if missing:
@@ -289,6 +392,8 @@ class Verifier:
             jti=jti,
             kid=kid,
             claims=claims,
+            actors=actors,
+            cnf_jkt=cnf_jkt,
         )
 
 
@@ -322,7 +427,13 @@ def reset_default_verifier() -> None:
 
 
 def verify(
-    token: str, expected_audience: str, *, required_scopes: Iterable[str] = ()
+    token: str,
+    expected_audience: str,
+    *,
+    required_scopes: Iterable[str] = (),
+    dpop_proof: str | None = None,
+    htm: str | None = None,
+    htu: str | None = None,
 ) -> VerifiedToken:
     """Verify ``token`` for ``expected_audience`` using the env-configured verifier.
 
@@ -331,4 +442,11 @@ def verify(
     ``CIPHERWEAVE_ISSUER``. At least one of the first two must be set. Raises a
     ``TokenVerificationError`` subclass (``status_code == 401``) on any failure.
     """
-    return default_verifier().verify(token, expected_audience, required_scopes=required_scopes)
+    return default_verifier().verify(
+        token,
+        expected_audience,
+        required_scopes=required_scopes,
+        dpop_proof=dpop_proof,
+        htm=htm,
+        htu=htu,
+    )
