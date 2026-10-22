@@ -22,8 +22,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The suite runs offline (tests/conftest.py stubs AWS, Memgraph and the
+  # network), so it gates every deploy: a red suite never ships.
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest
+
   deploy:
     name: Build & Deploy via AWS SAM
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
