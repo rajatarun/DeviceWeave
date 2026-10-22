@@ -22,6 +22,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Known-vulnerable dependencies block the deploy, like a red test. Every
+  # ignored advisory is listed here with the reason it does not apply.
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: pip-audit
+        run: |
+          # PYSEC-2026-4114: oauthlib server-side PKCE timing leak (token endpoint); DeviceWeave only uses oauthlib as a client through ring-doorbell, which pins oauthlib<4 so the 4.0.0 fix cannot be installed
+          python -m pip install pip-audit
+          pip-audit -r src/requirements.txt --progress-spinner off --ignore-vuln PYSEC-2026-4114
+
   # The suite runs offline (tests/conftest.py stubs AWS, Memgraph and the
   # network), so it gates every deploy: a red suite never ships.
   test:
@@ -42,7 +61,7 @@ jobs:
 
   deploy:
     name: Build & Deploy via AWS SAM
-    needs: test
+    needs: [test, audit]
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
