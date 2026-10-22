@@ -5,10 +5,18 @@ Connection is lazy and optional: every public function returns a safe default
 when no Memgraph instance is reachable.  The rest of the system never sees an
 exception from this module.
 
-Host resolution (runtime, cached for process lifetime):
+Host resolution (runtime):
   1. MEMGRAPH_HOST env var — static override, used as-is when set.
   2. EC2 tag discovery — queries EC2 for a running instance tagged
      memgraph=true and uses its PrivateIpAddress.
+
+Memgraph is a Spot instance: it stops when interrupted and can come back on a
+new IP. So nothing about its absence is cached for the container's lifetime.
+A failed discovery, a failed connect, or a lost connection (the driver's
+ServiceUnavailable / SessionExpired, or a socket error) is retried after
+MEMGRAPH_RETRY_SECONDS (default 60). Until then every call returns its safe
+default at once, with no EC2 call and no connect timeout. A lost connection
+also forgets the host, so the retry rediscovers it.
 
 Credentials come from Secrets Manager (MEMGRAPH_SECRET_ARN):
     {"username": "memgraph", "password": "..."}
@@ -29,6 +37,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -38,10 +47,14 @@ _MEMGRAPH_HOST_OVERRIDE: str = os.environ.get("MEMGRAPH_HOST", "")
 _MEMGRAPH_PORT: int = int(os.environ.get("MEMGRAPH_PORT", "7687"))
 _MEMGRAPH_SECRET_ARN: str = os.environ.get("MEMGRAPH_SECRET_ARN", "")
 
+_RETRY_SECONDS: float = float(os.environ.get("MEMGRAPH_RETRY_SECONDS", "60"))
+
 _driver = None
 _cred_cache: Optional[Dict[str, str]] = None
 _resolved_host: Optional[str] = None  # None = not yet resolved; "" = not found
 _host_lock = threading.Lock()
+_retry_after: float = 0.0  # _clock() before which no discovery or connect is tried
+_clock = time.monotonic
 
 # Module-level executor: persists across Lambda warm-container reuses.
 # Lambda freezes (not kills) the process after each invocation, so work
@@ -58,19 +71,22 @@ _graph_executor = concurrent.futures.ThreadPoolExecutor(
 
 def _resolve_host() -> str:
     """
-    Return the Memgraph private IP for this process, resolving once and caching.
+    Return the Memgraph private IP, or "" when there is none right now.
 
     Priority:
       1. MEMGRAPH_HOST env var (static override from CloudFormation / local dev).
       2. EC2 describe-instances filtered by tag memgraph=true + running state.
+
+    A found IP is kept until the connection to it is lost. "Not found" is
+    kept only until _retry_after.
     """
-    global _resolved_host
+    global _resolved_host, _retry_after
     if _MEMGRAPH_HOST_OVERRIDE:
         return _MEMGRAPH_HOST_OVERRIDE
-    if _resolved_host is not None:
+    if _resolved_host or (_resolved_host == "" and _clock() < _retry_after):
         return _resolved_host
     with _host_lock:
-        if _resolved_host is not None:
+        if _resolved_host or (_resolved_host == "" and _clock() < _retry_after):
             return _resolved_host
         try:
             import boto3
@@ -88,13 +104,53 @@ def _resolve_host() -> str:
             if ip:
                 logger.info("Memgraph EC2 discovered at %s (tag memgraph=true)", ip)
             else:
+                _retry_after = _clock() + _RETRY_SECONDS
                 logger.warning(
-                    "No running EC2 instance with tag memgraph=true — behavior scoring disabled"
+                    "No running EC2 instance with tag memgraph=true — behavior scoring "
+                    "disabled; retrying in %.0fs", _RETRY_SECONDS,
                 )
         except Exception as exc:
-            logger.warning("EC2 Memgraph host discovery failed: %s — behavior scoring disabled", exc)
             _resolved_host = ""
+            _retry_after = _clock() + _RETRY_SECONDS
+            logger.warning(
+                "EC2 Memgraph host discovery failed: %s — behavior scoring disabled; "
+                "retrying in %.0fs", exc, _RETRY_SECONDS,
+            )
     return _resolved_host
+
+
+def _connection_lost(exc: BaseException) -> bool:
+    """True for errors that mean the server is gone, not that a query was bad."""
+    if isinstance(exc, OSError):
+        return True
+    try:
+        from neo4j.exceptions import ServiceUnavailable, SessionExpired
+    except ImportError:  # pragma: no cover - neo4j is a deployed dependency
+        return False
+    return isinstance(exc, (ServiceUnavailable, SessionExpired))
+
+
+def _drop_connection() -> None:
+    """Forget the driver and the host, and wait _RETRY_SECONDS before trying again."""
+    global _driver, _resolved_host, _retry_after
+    with _host_lock:
+        driver, _driver = _driver, None
+        _resolved_host = None
+        _retry_after = _clock() + _RETRY_SECONDS
+    if driver is not None:
+        try:
+            driver.close()
+        except Exception:  # noqa: BLE001 - closing a dead driver
+            pass
+
+
+def _on_query_error(where: str, exc: Exception) -> None:
+    if _connection_lost(exc):
+        _drop_connection()
+        logger.warning("graph_engine.%s: Memgraph connection lost (%s) — retrying in %.0fs",
+                       where, type(exc).__name__, _RETRY_SECONDS)
+    else:
+        logger.warning("graph_engine.%s failed: %s", where, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -126,26 +182,41 @@ def _get_credentials() -> Dict[str, str]:
 
 
 def _get_driver():
-    global _driver
+    global _driver, _retry_after
     if _driver is not None:
         return _driver
+    if _clock() < _retry_after:
+        return None
     host = _resolve_host()
     if not host:
         return None
+    driver = None
     try:
         from neo4j import GraphDatabase
         creds = _get_credentials()
         auth = (creds["username"], creds["password"]) if creds["password"] else None
-        _driver = GraphDatabase.driver(
+        driver = GraphDatabase.driver(
             f"bolt://{host}:{_MEMGRAPH_PORT}",
             auth=auth,
             connection_timeout=3,
         )
-        _ensure_schema(_driver)
+        # The driver connects lazily; the schema check is the first real
+        # round trip. Keep the driver only once it has answered.
+        _ensure_schema(driver)
+        _driver = driver
         logger.info("Memgraph connected — %s:%d", host, _MEMGRAPH_PORT)
         return _driver
     except Exception as exc:
-        logger.warning("Memgraph unavailable (%s) — behavior scoring disabled", exc)
+        if driver is not None:
+            try:
+                driver.close()
+            except Exception:  # noqa: BLE001 - closing a driver that never connected
+                pass
+        # Every request would otherwise pay the connect timeout again.
+        # Forget the host too: a replaced instance has a new IP.
+        _drop_connection()
+        logger.warning("Memgraph unavailable (%s) — behavior scoring disabled; "
+                       "retrying in %.0fs", exc, _RETRY_SECONDS)
         return None
 
 
@@ -221,7 +292,7 @@ def _write_event(device_id: str, action: str, command: str) -> None:
                 device_id, action, now.hour,
             )
     except Exception as exc:
-        logger.warning("graph_engine.record_event failed: %s", exc)
+        _on_query_error("record_event", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +343,7 @@ def query_behavior_history(
 
         return {"matching": int(matching), "total": int(total)}
     except Exception as exc:
-        logger.warning("graph_engine.query_behavior_history failed: %s", exc)
+        _on_query_error("query_behavior_history", exc)
         return {"matching": 0, "total": 0}
 
 
@@ -299,7 +370,7 @@ def query_top_actions(device_id: str, limit: int = 5) -> List[Dict[str, Any]]:
             )
             return [{"action": r["action"], "freq": r["freq"]} for r in result]
     except Exception as exc:
-        logger.warning("graph_engine.query_top_actions failed: %s", exc)
+        _on_query_error("query_top_actions", exc)
         return []
 
 
