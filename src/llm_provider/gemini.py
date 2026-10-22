@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 _GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 _DEFAULT_MODEL = "gemini-3.8-flash"
 
+# Gemini's flash models think before they answer, and thinking tokens count
+# against maxOutputTokens. A cap sized for the answer alone (the resolver asks
+# for a few hundred tokens) could be spent on thinking, leaving a visible
+# reply cut off a few dozen characters in. The cap is raised by this much; it
+# is a limit, not a charge, so unused headroom costs nothing.
+_THINKING_HEADROOM = int(os.environ.get("GEMINI_THINKING_HEADROOM", "2048"))
+
 _api_key_cache: Optional[str] = None
 
 
@@ -76,7 +83,7 @@ class GeminiLLMProvider(BaseLLMProvider):
         body = json.dumps({
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_message}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens},
+            "generationConfig": {"maxOutputTokens": max_tokens + _THINKING_HEADROOM},
         }).encode()
 
         req = urllib.request.Request(
@@ -97,9 +104,19 @@ class GeminiLLMProvider(BaseLLMProvider):
             raise RuntimeError(f"Gemini unreachable: {exc}") from exc
 
         try:
-            finish = payload["candidates"][0].get("finishReason")
+            candidate = payload["candidates"][0]
+            finish = candidate.get("finishReason")
             self.last_stop_reason = STOP_MAX_TOKENS if finish == "MAX_TOKENS" else finish
-            text = payload["candidates"][0]["content"]["parts"][0]["text"].strip()
+            parts = (candidate.get("content") or {}).get("parts") or []
+            if not parts and finish == "MAX_TOKENS":
+                # Thinking used the whole budget and nothing visible came
+                # back. That is a truncated reply, which callers handle; it
+                # is not a malformed response.
+                thoughts = (payload.get("usageMetadata") or {}).get("thoughtsTokenCount")
+                logger.warning("Gemini (%s) spent its output budget thinking (%s thought "
+                               "tokens) and returned no text", self._model, thoughts)
+                return ""
+            text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
         except (KeyError, IndexError) as exc:
             raise RuntimeError(
                 f"Unexpected Gemini response shape: {json.dumps(payload)[:200]}"
