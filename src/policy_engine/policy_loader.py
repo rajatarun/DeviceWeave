@@ -30,6 +30,7 @@ import os
 import time
 from typing import Any, Dict, List
 from aws_clients import get_dynamodb_resource
+from policy_engine.device_types import canonical_device_type
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +47,15 @@ def get_policies_for_device(device_type: str) -> List[Dict[str, Any]]:
     """
     Return all active policies scoped to *device_type*.
 
+    *device_type* may be an adapter routing key or a scope class; both are
+    resolved with canonical_device_type() (the cache is keyed by class).
+
     Refreshes the in-memory cache from DynamoDB if the TTL has expired.
     Returns an empty list when no table is configured or no matching
     policies exist — callers treat empty as "allow all".
     """
     _ensure_fresh()
-    return _cache.get(device_type, [])
+    return _cache.get(canonical_device_type(device_type), [])
 
 
 def invalidate() -> None:
@@ -114,7 +118,7 @@ def _reload() -> None:
         for item in items:
             dt = item.get("device_type")
             if dt:
-                new_cache.setdefault(dt, []).append(item)
+                new_cache.setdefault(canonical_device_type(dt), []).append(item)
 
         _cache = new_cache
         _cache_expiry = time.monotonic() + _TTL_SECONDS

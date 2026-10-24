@@ -33,6 +33,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from policy_engine.context_provider import get_context
+from policy_engine.device_types import canonical_device_type
 from policy_engine.evaluator import PolicyDecision, compute_verdict
 from policy_engine.policy_loader import get_policies_for_device, is_configured
 
@@ -50,7 +51,9 @@ def enforce(
 
     Parameters
     ----------
-    device_type   From the resolved device dict (fan, light, ac, plug, heater).
+    device_type   From the resolved device dict: the adapter routing key
+                  (SmartBulb, GoveePlug, ...).  Resolved to its policy scope
+                  class (light, plug, ...) before policies are looked up.
     action        The requested device action (turn_on, set_brightness, …).
     params        Current action params; returned as-is for ALLOW, replaced
                   for MODIFY (caller must use decision.modified_params instead).
@@ -71,7 +74,7 @@ def enforce(
     if context is None:
         context = get_context()
 
-    policies = get_policies_for_device(device_type)
+    policies = get_policies_for_device(canonical_device_type(device_type))
 
     if not policies:
         from policy_engine.evaluator import _ALLOW
