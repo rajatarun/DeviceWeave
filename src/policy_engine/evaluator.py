@@ -11,9 +11,8 @@ Verdict priority (highest wins):
               when cold", that constraint must hold even if another policy
               would permit it.
   2. MODIFY — no block matched but at least one modify policy matched.
-              The first matching modifier's params are returned.  Multiple
-              matching modifiers are not merged — the most-recently-created
-              policy wins (list is sorted newest-first by the GSI).
+              The winning modifier's params are returned. Multiple matching
+              modifiers are not merged.
   3. ALLOW  — default.  No restrictive policy matched.  Explicit "allow"
               action-type policies are informational only in this version;
               they do not override a BLOCK.
@@ -30,10 +29,11 @@ Safe actions bypass:
   from switching off a device they want to stop.
 """
 
+import json
 import logging
 import operator as _op
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from policy_engine.device_types import canonical_device_type
 
@@ -67,6 +67,34 @@ class PolicyDecision:
     @property
     def is_modified(self) -> bool:
         return self.verdict == "modify"
+
+
+def rule_winner_key(policy: Dict[str, Any]) -> Tuple[int, str, str, str]:
+    """Total order for ties inside one verdict type. The lowest key wins.
+
+    The primary key is the rule id string, compared lexicographically. A
+    missing or blank id sorts after every real id. The reason, then a
+    canonical rendering of the params, break any remaining tie so two
+    shuffles of the same rules cannot pick different ids, reasons, or
+    MODIFY params.
+    """
+    rid = policy.get("rule_id")
+    if rid is None:
+        rid_s = ""
+        missing = True
+    else:
+        rid_s = str(rid).strip()
+        missing = rid_s == ""
+    action = policy.get("action") if isinstance(policy.get("action"), dict) else {}
+    reason = action.get("reason")
+    reason_s = "" if reason is None else str(reason)
+    raw_params = action.get("params")
+    params = raw_params if isinstance(raw_params, dict) else {}
+    try:
+        params_key = json.dumps(params, sort_keys=True, default=str, separators=(",", ":"))
+    except (TypeError, ValueError):
+        params_key = repr(sorted((str(k), repr(v)) for k, v in params.items()))
+    return (1 if missing else 0, rid_s, reason_s, params_key)
 
 
 # Sentinel for the default-allow case — created once, never mutated.
@@ -103,8 +131,8 @@ def compute_verdict(
         logger.debug("Policy engine: safe action '%s' bypasses policy check", action)
         return _ALLOW
 
-    first_block: Optional[Dict[str, Any]] = None
-    first_modifier: Optional[Dict[str, Any]] = None
+    blocks: List[Dict[str, Any]] = []
+    modifiers: List[Dict[str, Any]] = []
     device_class = canonical_device_type(device_type)
 
     for policy in policies:
@@ -120,15 +148,16 @@ def compute_verdict(
 
         action_type = policy["action"]["type"]
 
-        if action_type == "block" and first_block is None:
-            first_block = policy
-        elif action_type == "modify" and first_modifier is None:
-            first_modifier = policy
+        if action_type == "block":
+            blocks.append(policy)
+        elif action_type == "modify":
+            modifiers.append(policy)
         # "allow" policies are noted but do not change the default outcome.
 
-    # --- Apply priority ---
-    if first_block is not None:
-        p = first_block
+    # --- Apply priority. Within one type the lowest rule id wins, so the
+    # reported id, reason, and MODIFY params do not depend on list order.
+    if blocks:
+        p = min(blocks, key=rule_winner_key)
         logger.info(
             "Policy BLOCK: rule_id=%s device_type=%s action=%s reason=%r context=%s",
             p["rule_id"], device_type, action, p["action"]["reason"],
@@ -141,8 +170,8 @@ def compute_verdict(
             modified_params=None,
         )
 
-    if first_modifier is not None:
-        p = first_modifier
+    if modifiers:
+        p = min(modifiers, key=rule_winner_key)
         modified = dict(p["action"].get("params") or {})
         logger.info(
             "Policy MODIFY: rule_id=%s device_type=%s action=%s params=%s reason=%r",

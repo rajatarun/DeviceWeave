@@ -13,7 +13,7 @@ sets (``tests/test_rule_set_checker.py``) and on a live policy table:
   python scripts/policy_rules_smt.py policies.json [--invariants inv.json]
 
 where ``policies.json`` is the ``policies`` array from ``GET /policies``
-(newest first) and ``inv.json`` a list of
+and ``inv.json`` a list of
 ``{"name", "device_type", "conditions"}``. Needs ``pip install z3-solver``;
 it is not a Lambda dependency.
 
@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from policy_authoring.rule_set_checker import (  # noqa: E402
     BOOLEAN_FIELDS, INTEGER_FIELDS, NUMERIC_DOMAINS, STRING_FIELDS,
 )
+from policy_engine.evaluator import rule_winner_key  # noqa: E402
 
 
 class Encoding:
@@ -112,11 +113,12 @@ def analyze(rules: Sequence[Dict[str, Any]], invariants: Sequence[Dict[str, Any]
                     if _atype(b) == "block" and e.sat(e.rule(r), e.rule(b)) is not None:
                         out.append({"kind": "conflict_block_allow", "rule_ids": [r.get("rule_id"), b.get("rule_id")]})
             if k == "modify":
-                newer = [m for m in entries[:i] if _atype(m) == "modify"]
-                claimed = z3.Or(blocked, *[e.rule(m) for m in newer])
+                preferred = [m for m in entries if _atype(m) == "modify" and m is not r
+                             and rule_winner_key(m) < rule_winner_key(r)]
+                claimed = z3.Or(blocked, *[e.rule(m) for m in preferred])
                 if e.sat(e.rule(r), z3.Not(claimed)) is None:
                     out.append({"kind": "shadowed", "rule_ids": [r.get("rule_id")]})
-                for m in newer:
+                for m in preferred:
                     if (m.get("action") or {}).get("params") != (r.get("action") or {}).get("params") and \
                             e.sat(e.rule(r), e.rule(m), z3.Not(blocked)) is not None:
                         out.append({"kind": "conflict_modify", "rule_ids": [m.get("rule_id"), r.get("rule_id")]})

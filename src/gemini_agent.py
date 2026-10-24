@@ -191,6 +191,7 @@ async def execute_device_command(
     from device_resolver import _get_active_catalog, DeviceRegistryError
     from execution_planner import plan_device_execution, execute_steps
     from policy_engine.middleware import enforce as policy_enforce
+    from policy_engine.middleware import refusal_on_policy_failure
     from policy_engine.context_provider import get_context as get_policy_context
     from learning_store import LEARNING_THRESHOLD, is_configured, save_learned_phrase
     import graph_engine
@@ -218,10 +219,12 @@ async def execute_device_command(
 
     try:
         policy_ctx = get_policy_context()
-        decision = policy_enforce(device["device_type"], action, params, context=policy_ctx)
+        decision = policy_enforce(
+            device["device_type"], action, params, context=policy_ctx, device=device,
+        )
     except Exception as exc:
-        logger.warning("Policy check failed: %s — proceeding without enforcement", exc)
-        decision = None
+        logger.warning("Policy check failed: %s — refusing execution", exc)
+        return refusal_on_policy_failure("command")
 
     if decision is not None and decision.is_blocked:
         return {
@@ -277,6 +280,7 @@ async def execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
     from device_resolver import _get_active_catalog, DeviceRegistryError
     from execution_planner import plan_scene_execution, execute_steps
     from policy_engine.middleware import filter_steps as policy_filter_steps
+    from policy_engine.middleware import refusal_on_policy_failure
     from policy_engine.context_provider import get_context as get_policy_context
     from learning_store import LEARNING_THRESHOLD, is_configured, save_learned_phrase
     import graph_engine
@@ -299,8 +303,8 @@ async def execute_scene(scene_id: str, canonical_phrase: str) -> Dict[str, Any]:
         policy_ctx = get_policy_context()
         allowed_steps, policy_blocks = policy_filter_steps(steps, context=policy_ctx)
     except Exception as exc:
-        logger.warning("Policy filter failed: %s — executing all steps", exc)
-        allowed_steps, policy_blocks = steps, []
+        logger.warning("Policy filter failed: %s — refusing execution", exc)
+        return refusal_on_policy_failure("scene")
 
     if not allowed_steps:
         return {

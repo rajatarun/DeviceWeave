@@ -35,9 +35,23 @@ from typing import Any, Dict, List, Optional, Tuple
 from policy_engine.context_provider import get_context
 from policy_engine.device_types import canonical_device_type
 from policy_engine.evaluator import PolicyDecision, compute_verdict
+from policy_engine.param_clamp import clamp_numeric_params
 from policy_engine.policy_loader import get_policies_for_device, is_configured
 
 logger = logging.getLogger(__name__)
+
+
+def refusal_on_policy_failure(what: str) -> Dict[str, Any]:
+    """Tool result when the policy check itself fails.
+
+    The command is not executed. Callers must return this instead of
+    continuing with no verdict.
+    """
+    noun = "scene" if what == "scene" else "command"
+    return {
+        "error": f"Policy check failed; the {noun} was not executed.",
+        "policy_error": True,
+    }
 
 
 def enforce(
@@ -45,6 +59,7 @@ def enforce(
     action: str,
     params: Dict[str, Any],
     context: Optional[Dict[str, Any]] = None,
+    device: Optional[Dict[str, Any]] = None,
 ) -> PolicyDecision:
     """
     Evaluate active policies for (device_type, action) against runtime context.
@@ -57,9 +72,15 @@ def enforce(
     action        The requested device action (turn_on, set_brightness, …).
     params        Current action params; returned as-is for ALLOW, replaced
                   for MODIFY (caller must use decision.modified_params instead).
+                  When ``device`` is given, MODIFY params are clamped to that
+                  device's capability ranges before they are returned.
     context       Pre-fetched context dict.  If None, context is fetched here.
                   Pass a pre-fetched context when evaluating multiple devices
                   in the same request to avoid redundant weather/presence reads.
+    device        Resolved device dict.  Required for device-specific ranges
+                  (a declared brightness ceiling, a duration bound).  Without
+                  it, MODIFY params are returned unclamped; ``_execute_one``
+                  still clamps before the adapter runs.
 
     Returns
     -------
@@ -80,7 +101,15 @@ def enforce(
         from policy_engine.evaluator import _ALLOW
         return _ALLOW
 
-    return compute_verdict(policies, device_type, action, context)
+    decision = compute_verdict(policies, device_type, action, context)
+    if device is not None and decision.is_modified:
+        return PolicyDecision(
+            verdict=decision.verdict,
+            reason=decision.reason,
+            rule_id=decision.rule_id,
+            modified_params=clamp_numeric_params(decision.modified_params or {}, device),
+        )
+    return decision
 
 
 def filter_steps(
@@ -111,7 +140,9 @@ def filter_steps(
 
     for step in steps:
         device_type = step.device.get("device_type", "")
-        decision = enforce(device_type, step.action, step.params, context=context)
+        decision = enforce(
+            device_type, step.action, step.params, context=context, device=step.device,
+        )
 
         if decision.is_blocked:
             blocked.append({
@@ -124,7 +155,8 @@ def filter_steps(
             })
         elif decision.is_modified:
             # Return a new step with the modified params so the original
-            # step object (owned by the caller) is never mutated.
+            # step object (owned by the caller) is never mutated. enforce()
+            # already clamped known numeric params to this device's ranges.
             from execution_planner import ExecutionStep
             allowed.append(ExecutionStep(
                 device=step.device,

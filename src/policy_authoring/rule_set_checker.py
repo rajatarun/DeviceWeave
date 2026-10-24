@@ -25,7 +25,9 @@ Semantics mirrored from ``policy_engine/evaluator.py``
 -----------------------------------------------------
 * BLOCK beats MODIFY beats the default ALLOW; ``allow`` rules are informational
   and never override a block.
-* Among matching modifiers the newest wins (policies arrive newest-first).
+* Among matching rules of one type the lowest ``rule_id`` wins (then reason,
+  then canonical params). List order does not matter. This is the same order
+  as ``policy_engine.evaluator.rule_winner_key``.
 * A condition on a field absent from the context does not match. The analysis
   assumes every field is present — the case the rules were written for — and
   says so, because a missing field can only make a block *not* fire.
@@ -35,11 +37,11 @@ Semantics mirrored from ``policy_engine/evaluator.py``
 Findings
 --------
   unsatisfiable        error    the rule matches no possible context
-  shadowed             warning  a modify never applies: blocks or newer modifiers
+  shadowed             warning  a modify never applies: blocks or lower-id modifiers
                                 cover every context it matches
   conflict_block_allow warning  an allow and a block overlap; the block wins there
   conflict_modify      warning  two modifiers with different params overlap; the
-                                newer wins there
+                                lower rule id wins there
   redundant            info     a rule adds nothing: others with the same effect
                                 already cover it
   invariant_violated   error    a stated safety property has a counterexample
@@ -60,6 +62,8 @@ import math
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+
+from policy_engine.evaluator import rule_winner_key
 
 # Physical domain of each context field. Numbers outside it are not "possible
 # contexts", so ``humidity > 100`` is unsatisfiable rather than merely rare.
@@ -400,7 +404,7 @@ def _device(rule: Dict[str, Any]) -> str:
 
 
 def analyze(rules: Sequence[Dict[str, Any]], invariants: Sequence[Invariant] = ()) -> List[Finding]:
-    """Analyse a rule set. ``rules`` must be newest-first, as the evaluator receives them."""
+    """Analyse a rule set. Order does not matter; the lowest rule id wins a tie."""
     findings: List[Finding] = []
     by_device: Dict[str, List[Tuple[Dict[str, Any], List[Box]]]] = {}
     for rule in rules:
@@ -416,7 +420,7 @@ def analyze(rules: Sequence[Dict[str, Any]], invariants: Sequence[Invariant] = (
 
     for device, entries in by_device.items():
         blocks = [(r, g) for r, g in entries if _atype(r) == "block"]
-        for idx, (rule, region) in enumerate(entries):
+        for rule, region in entries:
             kind = _atype(rule)
             if kind == "allow":
                 for b, bg in blocks:
@@ -427,15 +431,16 @@ def analyze(rules: Sequence[Dict[str, Any]], invariants: Sequence[Invariant] = (
                             f"Allow rule {_rid(rule)} and block rule {_rid(b)} both match some contexts; "
                             "the block wins there, so the allow does not hold.", witness(w)))
             if kind == "modify":
-                newer_mods = [(r, g) for r, g in entries[:idx] if _atype(r) == "modify"]
-                cover = [box for _, g in blocks for box in g] + [box for _, g in newer_mods for box in g]
+                modifiers = [(r, g) for r, g in entries if _atype(r) == "modify" and r is not rule]
+                preferred = [(r, g) for r, g in modifiers if rule_winner_key(r) < rule_winner_key(rule)]
+                cover = [box for _, g in blocks for box in g] + [box for _, g in preferred for box in g]
                 if not region_minus(region, cover):
                     findings.append(Finding(
-                        "shadowed", "warning", [_rid(rule)] + [_rid(r) for r, _ in blocks + newer_mods], device,
+                        "shadowed", "warning", [_rid(rule)] + [_rid(r) for r, _ in blocks + preferred], device,
                         f"Modify rule {_rid(rule)} never applies: every context it matches is already "
-                        "blocked or claimed by a newer modifier.", witness(region[0])))
+                        "blocked or claimed by a modifier with a lower rule id.", witness(region[0])))
                 block_boxes = [box for _, g in blocks for box in g]
-                for other, og in newer_mods:
+                for other, og in preferred:
                     if _params(other) != _params(rule):
                         # Where a block also matches, neither modifier applies.
                         w = region_overlap(region, og, exclude=block_boxes)
@@ -443,7 +448,7 @@ def analyze(rules: Sequence[Dict[str, Any]], invariants: Sequence[Invariant] = (
                             findings.append(Finding(
                                 "conflict_modify", "warning", [_rid(other), _rid(rule)], device,
                                 f"Modifiers {_rid(other)} and {_rid(rule)} set different parameters for "
-                                f"some contexts; the newer ({_rid(other)}) wins there.", witness(w)))
+                                f"some contexts; the lower rule id ({_rid(other)}) wins there.", witness(w)))
             same = [box for r, g in entries if r is not rule and _atype(r) == kind
                     and (kind != "modify" or _params(r) == _params(rule)) for box in g]
             if same and not region_minus(region, same):
@@ -465,7 +470,9 @@ def analyze(rules: Sequence[Dict[str, Any]], invariants: Sequence[Invariant] = (
 
 def check_new_rule(new_rule: Dict[str, Any], existing: Sequence[Dict[str, Any]],
                    invariants: Sequence[Invariant] = ()) -> List[Finding]:
-    """Findings that involve ``new_rule`` when it is added (as the newest) to ``existing``.
+    """Findings that involve ``new_rule`` when it is added to ``existing``.
+
+    Precedence is the lowest rule id, not which rule was authored last.
 
     Controllability runs only for a new satisfiable block, and only for that
     block's device, under the request-path state cap and time budget. Allow
