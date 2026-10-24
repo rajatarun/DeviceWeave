@@ -37,7 +37,7 @@ Policy DSL JSON object.
 {
   "rule_id": "auto",
   "scope": {
-    "device_type": "<EXACTLY ONE OF: fan | light | ac | plug | heater>"
+    "device_type": "<EXACTLY ONE OF: fan | light | ac | plug | heater | switch | curtain | lock | camera | doorbell | garage_door | sensor | thermostat>"
   },
   "conditions": [
     {
@@ -57,7 +57,9 @@ Policy DSL JSON object.
 ## STRICT FIELD RULES — violation means you MUST return a rejection:
 
 1.  rule_id        : always "auto" — the system assigns the UUID.
-2.  device_type    : MUST be one of: fan, light, ac, plug, heater.
+2.  device_type    : MUST be one of: fan, light, ac, plug, heater, switch,
+                     curtain, lock, camera, doorbell, garage_door, sensor,
+                     thermostat.
                      No other device types are accepted.
 3.  conditions     : MUST contain at least 1 item.  Empty list → reject.
 4.  field          : MUST be one of: temperature, humidity, time_hour,
@@ -114,8 +116,8 @@ modification parameters.
 }
 
 Reject when:
-- The target device is NOT one of: fan, light, ac, plug, heater
-  (e.g. "dishwasher", "TV", "thermostat", "doorbell" → reject)
+- The target device is NOT one of the device_type values listed above
+  (e.g. "dishwasher", "TV" → reject)
 - The condition cannot be mapped to any allowed field
   (e.g. "when it rains", "if the door is open", "when I'm sleeping" → reject)
   NOTE: "cloudy", "overcast", "gloomy" → use is_overcast or cloud_cover_pct — do NOT reject

@@ -35,6 +35,8 @@ import operator as _op
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from policy_engine.device_types import canonical_device_type
+
 logger = logging.getLogger(__name__)
 
 # Device actions that are never blocked by any policy.
@@ -90,7 +92,9 @@ def compute_verdict(
     ----------
     policies    All active Policy DSL dicts for this device_type (pre-filtered
                 by the loader — but we defensively re-check device_type).
-    device_type The resolved device's type (fan, light, ac, plug, heater).
+    device_type The resolved device's type: an adapter routing key
+                (SmartBulb, GoveePlug, ...) or a scope class (light, plug, ...).
+                Both sides are compared via canonical_device_type().
     action      The requested device action (turn_on, set_brightness, …).
     context     Runtime context dict from context_provider.get_context().
     """
@@ -101,10 +105,13 @@ def compute_verdict(
 
     first_block: Optional[Dict[str, Any]] = None
     first_modifier: Optional[Dict[str, Any]] = None
+    device_class = canonical_device_type(device_type)
 
     for policy in policies:
-        # Defensive scope check (loader pre-filters but be explicit)
-        if policy.get("scope", {}).get("device_type") != device_type:
+        # Defensive scope check (loader pre-filters but be explicit).
+        # Compare in the canonical vocabulary so a "light" policy matches a
+        # SmartBulb / GoveeBulb / ... device.
+        if canonical_device_type(policy.get("scope", {}).get("device_type")) != device_class:
             continue
 
         conditions = policy.get("conditions", [])

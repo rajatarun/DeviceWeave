@@ -10,7 +10,7 @@ Validation sequence (all checks must pass for a policy to be accepted):
   2.  Rejection check    — LLM may have returned an explicit rejection object
   3.  Top-level whitelist — no fields outside the allowed set
   4.  Required fields    — rule_id, scope, conditions, action, confidence all present
-  5.  scope.device_type  — must be in the allowed enum
+  5.  scope.device_type  — resolved to its canonical class; must be in the allowed enum
   6.  conditions         — non-empty list
   7.  Per-condition      — field enum, operator enum, value type (numeric vs boolean)
   8.  action.type        — must be in the allowed enum
@@ -25,6 +25,8 @@ import logging
 import uuid
 from typing import Any, Dict
 
+from policy_engine.device_types import POLICY_SCOPE_TYPES, canonical_device_type
+
 logger = logging.getLogger(__name__)
 
 # Rules below this confidence threshold are rejected regardless of structure.
@@ -33,7 +35,9 @@ logger = logging.getLogger(__name__)
 CONFIDENCE_THRESHOLD: float = 0.85
 
 _ALLOWED_TOP_KEYS = frozenset({"rule_id", "scope", "conditions", "action", "confidence"})
-_ALLOWED_DEVICE_TYPES = frozenset({"fan", "light", "ac", "plug", "heater"})
+# Shared with the evaluator (policy_engine.device_types) so a compiled scope
+# always resolves to the same class as the adapter types it should match.
+_ALLOWED_DEVICE_TYPES = POLICY_SCOPE_TYPES
 _ALLOWED_CONDITION_FIELDS = frozenset({
     "temperature", "humidity", "time_hour",
     "cloud_cover_pct", "is_home", "is_overcast", "room",
@@ -99,10 +103,10 @@ def validate_policy(raw: Any) -> Dict[str, Any]:
             f"'scope' must contain exactly the field 'device_type', "
             f"got: {sorted(scope.keys())}."
         )
-    device_type = scope.get("device_type")
+    device_type = canonical_device_type(scope.get("device_type"))
     if device_type not in _ALLOWED_DEVICE_TYPES:
         raise ValidationError(
-            f"Invalid scope.device_type '{device_type}'. "
+            f"Invalid scope.device_type '{scope.get('device_type')}'. "
             f"Allowed values: {sorted(_ALLOWED_DEVICE_TYPES)}."
         )
 
@@ -173,7 +177,7 @@ def validate_policy(raw: Any) -> Dict[str, Any]:
 
     return {
         "rule_id": rule_id,
-        "scope": scope,
+        "scope": {"device_type": device_type},
         "conditions": conditions,
         "action": action,
         "confidence": confidence,
