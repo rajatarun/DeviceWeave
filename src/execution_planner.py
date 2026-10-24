@@ -7,7 +7,9 @@ Scene commands produce N steps (one per scene action) and run concurrently
 via asyncio.gather so total latency ≈ max(individual latencies).
 
 All capability checks are done here before any I/O so the provider
-adapters only receive validated, supported actions.
+adapters only receive validated, supported actions. Known numeric
+params are clamped to the device's capability ranges in ``_execute_one``
+before the adapter is called.
 """
 
 import asyncio
@@ -17,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import access_control
+from policy_engine.param_clamp import clamp_numeric_params
 from providers import ProviderError, get_provider
 
 logger = logging.getLogger(__name__)
@@ -140,7 +143,12 @@ async def _execute_one(step: ExecutionStep) -> StepResult:
         )
     try:
         provider = get_provider(device["device_type"])
-        result = await provider.execute(device, step.action, step.params)
+        # Last gate before the adapter. MODIFY replaces params wholesale;
+        # known numeric values (brightness, and duration when the device
+        # declares a range) are capped here even if a caller skipped the
+        # clamp when it applied the verdict.
+        params = clamp_numeric_params(step.params, device)
+        result = await provider.execute(device, step.action, params)
         logger.info(
             "_execute_one: success device_id=%s action=%s elapsed_ms=%.0f",
             device_id, step.action, (time.monotonic() - t0) * 1000,

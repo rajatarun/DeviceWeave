@@ -17,7 +17,7 @@ POST /execute dispatch order
   3. Tier 2 device     — Claude Haiku 4.5 via Bedrock (contextual / behavioral).
   4. Policy Engine     — check resolved (device_type, action) against DynamoDB rules.
                          BLOCK  → 403 Forbidden (no device I/O).
-                         MODIFY → updated params forwarded to execution.
+                         MODIFY → params replaced and clamped to the device's ranges.
                          ALLOW  → pass-through.
   5. Auto-learn        — successful resolutions written to learning table.
   6. Behavior record   — every successful execution recorded in Memgraph.
@@ -943,7 +943,7 @@ def _execute_device(
     # Policy Engine — enforce before any device I/O
     # ------------------------------------------------------------------
     policy_decision = policy_enforce(
-        device["device_type"], action, params, context=policy_ctx
+        device["device_type"], action, params, context=policy_ctx, device=device,
     )
     if policy_decision.is_blocked:
         logger.info(

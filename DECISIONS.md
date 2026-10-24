@@ -488,3 +488,17 @@ A refusal is HTTP 403 with `WWW-Authenticate: Bearer error="insufficient_scope",
 **Rollout**: `RestAuthMode` (repository variable `REST_AUTH_MODE`) is `enforce` by default. `audit` lets read and execute routes through with a log line, for the window while existing REST clients are given a token; destructive routes and the delegation rule are enforced in both modes.
 
 **Rejected**: an API Gateway authorizer (a second implementation of the token check, and the SIWE authorizer answers a different question — a human wallet session, not an agent token); leaving `GET /presence` public (it is the most sensitive read on the API: whether the house is empty); step-up on REST deletes (the REST functions have no jti ledger, and a deleted device comes back on the next ingest).
+
+---
+
+## 42. Stable rule winner, MODIFY range clamp, fail closed when the check raises
+
+**Chosen**: When two or more rules of the winning type match the same device class, action, and context, the winner is the lowest `rule_id` string, then the reason, then a canonical rendering of the params. BLOCK still beats MODIFY, which still beats the default ALLOW. The verdict was already independent of list order; the rule id, the reason, and the MODIFY params now are too. `rule_set_checker` and the Z3 cross-check use the same order, so a shadow or modify-conflict witness names the rule the evaluator applies.
+
+When a MODIFY verdict is applied to a device, known numeric params are clamped to that device's `capability_ranges` before actuation. Brightness defaults to 0–100 when the device does not declare a range. Duration, and any other numeric param, is clamped only when the device declares a range for it. `execution_planner._execute_one` applies the same clamp immediately before the adapter call, so a caller cannot forward an unclamped value.
+
+The four conversational-agent tool handlers catch a policy-check exception and return an error without calling the adapter: `bedrock_agent._tool_execute_device_command`, `bedrock_agent._tool_execute_scene`, `gemini_agent.execute_device_command`, and `gemini_agent.execute_scene`.
+
+**Rejected**: keeping list order or "newest first" (the loader's scan order is not a creation order, and shuffling the same rules changed the reported rule); merging MODIFY params; inventing a duration bound the device did not declare; continuing with no verdict when the policy check raises.
+
+**Not covered**: `turn_off` and `get_status` stay exempt from BLOCK. Scope is still the device class only. No adapter type maps to `heater` or `ac`.

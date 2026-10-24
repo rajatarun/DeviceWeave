@@ -72,11 +72,21 @@ def test_modify_under_a_block_is_shadowed():
     assert ("shadowed", ("dim",)) in kinds(C.analyze(rules))
 
 
-def test_newer_modifier_shadows_an_older_one_it_contains():
-    rules = [R("new", "light", [("time_hour", ">=", 20)], "modify", {"brightness": 5}),
-             R("old", "light", [("time_hour", ">=", 22)], "modify", {"brightness": 30})]
-    got = kinds(C.analyze(rules))
-    assert ("shadowed", ("old",)) in got and ("conflict_modify", ("new", "old")) in got
+def test_lower_rule_id_modifier_shadows_one_it_contains():
+    # "new" < "old". The wider, lower-id modifier wins wherever they overlap,
+    # and it covers the narrower rule, in either list order.
+    wide = R("new", "light", [("time_hour", ">=", 20)], "modify", {"brightness": 5})
+    narrow = R("old", "light", [("time_hour", ">=", 22)], "modify", {"brightness": 30})
+    ctx = {"temperature": 70.0, "humidity": 50.0, "cloud_cover_pct": 0,
+           "is_overcast": False, "time_hour": 23, "is_home": True}
+    for rules in ([wide, narrow], [narrow, wide]):
+        got = kinds(C.analyze(rules))
+        assert ("shadowed", ("old",)) in got and ("conflict_modify", ("new", "old")) in got
+        decision = compute_verdict(rules, "light", "turn_on", ctx)
+        assert decision.verdict == "modify"
+        assert decision.rule_id == "new"
+        assert decision.reason == "r"
+        assert decision.modified_params == {"brightness": 5}
 
 
 def test_modifier_overlap_inside_a_block_is_not_a_conflict():
@@ -164,7 +174,10 @@ def test_every_witness_reproduces_its_finding_in_the_real_evaluator():
             elif f.kind == "conflict_modify":
                 d = compute_verdict(rules, "light", "turn_on", f.witness)
                 assert d.verdict == "modify"
-                assert d.rule_id not in f.rule_ids[1:], "the older modifier must not be the one applied"
+                assert d.rule_id not in f.rule_ids[1:], "a losing modifier must not be the one applied"
+                same_id = [r for r in rules if r["rule_id"] == d.rule_id]
+                if len(same_id) == 1:
+                    assert d.modified_params == (same_id[0]["action"].get("params") or {})
                 checked += 1
     assert checked > 20
 

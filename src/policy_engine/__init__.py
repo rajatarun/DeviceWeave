@@ -16,7 +16,7 @@ Pipeline position:
               │  3. Evaluate conditions           │
               │  4. Compute verdict               │
               │     BLOCK  → 403, no I/O          │
-              │     MODIFY → updated params       │
+              │     MODIFY → params, then clamped │
               │     ALLOW  → pass-through         │
               └───────────────────────────────────┘
                          ↓
