@@ -1,0 +1,22 @@
+[
+  {"person": "Raja", "room": "Kitchen", "node": "Office eero", "signal_bucket": 5, "local_hour": 8, "weekday": 0, "source": "record"},
+  {"person": "Raja", "room": "Kitchen", "node": "Office eero", "signal_bucket": 5, "local_hour": 12, "weekday": 1, "source": "record"},
+  {"person": "Raja", "room": "Kitchen", "node": "Office eero", "signal_bucket": 5, "local_hour": 18, "weekday": 2, "source": "record"},
+  {"person": "Raja", "room": "Living room", "node": "Family Room eero", "signal_bucket": 5, "local_hour": 19, "weekday": 3, "source": "record"},
+  {"person": "Raja", "room": "Living room", "node": "Family Room eero", "signal_bucket": 5, "local_hour": 20, "weekday": 4, "source": "record"},
+  {"person": "Raja", "room": "Living room", "node": "Family Room eero", "signal_bucket": 5, "local_hour": 17, "weekday": 5, "source": "record"},
+  {"person": "Raja", "room": "Living room", "node": "Family Room eero", "signal_bucket": 5, "local_hour": 16, "weekday": 6, "source": "record"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 23, "weekday": 0, "source": "schedule_rule"},
+  {"person": "Raja", "room": "Master Bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 0, "weekday": 1, "source": "schedule_rule"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 1, "weekday": 2, "source": "schedule_rule"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 2, "weekday": 3, "source": "schedule_rule"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 5, "weekday": 4, "source": "schedule_rule"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 22, "weekday": 5, "source": "record"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 7, "weekday": 6, "source": "record"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 6, "weekday": 0, "source": "schedule_rule"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 3, "weekday": 1, "source": "schedule_rule"},
+  {"person": "Raja", "room": "Living room", "node": "Family Room eero", "signal_bucket": 5, "local_hour": 15, "weekday": 2, "source": "record"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 4, "weekday": 3, "source": "schedule_rule"},
+  {"person": "Raja", "room": "Kitchen", "node": "Office eero", "signal_bucket": 5, "local_hour": 7, "weekday": 4, "source": "record"},
+  {"person": "Raja", "room": "Master bedroom", "node": "Family Room eero", "signal_bucket": 4, "local_hour": 21, "weekday": 5, "source": "record"}
+]

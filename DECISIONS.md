@@ -502,3 +502,13 @@ The four conversational-agent tool handlers catch a policy-check exception and r
 **Rejected**: keeping list order or "newest first" (the loader's scan order is not a creation order, and shuffling the same rules changed the reported rule); merging MODIFY params; inventing a duration bound the device did not declare; continuing with no verdict when the policy check raises.
 
 **Not covered**: `turn_off` and `get_status` stay exempt from BLOCK. Scope is still the device class only. No adapter type maps to `heater` or `ac`.
+
+---
+
+## 43. Check-in Naive Bayes room model beside fingerprints
+
+**Chosen**: Labeled room check-ins (including schedule-rule rows) train a dependency-free multinomial Naive Bayes classifier over node, signal bucket, node+bucket, local hour, and weekday. The model is stored on the room fingerprint table as ``pk=classifier#<person>``, ``sk=model#v1``. The presence poller loads it from the same scan, applies it before fingerprint distance matching, and falls back to fingerprints when the model is missing or returns ``unknown``. Overnight schedule rules still overwrite the room afterward with confidence 1.0. Retrain with ``scripts/train_room_classifier.py``.
+
+**Rejected**: sklearn or other heavy ML stacks in Lambda; replacing fingerprints entirely (calibration samples still seed cold start); storing the model only in the check-in table (poller already scans fingerprints, not check-ins); letting a classifier failure change ``is_home`` (failures carry the last room forward).
+
+**Not covered**: Per-person models only; rooms with no check-ins still depend on fingerprints; class imbalance and sparse rooms (e.g. Game Room) need more labels before the model beats ``unknown``.

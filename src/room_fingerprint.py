@@ -346,7 +346,13 @@ def load_all(table: Any) -> List[Dict[str, Any]]:
     kwargs: Dict[str, Any] = {}
     while True:
         resp = table.scan(**kwargs)
-        items.extend(item for item in (resp.get("Items") or []) if isinstance(item, dict))
+        for item in resp.get("Items") or []:
+            if not isinstance(item, dict):
+                continue
+            pk = str(item.get("pk") or "")
+            if pk.startswith("classifier#"):
+                continue
+            items.append(item)
         last = resp.get("LastEvaluatedKey")
         if not last:
             return items
