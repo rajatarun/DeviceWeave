@@ -507,7 +507,7 @@ The four conversational-agent tool handlers catch a policy-check exception and r
 
 ## 43. Check-in Naive Bayes room model beside fingerprints
 
-**Chosen**: Labeled room check-ins (including schedule-rule rows) train a dependency-free multinomial Naive Bayes classifier over node, signal bucket, node+bucket, local hour, and weekday. The model is stored on the room fingerprint table as ``pk=classifier#<person>``, ``sk=model#v1``. The presence poller loads it from the same scan, applies it before fingerprint distance matching, and falls back to fingerprints when the model is missing or returns ``unknown``. Overnight schedule rules still overwrite the room afterward with confidence 1.0. Retrain with ``scripts/train_room_classifier.py``.
+**Chosen**: Labeled room check-ins train a dependency-free multinomial Naive Bayes classifier (human-confirmed rows only; see #44) over node, signal bucket, node+bucket, local hour, and weekday. The model is stored on the room fingerprint table as ``pk=classifier#<person>``, ``sk=model#v1``. The presence poller loads it from the same scan, applies it before fingerprint distance matching, and falls back to fingerprints when the model is missing or returns ``unknown``. Overnight schedule rules still overwrite the room afterward with confidence 1.0. Retrain with ``scripts/train_room_classifier.py``.
 
 **Rejected**: sklearn or other heavy ML stacks in Lambda; replacing fingerprints entirely (calibration samples still seed cold start); storing the model only in the check-in table (poller already scans fingerprints, not check-ins); letting a classifier failure change ``is_home`` (failures carry the last room forward).
 
