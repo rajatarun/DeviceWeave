@@ -333,3 +333,42 @@ def test_llm_gate_uses_its_own_threshold(monkeypatch):
 
     assert response["statusCode"] == 200
     assert _body(response)["resolution_tier"] == "llm"
+
+
+def test_llm_tier_auto_learns_synthesized_phrase_not_full_utterance(monkeypatch):
+    """Tier-2 must not store evaluation-style template text as a learned phrase."""
+    _stub_execute_pipeline(monkeypatch, final_score=0.1)
+    monkeypatch.setattr(app, "DEVICE_CONFIDENCE_THRESHOLD", 0.95)
+    monkeypatch.setattr(app, "LLM_CONFIDENCE_THRESHOLD", 0.7)
+    monkeypatch.setattr(app, "_get_active_catalog", lambda: [DEVICE])
+    monkeypatch.setattr(app, "is_configured", lambda: True)
+    monkeypatch.setattr(app, "LEARNING_THRESHOLD", 0.5)
+
+    saved: list[tuple[str, str, float]] = []
+
+    def _capture(device_id, phrase, confidence):
+        saved.append((device_id, phrase, confidence))
+        return True
+
+    monkeypatch.setattr(app, "save_learned_phrase", _capture)
+
+    template_cmd = (
+        "what is the current status of the office light? "
+        "do not change anything, only report status."
+    )
+    monkeypatch.setattr(
+        app, "llm_resolve",
+        lambda command, action, catalog: {
+            "devices": [{"device_id": "office_light", "action": "turn_on", "params": {}}],
+            "confidence": 0.95,
+            "reasoning": "office light",
+        },
+    )
+
+    response = app.handler(_event("POST", "/execute", {"command": template_cmd}), None)
+
+    assert response["statusCode"] == 200
+    assert len(saved) == 1
+    assert saved[0][0] == "office_light"
+    assert saved[0][1] == "turn on office light"
+    assert template_cmd not in saved[0][1]
