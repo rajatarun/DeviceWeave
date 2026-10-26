@@ -53,6 +53,7 @@ from execution_planner import (
     plan_scene_execution,
 )
 from intent_parser import Intent, parse_intent
+from learning_phrase import auto_learn_phrase
 from learning_store import (
     LEARNING_THRESHOLD,
     is_configured,
@@ -708,8 +709,15 @@ def _handle_scene(
     failures = [r for r in results if not r.success]
 
     for result in successes:
-        if is_configured() and confidence >= LEARNING_THRESHOLD:
-            save_learned_phrase(result.device_id, original_command, confidence)
+        device_ref = next(
+            (d for d in _get_active_catalog() if d["id"] == result.device_id),
+            {"id": result.device_id, "name": result.device_id},
+        )
+        learn_phrase = auto_learn_phrase(
+            device_ref, result.action, original_command, resolution_tier="cosine",
+        )
+        if is_configured() and confidence >= LEARNING_THRESHOLD and learn_phrase:
+            save_learned_phrase(result.device_id, learn_phrase, confidence)
         graph_engine.record_event(result.device_id, result.action, original_command)
 
     resp: Dict[str, Any] = {
@@ -763,8 +771,15 @@ def _execute_llm_devices(
     failures = [r for r in results if not r.success]
 
     for result in successes:
-        if is_configured() and confidence >= LEARNING_THRESHOLD:
-            save_learned_phrase(result.device_id, original_command, confidence)
+        device_ref = next(
+            (d for d in _get_active_catalog() if d["id"] == result.device_id),
+            {"id": result.device_id, "name": result.device_id},
+        )
+        learn_phrase = auto_learn_phrase(
+            device_ref, result.action, original_command, resolution_tier="llm",
+        )
+        if is_configured() and confidence >= LEARNING_THRESHOLD and learn_phrase:
+            save_learned_phrase(result.device_id, learn_phrase, confidence)
         graph_engine.record_event(result.device_id, result.action, original_command)
 
     resp: Dict[str, Any] = {
@@ -988,9 +1003,12 @@ def _execute_device(
         confidence, cosine_score, behavior_score,
     )
 
-    # Auto-learn
-    if is_configured() and confidence >= LEARNING_THRESHOLD:
-        save_learned_phrase(device["id"], original_command, confidence)
+    # Auto-learn — never persist raw tier-2 / templated wrapper text (learning_phrase).
+    learn_phrase = auto_learn_phrase(
+        device, action, original_command, resolution_tier=tier,
+    )
+    if is_configured() and confidence >= LEARNING_THRESHOLD and learn_phrase:
+        save_learned_phrase(device["id"], learn_phrase, confidence)
         if tier == "llm":
             invalidate_learned_phrases_cache()
 
