@@ -29,6 +29,15 @@ SMOOTHING = 1.0  # Laplace add-one
 MIN_TRAIN_ROWS = 8
 MARGIN_FLOOR = 0.12  # top-two log-prob gap before calling a winner
 NOT_HOME_LABELS = frozenset({"not home"})
+# Rows the system wrote without a human confirmation — not training labels.
+TRAINING_LABEL_EXCLUDED_SOURCES = frozenset(
+    {
+        "schedule_rule",
+        "hourly-checkin",
+        "hourly-routine",
+        "hourly_routine",
+    }
+)
 
 
 class TrainError(ValueError):
@@ -97,10 +106,24 @@ def save_model(table: Any, person: str, model: Dict[str, Any], updated_at: str) 
     table.put_item(Item=presence_store.to_dynamo(model_item(person, model, updated_at)))
 
 
+def training_label_source(row: Mapping[str, Any]) -> str:
+    return str(row.get("source") or "").strip().casefold()
+
+
+def is_training_label(row: Mapping[str, Any]) -> bool:
+    """True when the row is a human-confirmed label suitable for training."""
+    if training_label_source(row) in TRAINING_LABEL_EXCLUDED_SOURCES:
+        return False
+    room = row.get("room")
+    return isinstance(room, str) and bool(room.strip())
+
+
 def canonical_room_labels(rows: Sequence[Mapping[str, Any]]) -> Dict[str, str]:
     """Map casefold room key to the most common original spelling."""
     counts: Dict[str, Counter] = defaultdict(Counter)
     for row in rows:
+        if not is_training_label(row):
+            continue
         room = row.get("room")
         if not isinstance(room, str) or not room.strip():
             continue
@@ -181,6 +204,8 @@ def train_rows(
     labeled: List[Tuple[Dict[str, str], str]] = []
     for row in checkins:
         if wanted and str(row.get("person") or "").casefold() != wanted:
+            continue
+        if not is_training_label(row):
             continue
         room_key = normalize_training_room(row.get("room"), canonical)
         if room_key is None:
@@ -386,7 +411,7 @@ def leave_one_out_eval(labeled: Sequence[Tuple[Dict[str, str], str]], canonical:
 def training_checkins_from_table(table: Any, person: Optional[str] = None) -> List[Dict[str, Any]]:
     import room_checkin
 
-    return room_checkin.list_checkins(table, person=person, limit=room_checkin.MAX_LIMIT)
+    return room_checkin.list_all_checkins(table, person=person)
 
 
 def train_from_checkins(

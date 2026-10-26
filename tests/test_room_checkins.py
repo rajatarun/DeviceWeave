@@ -157,6 +157,46 @@ def test_record_stores_hmac_chicago_features_and_json_numbers(monkeypatch, caplo
         assert "Raja phone" not in caplog.text
 
 
+def test_record_stamps_presence_prediction_at_capture_time(monkeypatch):
+    with mock_aws():
+        resource = boto3.resource("dynamodb", region_name="us-east-1")
+        checkins = _table(resource, "checkins", sort=True)
+        presence = _table(resource, "presence")
+        _table(resource, "tracked")
+        monkeypatch.setenv("PRESENCE_TABLE_NAME", "presence")
+        _ready(monkeypatch, resource)
+        _install(monkeypatch, _routes())
+        presence.put_item(
+            Item={
+                "pk": "home_state",
+                "people": [
+                    {
+                        "person": "Raja",
+                        "is_home": True,
+                        "room": "Living room",
+                        "room_confidence": Decimal("0.82"),
+                        "room_source": "fingerprint",
+                    }
+                ],
+            }
+        )
+
+        response = eero_calibration_handler.handler(
+            _http("POST", "/presence/checkins", {"person": "Raja", "room": "Office", "asked_at": ASKED}),
+            None,
+        )
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["predicted_room"] == "Living room"
+        assert body["predicted_confidence"] == 0.82
+        assert body["predicted_source"] == "fingerprint"
+
+        stored = presence_store.from_dynamo(_stored_rows(checkins)[0])
+        assert stored["predicted_room"] == "Living room"
+        assert stored["predicted_confidence"] == 0.82
+        assert stored["predicted_source"] == "fingerprint"
+
+
 def test_capture_then_label_keeps_the_ask_time_reading(monkeypatch):
     with mock_aws():
         resource = boto3.resource("dynamodb", region_name="us-east-1")
