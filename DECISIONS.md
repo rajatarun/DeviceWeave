@@ -507,8 +507,18 @@ The four conversational-agent tool handlers catch a policy-check exception and r
 
 ## 43. Check-in Naive Bayes room model beside fingerprints
 
-**Chosen**: Labeled room check-ins (including schedule-rule rows) train a dependency-free multinomial Naive Bayes classifier over node, signal bucket, node+bucket, local hour, and weekday. The model is stored on the room fingerprint table as ``pk=classifier#<person>``, ``sk=model#v1``. The presence poller loads it from the same scan, applies it before fingerprint distance matching, and falls back to fingerprints when the model is missing or returns ``unknown``. Overnight schedule rules still overwrite the room afterward with confidence 1.0. Retrain with ``scripts/train_room_classifier.py``.
+**Chosen**: Labeled room check-ins train a dependency-free multinomial Naive Bayes classifier (human-confirmed rows only; see #44) over node, signal bucket, node+bucket, local hour, and weekday. The model is stored on the room fingerprint table as ``pk=classifier#<person>``, ``sk=model#v1``. The presence poller loads it from the same scan, applies it before fingerprint distance matching, and falls back to fingerprints when the model is missing or returns ``unknown``. Overnight schedule rules still overwrite the room afterward with confidence 1.0. Retrain with ``scripts/train_room_classifier.py``.
 
 **Rejected**: sklearn or other heavy ML stacks in Lambda; replacing fingerprints entirely (calibration samples still seed cold start); storing the model only in the check-in table (poller already scans fingerprints, not check-ins); letting a classifier failure change ``is_home`` (failures carry the last room forward).
 
 **Not covered**: Per-person models only; rooms with no check-ins still depend on fingerprints; class imbalance and sparse rooms (e.g. Game Room) need more labels before the model beats ``unknown``.
+
+---
+
+## 44. Classifier training uses human labels only, all rows, and stamps the prior guess
+
+**Chosen**: ``train_rows`` and ``scripts/train_room_classifier.py`` skip check-ins whose ``source`` is ``schedule_rule`` or an hourly routine alias (``hourly-checkin``, ``hourly-routine``, ``hourly_routine``). Schedule and poller-written rows stay in DynamoDB for audit; they are not treated as Raja-confirmed rooms. Training loads every row via ``list_all_checkins`` (paged query/scan, oldest first), not ``list_checkins`` capped at 200. ``record_room_checkin`` and ``capture_room_reading`` copy ``room``, ``room_confidence``, and ``room_source`` from the current ``home_state`` person entry into ``predicted_room``, ``predicted_confidence``, and ``predicted_source`` at ask/capture time; ``label_room_checkin`` does not re-read presence. Rows without those fields still train.
+
+**Rejected**: Deleting schedule check-ins to keep training honest (they document what the schedule assumed); raising the public list limit to 200+ for training; re-fetching eero on label to refresh the prediction (the label is about the ask-time guess).
+
+**Not covered**: Automatic retrain on new labels; using ``predicted_*`` in the model features (measurement only for now).

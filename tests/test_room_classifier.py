@@ -47,6 +47,61 @@ def test_train_and_leave_one_out_on_fixture():
     assert model["canonical"]["master bedroom"] == "Master bedroom"
 
 
+def test_train_rows_exclude_schedule_and_hourly_sources():
+    rows = _fixture_rows()
+    schedule_count = sum(1 for row in rows if row.get("source") == "schedule_rule")
+    assert schedule_count >= 3
+    labeled, _ = room_classifier.train_rows(rows, person="Raja")
+    assert len(labeled) == len(rows) - schedule_count
+    hourly = dict(rows[0])
+    hourly["source"] = "hourly_routine"
+    hourly["room"] = "Kitchen"
+    labeled2, _ = room_classifier.train_rows(rows + [hourly], person="Raja")
+    assert len(labeled2) == len(labeled)
+
+
+def test_training_checkins_from_table_pages_all_rows():
+    import boto3
+    import room_checkin
+    from moto import mock_aws
+
+    with mock_aws():
+        resource = boto3.resource("dynamodb", region_name="us-east-1")
+        table = resource.create_table(
+            TableName="checkins",
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},
+                {"AttributeName": "sk", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        table.wait_until_exists()
+        base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        for index in range(250):
+            moment = base.replace(minute=index % 60, hour=12 + index // 60)
+            table.put_item(
+                Item={
+                    "pk": "person#raja",
+                    "sk": f"{moment.strftime('%Y%m%dT%H%M%SZ')}~{index:04x}",
+                    "person": "Raja",
+                    "room": "Kitchen",
+                    "source": "record",
+                    "node": "Office eero",
+                    "signal_bucket": 5,
+                    "local_hour": 8,
+                    "weekday": 0,
+                }
+            )
+        capped = room_checkin.list_checkins(table, person="Raja", limit=room_checkin.MAX_LIMIT)
+        assert len(capped) == room_checkin.MAX_LIMIT
+        all_rows = room_classifier.training_checkins_from_table(table, person="Raja")
+        assert len(all_rows) == 250
+
+
 def test_living_vs_master_on_family_room_node():
     model = room_classifier.train_from_checkins(_fixture_rows(), person="Raja")
     living_feats = {

@@ -53,6 +53,9 @@ _PUBLIC_KEYS = (
     "freshness",
     "last_seen",
     "is_home",
+    "predicted_room",
+    "predicted_confidence",
+    "predicted_source",
 )
 
 
@@ -199,6 +202,21 @@ def list_checkins(
     return [public_record(item) for item in items]
 
 
+def list_all_checkins(
+    table: Any,
+    person: Any = None,
+    since: Any = None,
+) -> List[Dict[str, Any]]:
+    """All matching rows, oldest first. For training loads; API list stays capped."""
+    start = parse_since(since)
+    person_name = _person(person) if person else None
+    if person_name:
+        items = _query_all(table, person_name, start)
+    else:
+        items = _scan_all(table, start)
+    return [public_record(item) for item in items]
+
+
 def delete_checkin(table: Any, checkin_id: Any) -> int:
     person_fold, sk = _parse_id(checkin_id)
     existing = table.get_item(Key={"pk": _pk(person_fold), "sk": sk}).get("Item")
@@ -285,7 +303,17 @@ def _item(
         item["room"] = room
     if answered_at is not None:
         item["answered_at"] = _iso(answered_at)
-    for key in ("device_hmac", "node", "signal", "signal_bucket", "last_seen", "is_home"):
+    for key in (
+        "device_hmac",
+        "node",
+        "signal",
+        "signal_bucket",
+        "last_seen",
+        "is_home",
+        "predicted_room",
+        "predicted_confidence",
+        "predicted_source",
+    ):
         value = reading.get(key)
         if value is not None and value != "":
             item[key] = value
@@ -333,6 +361,7 @@ def _reading(person: str) -> Dict[str, Any]:
         reading["signal"] = signal.strip()[:40]
     if digest:
         reading["device_hmac"] = digest
+    reading.update(_presence_prediction(person))
     return reading
 
 
@@ -400,15 +429,64 @@ def _load(table: Any, checkin_id: Any) -> Optional[Dict[str, Any]]:
     return item if isinstance(item, dict) else None
 
 
+def _presence_prediction(person: str) -> Dict[str, Any]:
+    """Room assignment on the home_state item at capture/record time (not re-read on label)."""
+    table_name = os.environ.get("PRESENCE_TABLE_NAME", "").strip()
+    if not table_name:
+        return {}
+    try:
+        import aws_clients
+
+        table = aws_clients.get_dynamodb_resource().Table(table_name)
+        home = presence_store.read_home(table)
+    except Exception:
+        return {}
+    if not home:
+        return {}
+    data = presence_store.from_dynamo(home)
+    wanted = person.casefold()
+    for raw in data.get("people") or []:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("person") or "").casefold() != wanted:
+            continue
+        out: Dict[str, Any] = {}
+        room = raw.get("room")
+        if isinstance(room, str) and room.strip():
+            out["predicted_room"] = room.strip()
+        conf = raw.get("room_confidence")
+        if conf is not None and not isinstance(conf, bool):
+            try:
+                out["predicted_confidence"] = round(float(conf), 2)
+            except (TypeError, ValueError):
+                pass
+        src = raw.get("room_source")
+        if isinstance(src, str) and src.strip():
+            out["predicted_source"] = src.strip()
+        return out
+    return {}
+
+
 def _query(table: Any, person: str, since: Optional[datetime], limit: int) -> List[Dict[str, Any]]:
+    return _query_all(table, person, since)[:limit]
+
+
+def _query_all(table: Any, person: str, since: Optional[datetime]) -> List[Dict[str, Any]]:
     from boto3.dynamodb.conditions import Key
 
     pk = _pk(person.casefold())
     condition = Key("pk").eq(pk)
     if since is not None:
         condition = condition & Key("sk").gte(_compact(since))
-    resp = table.query(KeyConditionExpression=condition, Limit=limit, ScanIndexForward=True)
-    return [item for item in resp.get("Items") or [] if isinstance(item, dict)]
+    found: List[Dict[str, Any]] = []
+    kwargs: Dict[str, Any] = {"KeyConditionExpression": condition, "ScanIndexForward": True}
+    while True:
+        resp = table.query(**kwargs)
+        found.extend(item for item in (resp.get("Items") or []) if isinstance(item, dict))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            return found
+        kwargs["ExclusiveStartKey"] = last
 
 
 def _scan(table: Any, since: Optional[datetime], limit: int) -> List[Dict[str, Any]]:
@@ -429,6 +507,10 @@ def _scan(table: Any, since: Optional[datetime], limit: int) -> List[Dict[str, A
         kwargs["ExclusiveStartKey"] = last
     found.sort(key=lambda item: str(item.get("sk") or ""))
     return found[:limit]
+
+
+def _scan_all(table: Any, since: Optional[datetime]) -> List[Dict[str, Any]]:
+    return _scan(table, since, limit=2**31 - 1)
 
 
 def _pk(person_fold: str) -> str:
