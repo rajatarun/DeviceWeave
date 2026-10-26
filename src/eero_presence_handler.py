@@ -27,6 +27,7 @@ import aws_clients
 import eero_client
 import eero_presence
 import presence_store
+import room_classifier
 import room_fingerprint
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -222,16 +223,33 @@ def _assign_rooms(
         logger.error("room classification skipped reason=hmac_secret_empty")
         room_fingerprint.carry_forward(updated, previous)
         return
+    table = aws_clients.get_dynamodb_resource().Table(table_name)
     try:
-        fingerprints = room_fingerprint.load_all(
-            aws_clients.get_dynamodb_resource().Table(table_name)
-        )
+        raw_items = room_classifier.load_all_including_models(table)
     except Exception:
         logger.error("room classification skipped reason=fingerprint_table_unreadable")
         room_fingerprint.carry_forward(updated, previous)
         return
+    try:
+        fingerprints = room_classifier.fingerprint_items(raw_items)
+        models = room_classifier.load_models(raw_items)
+    except Exception:
+        logger.error("room classification skipped reason=model_parse_failed")
+        room_fingerprint.carry_forward(updated, previous)
+        return
     readings = _readings(tracked, clients, key)
-    room_fingerprint.apply_rooms(updated, previous, readings, fingerprints)
+    moment = datetime.fromisoformat(_now())
+    try:
+        if models:
+            room_classifier.apply_with_models(
+                updated, previous, readings, fingerprints, models, moment
+            )
+        else:
+            room_fingerprint.apply_rooms(updated, previous, readings, fingerprints)
+    except Exception:
+        logger.error("room classification skipped reason=apply_failed")
+        room_fingerprint.carry_forward(updated, previous)
+        return
     logger.info(
         "room classification room=%s confidence=%s",
         updated.get("room"),
